@@ -1,0 +1,1513 @@
+/**
+ * Base agent class for all Skyloom agents.
+ *
+ * Provides the core LLM reasoning loop, tool execution, memory management,
+ * skill activation, and inter-agent communication.
+ */
+
+import { Event, EventType, MessageBus } from './bus';
+import { TASK_DONE_SENTINEL } from './constants';
+import { LLMClient, type LLMResponse, type ToolCall } from './llm';
+import { getLogger } from './logger';
+import { Memory, Message } from './memory';
+import { Skill, SkillRegistry } from './skill';
+import { type ToolDefinition, type ToolParameter, ToolRegistry } from './tool';
+import {
+  parseToolArgs,
+  looksLikeFailedToolResult,
+  extractFilePathsFromMessages,
+  enrichResponseWithArtifacts,
+  toolCallSignature,
+  textSimilarity,
+  formatArgsParseError,
+  suggestToolNames,
+  toolStatusLabel,
+  synthesizeDelegationSummary,
+  SIG_WINDOW,
+  SIG_LOOP_HINT,
+  SIG_LOOP_HARDSTOP,
+} from './agent_helpers';
+import { selectRelevantTools } from './tool_router';
+
+const log = getLogger('agent');
+
+export enum AgentState {
+  IDLE = 'idle',
+  THINKING = 'thinking',
+  ACTING = 'acting',
+  WAITING = 'waiting',
+  ERROR = 'error',
+}
+
+export enum TaskState {
+  PENDING = 'pending',
+  RUNNING = 'running',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+  SKIPPED = 'skipped',
+}
+
+const VALID_TRANSITIONS: Record<TaskState, Set<TaskState>> = {
+  [TaskState.PENDING]: new Set([TaskState.RUNNING, TaskState.SKIPPED, TaskState.FAILED]),
+  [TaskState.RUNNING]: new Set([TaskState.RUNNING, TaskState.COMPLETED, TaskState.FAILED]),
+  [TaskState.FAILED]: new Set([TaskState.RUNNING, TaskState.SKIPPED]),
+  [TaskState.COMPLETED]: new Set(),
+  [TaskState.SKIPPED]: new Set(),
+};
+
+export class Task {
+  id: string;
+  description: string;
+  assignedTo: string | null = null;
+  parentId: string | null = null;
+  dependsOn: string[] = [];
+  status: TaskState = TaskState.PENDING;
+  priority: number = 0;
+  result: string | null = null;
+  metadata: Record<string, any> = {};
+
+  constructor(config: {
+    id: string;
+    description: string;
+    assignedTo?: string | null;
+    parentId?: string | null;
+    dependsOn?: string[];
+    status?: TaskState;
+    priority?: number;
+    result?: string | null;
+    metadata?: Record<string, any>;
+  }) {
+    this.id = config.id;
+    this.description = config.description;
+    this.assignedTo = config.assignedTo ?? null;
+    this.parentId = config.parentId ?? null;
+    this.dependsOn = config.dependsOn || [];
+    this.status = config.status ?? TaskState.PENDING;
+    this.priority = config.priority ?? 0;
+    this.result = config.result ?? null;
+    this.metadata = config.metadata || {};
+  }
+
+  transitionTo(newState: TaskState): void {
+    const allowed = VALID_TRANSITIONS[this.status] || new Set();
+    if (!allowed.has(newState)) {
+      throw new Error(
+        `Invalid task state transition: ${this.status} -> ${newState}`
+      );
+    }
+    this.status = newState;
+  }
+
+  get allDeps(): string[] {
+    const deps = [...this.dependsOn];
+    if (this.parentId && !deps.includes(this.parentId)) {
+      deps.push(this.parentId);
+    }
+    return deps;
+  }
+}
+
+export class TaskResult {
+  success: boolean;
+  content: string;
+  data: Record<string, any> = {};
+
+  constructor(success: boolean, content: string, data?: Record<string, any>) {
+    this.success = success;
+    this.content = content;
+    this.data = data || {};
+  }
+}
+
+// Re-export Message type from memory for convenience
+export type { Message };
+
+export class BaseAgent {
+  name: string = '';
+  displayName: string = '';
+  emoji: string = '';
+  specialty: string = '';
+  systemPrompt: string = '';
+  toolNames: string[] = [];
+  skillNames: string[] = [];
+
+  protected config: any; // SkyloomConfig type
+  protected llm: LLMClient;
+  protected bus: MessageBus;
+  protected toolRegistry: ToolRegistry;
+  protected skillRegistry: SkillRegistry;
+  public state: AgentState = AgentState.IDLE;
+  public memory: Memory;
+  protected _tools: ToolDefinition[] = [];
+  protected _skills: Skill[] = [];
+  protected _activeSkills: Set<string> = new Set();
+  protected _skillTools: Map<string, string[]> = new Map();
+  protected _skillConfigOverrides: Map<string, Record<string, any>> = new Map();
+  protected _baseSystemPrompt: string = '';
+  protected _maxToolRounds: number = 20;
+  protected _maxToolRoundsHardCap: number = 40;
+  protected _userTurnsSinceExtract: number = 0;
+  protected _pendingExtracts: Set<Promise<any>> = new Set();
+  protected _pendingRequests: Map<string, { resolve: (value: string) => void; reject: (err: Error) => void }> = new Map();
+  protected _bgTasks: Set<Promise<void>> = new Set();
+  approvalCallback: ((toolName: string, args: Record<string, any>) => Promise<boolean>) | null = null;
+  protected _turnLock: Promise<void> = Promise.resolve();
+  private _turnLockCounter: number = 0;
+  private _turnLockResolve: (() => void) | null = null;
+
+  // Time-tag cache (shared across all instances, 30s TTL)
+  private static _timeTag: string | null = null;
+  private static _timeTagTs: number = 0.0;
+
+  constructor(
+    config: any,
+    llm: LLMClient,
+    bus: MessageBus,
+    toolRegistry: ToolRegistry,
+    skillRegistry?: SkillRegistry | null
+  ) {
+    this.config = config;
+    this.llm = llm;
+    this.bus = bus;
+    this.toolRegistry = toolRegistry;
+    this.skillRegistry = skillRegistry || new SkillRegistry();
+    this.memory = new Memory((config as any).memory || { dbPath: '~/.skyloom', shortTermLimit: 100 }, this.name);
+    this._maxToolRounds = 20;
+  }
+
+  // ── System prompt resolution ──
+
+  protected resolveSystemPrompt(): string {
+    // Custom persona loading
+    try {
+      const { loadPersona } = require('./profile');
+      const custom = loadPersona(this.name);
+      if (custom) return custom;
+    } catch { /* ignore */ }
+
+    const lang = (this.config as any).llm?.language || 'zh';
+    if (lang === 'en' && (this as any).systemPromptEn) {
+      return (this as any).systemPromptEn;
+    }
+    return this.systemPrompt;
+  }
+
+  protected injectWorkspaceInfo(prompt: string): string {
+    try {
+      const { resolveWorkspacePath, initWorkspace } = require('./workspace');
+      const wsRoot = resolveWorkspacePath((this.config as any).workspace?.path || 'auto');
+      initWorkspace(wsRoot);
+      const lang = (this.config as any).llm?.language || 'zh';
+      if (lang === 'en') {
+        return prompt + `\n\n## Workspace\n\`${wsRoot}\` — write to \`files/\`, \`output/\`, \`temp/\`. Prefer workspace paths for all file ops.`;
+      }
+      return prompt + `\n\n## 工作空间\n\`${wsRoot}\` — 产物写到 \`files/\` / \`output/\` / \`temp/\`。文件操作优先用此路径。`;
+    } catch {
+      return prompt;
+    }
+  }
+
+  protected currentTimeTag(): string {
+    const now = Date.now() / 1000;
+    if (BaseAgent._timeTag !== null && now - BaseAgent._timeTagTs < 30) {
+      return BaseAgent._timeTag;
+    }
+    const date = new Date();
+    const tag = `Today is ${date.toISOString().slice(0, 10)}. Current time: ${date.toISOString().slice(0, 19).replace('T', ' ')}.`;
+    BaseAgent._timeTag = tag;
+    BaseAgent._timeTagTs = now;
+    return tag;
+  }
+
+  protected injectBehaviorRules(prompt: string): string {
+    const lang = (this.config as any).llm?.language || 'zh';
+    if (lang === 'en') {
+      return prompt + `\n\n## Behavior\n- Act, don't narrate. No "I will..." before tool calls.\n- Stay in scope. Do what's asked, then stop.\n- Batch independent tool calls in one response.\n- Verify writes: read back, report verified state.\n- Call list_skills when the task needs specialized capabilities.`;
+    }
+    return prompt + `\n\n## 行为守则\n- 直接行动,不预告。不说「我将要...」,直接调用工具\n- 不擅自扩大范围。用户要什么做什么,核心完成即止\n- 独立的工具调用一次发出,并行执行\n- 写入后回读验证,汇报已验证状态而非仅尝试\n- 任务涉及专业能力时（PPT/Excel/PDF/网页设计/代码审查等），先调 list_skills 查看可用技能，再用 use_skill 激活`;
+  }
+
+  protected injectProgrammingWisdom(prompt: string): string {
+    const lang = (this.config as any).llm?.language || 'zh';
+    if (lang === 'en') {
+      return prompt + `\n\n## Engineering\nTop-tier engineer: type-safe code, real error handling, debugging by root cause, reviewing for security & perf.`;
+    }
+    return prompt + `\n\n## 工程能力\n顶级工程师:类型安全、真实的错误处理、按根因调试、按安全与性能审查。你可以阅读和修改 Skyloom 自身源码。`;
+  }
+
+  reinitLanguage(): void {
+    this._baseSystemPrompt = '';
+    this._baseSystemPrompt = this.resolveSystemPrompt();
+    this._baseSystemPrompt = this.injectWorkspaceInfo(this._baseSystemPrompt);
+    this._baseSystemPrompt = this.injectBehaviorRules(this._baseSystemPrompt);
+    this._baseSystemPrompt = this.injectProgrammingWisdom(this._baseSystemPrompt);
+    this._baseSystemPrompt += '\n\n' + this.currentTimeTag();
+    this.rebuildSystemPrompt();
+  }
+
+  async init(): Promise<void> {
+    if (this._baseSystemPrompt) return;
+    await this.memory.initDb();
+
+    if (this.memory.getActiveSession() === null) {
+      const resumed = process.env.WA_NO_RESUME !== '1'
+        ? await this.memory.resumeLatestSession()
+        : null;
+      if (resumed === null) {
+        await this.memory.createSession();
+      }
+    }
+
+    this._baseSystemPrompt = this.resolveSystemPrompt();
+    this._baseSystemPrompt = this.injectWorkspaceInfo(this._baseSystemPrompt);
+    this._baseSystemPrompt = this.injectBehaviorRules(this._baseSystemPrompt);
+    this._baseSystemPrompt = this.injectProgrammingWisdom(this._baseSystemPrompt);
+    this._baseSystemPrompt += '\n\n' + this.currentTimeTag();
+    this.rebuildSystemPrompt();
+    this._tools = this.toolRegistry.getTools();
+    this.loadSkills();
+    this.bus.subscribe(this.name, this.handleEvent.bind(this));
+  }
+
+  refreshTools(): void {
+    this._tools = this.toolRegistry.getTools();
+  }
+
+  loadSkills(): void {
+    this._skills = this.skillRegistry.getSkills();
+    this.registerSkillTools();
+  }
+
+  registerSkillTools(): void {
+    if (this.toolRegistry.get('use_skill')) return;
+
+    const self = this;
+
+    this.toolRegistry.register({
+      name: 'list_skills',
+      description: 'List all available skills with their names and descriptions. Use this first to discover what skills you can activate.',
+      parameters: [],
+      handler: async () => {
+        const skills = self.getAvailableSkills();
+        if (!skills.length) return 'No skills available.';
+        const maxName = Math.max(...skills.map(s => s.name.length), 1);
+        const lines = skills.map(s => {
+          const name = s.name.padEnd(maxName);
+          const active = s.active ? ' ★' : '';
+          return `  ${name} — ${s.description}${active}`;
+        });
+        return 'Available skills:\n' + lines.join('\n');
+      },
+    });
+
+    this.toolRegistry.register({
+      name: 'use_skill',
+      description: 'Activate a named skill to gain specialized capabilities. Call list_skills first.',
+      parameters: [{
+        name: 'name',
+        type: 'string',
+        description: 'The name of the skill to activate',
+        required: true,
+      }],
+      handler: async (kwargs: Record<string, any>) => {
+        const name = kwargs.name as string;
+        if (self.activateSkill(name)) {
+          const skill = self._skills.find(s => s.name === name);
+          const desc = skill?.description || '';
+          return `✓ Skill '${name}' activated: ${desc}`;
+        }
+        return `✗ Skill '${name}' not found. Call list_skills to see available options.`;
+      },
+    });
+
+    this.toolRegistry.register({
+      name: 'extend_rounds',
+      description: 'Extend the tool-call budget for the current turn.',
+      parameters: [{
+        name: 'n',
+        type: 'number',
+        description: 'Number of additional rounds to add (default 10)',
+        required: false,
+      }],
+      handler: async (kwargs: Record<string, any>) => {
+        const n = (kwargs.n as number) || 10;
+        const old = this._maxToolRounds;
+        this._maxToolRounds += n;
+        return `✓ Tool-round limit extended by ${n} (was ${old}, now ${this._maxToolRounds}).`;
+      },
+    });
+  }
+
+  activateSkill(name: string): boolean {
+    let skill = this._skills.find(s => s.name === name);
+    if (!skill) {
+      const globalSkill = this.skillRegistry.get(name);
+      if (globalSkill) {
+        this._skills.push(globalSkill);
+        skill = globalSkill;
+      }
+    }
+    if (!skill) return false;
+
+    this._activeSkills.add(name);
+    if (skill.handler) {
+      const handlerTools = skill.handler(this, this.toolRegistry);
+      if (handlerTools) {
+        this._skillTools.set(name, handlerTools.map((t: any) => t.name));
+      }
+    }
+
+    const overrides: Record<string, any> = {};
+    if (skill.model) overrides.model = skill.model;
+    if (skill.temperature != null) overrides.temperature = skill.temperature;
+    if (skill.maxTokens != null) overrides.maxTokens = skill.maxTokens;
+    if (Object.keys(overrides).length > 0) {
+      this._skillConfigOverrides.set(name, overrides);
+    }
+
+    this.rebuildSystemPrompt();
+    return true;
+  }
+
+  deactivateSkill(name: string): boolean {
+    if (!this._activeSkills.has(name)) return false;
+    this._activeSkills.delete(name);
+
+    const toolNames = this._skillTools.get(name);
+    if (toolNames) {
+      for (const tn of toolNames) {
+        this.toolRegistry.unregister(tn);
+      }
+      this._skillTools.delete(name);
+    }
+    this._skillConfigOverrides.delete(name);
+    this.rebuildSystemPrompt();
+    return true;
+  }
+
+  deactivateAllSkills(): void {
+    for (const name of [...this._activeSkills]) {
+      this.deactivateSkill(name);
+    }
+  }
+
+  protected autoActivateSkills(message: string): string[] {
+    if (!message) return [];
+    const lowered = message.toLowerCase();
+    const candidates = [...this._skills];
+    for (const s of this.skillRegistry.getSkills()) {
+      if (!candidates.find(c => c.name === s.name)) {
+        candidates.push(s);
+      }
+    }
+
+    const activated: string[] = [];
+    for (const skill of candidates) {
+      if (this._activeSkills.has(skill.name)) continue;
+      if (!skill.triggers || !skill.triggers.length) continue;
+      for (const trig of skill.triggers) {
+        if (trig && lowered.includes(trig.toLowerCase())) {
+          if (this.activateSkill(skill.name)) {
+            activated.push(skill.name);
+          }
+          break;
+        }
+      }
+    }
+    return activated;
+  }
+
+  protected runtimeIdentityBlock(): string {
+    const lang = (this.config as any).llm?.language || 'zh';
+    let model = (this.config as any).llm?.defaultModel || 'gpt-4o';
+    try {
+      const agentCfg = (this.config as any).agents?.[this.name];
+      if (agentCfg?.model) model = agentCfg.model;
+    } catch { /* ignore */ }
+
+    let userBlock = '';
+    try {
+      const { formatProfileForPrompt, formatMemoriesForPrompt } = require('./profile');
+      userBlock = formatProfileForPrompt(lang) + formatMemoriesForPrompt(lang);
+    } catch { /* ignore */ }
+
+    if (lang === 'en') {
+      return `\n\n## Runtime\nYou are the ${this.displayName} agent in Skyloom, powered by the **${model}** language model. Always reply in English unless the user clearly writes in another language.` + userBlock;
+    }
+    return `\n\n## 运行环境\n你是 Skyloom 中的「${this.displayName}」智能体，底层语言模型为 **${model}**。默认始终用中文回复；除非用户明确用其他语言提问，才用对应语言。` + userBlock;
+  }
+
+  protected rebuildSystemPrompt(): void {
+    const identity = this.runtimeIdentityBlock();
+    let prompt: string;
+
+    if (this._activeSkills.size === 0) {
+      prompt = this._baseSystemPrompt + identity;
+    } else {
+      const byName = new Map(this._skills.map(s => [s.name, s]));
+      const skillPrompts: string[] = [];
+      const lang = (this.config as any).llm?.language || 'zh';
+
+      for (const name of [...this._activeSkills].sort()) {
+        const s = byName.get(name);
+        if (!s) continue;
+        const parts: string[] = [];
+        if (s.systemPrompt) parts.push(s.systemPrompt);
+        if (s.bodyTruncated && s.sourcePath) {
+          parts.push(lang === 'en'
+            ? `[Lazy-loaded skill: full guide at \`${s.sourcePath}\`]`
+            : `[此技能为懒加载：完整指南位于 \`${s.sourcePath}\`]`);
+        }
+        if (s.resourceDir) {
+          parts.push(lang === 'en' ? `Resource directory: ${s.resourceDir}` : `资源目录: ${s.resourceDir}`);
+        }
+        skillPrompts.push(parts.join('\n\n'));
+      }
+
+      prompt = this._baseSystemPrompt;
+      if (skillPrompts.length > 0) {
+        prompt += '\n\n' + skillPrompts.join('\n\n');
+      }
+      prompt += identity;
+    }
+
+    // Find and replace system message, or add one
+    for (const msg of this.memory.shortTerm) {
+      if (msg.role === 'system') {
+        msg.content = prompt;
+        return;
+      }
+    }
+    this.memory.addMessage('system', prompt);
+  }
+
+  getActiveSkills(): string[] {
+    return [...this._activeSkills];
+  }
+
+  getSkillConfigOverrides(): Record<string, any> {
+    const merged: Record<string, any> = {};
+    for (const overrides of this._skillConfigOverrides.values()) {
+      Object.assign(merged, overrides);
+    }
+    return merged;
+  }
+
+  getAvailableSkills(): Array<{ name: string; description: string; active: boolean }> {
+    return this._skills.map(s => ({
+      name: s.name,
+      description: s.description,
+      active: this._activeSkills.has(s.name),
+    }));
+  }
+
+  async close(): Promise<void> {
+    // Drain in-flight background work BEFORE closing memory
+    const pending = [...this._pendingExtracts];
+    if (pending.length > 0) {
+      try {
+        await Promise.all(pending);
+      } catch { /* ignore */ }
+    }
+    await this.memory.close();
+    this.bus.unsubscribe(this.name);
+  }
+
+  protected async setState(newState: AgentState): Promise<void> {
+    if (this.state !== newState) {
+      const oldState = this.state;
+      this.state = newState;
+      const event = new Event(
+        EventType.STATE_CHANGE,
+        this.name,
+        null,
+        { old_state: oldState, new_state: newState }
+      );
+      this.bus.addEvent(event);
+      await this.bus.notifyStateChange(event);
+    }
+  }
+
+  async handleEvent(event: Event): Promise<void> {
+    if (event.type === EventType.TASK_ASSIGNED && event.target === this.name) {
+      const task = new Task(event.data as any);
+      const result = await this.executeTask(task);
+      await this.bus.publish(new Event(
+        EventType.TASK_COMPLETED,
+        this.name,
+        event.source,
+        { task_id: task.id, success: result.success, content: result.content }
+      ));
+    } else if (event.type === EventType.AGENT_REQUEST && event.target === this.name) {
+      const p = this.handleRequest(event);
+      this._bgTasks.add(p);
+      p.then(() => this._bgTasks.delete(p)).catch(() => this._bgTasks.delete(p));
+    } else if (event.type === EventType.AGENT_RESPONSE && event.target === this.name) {
+      this.handleResponse(event);
+    }
+  }
+
+  async chatOneshot(
+    prompt: string,
+    options?: { model?: string; temperature?: number; maxTokens?: number }
+  ): Promise<string> {
+    const overrides: Record<string, any> = {};
+    if (options?.model) overrides.model = options.model;
+    if (options?.temperature != null) overrides.temperature = options.temperature;
+    if (options?.maxTokens != null) overrides.maxTokens = options.maxTokens;
+
+    const messages = [{ role: 'user', content: prompt }];
+    const response = await this.llm.complete(
+      messages,
+      this.name,
+      undefined,
+      false,
+      Object.keys(overrides).length > 0 ? overrides : undefined
+    );
+    return response.content;
+  }
+
+  async chat(
+    message: string,
+    onStatus?: ((status: string) => void) | null
+  ): Promise<string> {
+    return this.withTurnLock(() => this.chatImpl(message, onStatus));
+  }
+
+  protected async chatImpl(
+    message: string,
+    onStatus?: ((status: string) => void) | null
+  ): Promise<string> {
+    await this.setState(AgentState.THINKING);
+    this.memory.addMessage('user', message);
+
+    if (this.shouldAutoCompact()) {
+      try { await this.compact(); } catch (e) { log.warn('auto_compact_failed', { error: String(e) }); }
+    }
+
+    try {
+      if (onStatus) onStatus('thinking...');
+      const response = await this.llmLoop({ onStatus });
+      this.memory.addMessage('assistant', response.content, {
+        toolCalls: response.toolCalls,
+        reasoningContent: response.reasoningContent,
+      });
+      await this.setState(AgentState.IDLE);
+      this.maybeExtractFacts();
+      return response.content;
+    } catch (e) {
+      await this.setState(AgentState.ERROR);
+      this.popLastUserMessage();
+      this.memory.pruneToolMessages();
+      const errorMsg = `[${this.displayName}] Error: ${e}`;
+      this.memory.addMessage('assistant', errorMsg);
+      return errorMsg;
+    }
+  }
+
+  async *chatStream(message: string): AsyncGenerator<Record<string, any>> {
+    const activatedNow = this.autoActivateSkills(message);
+    const self = this;
+
+    try {
+      for await (const ev of self.chatStreamImpl(message, activatedNow.length > 0 ? activatedNow : undefined)) {
+        yield ev;
+      }
+    } catch (err) {
+      const st = this.memory.shortTerm;
+      if (st.length > 0 && st[st.length - 1].role === 'user') {
+        this.popLastUserMessage();
+      }
+      throw err;
+    }
+  }
+
+  protected async *chatStreamImpl(
+    message: string,
+    autoActivated?: string[]
+  ): AsyncGenerator<Record<string, any>> {
+    await this.setState(AgentState.THINKING);
+    this.memory.addMessage('user', message);
+    let assistantStored = false;
+
+    if (this.shouldAutoCompact()) {
+      try { await this.compact(); } catch (e) { log.warn('auto_compact_failed', { error: String(e) }); }
+    }
+
+    const delegations: Array<[string, boolean]> = [];
+    const suppressedTools = new Set<string>();
+
+    if (autoActivated && autoActivated.length > 0) {
+      suppressedTools.add('list_skills');
+      this.memory.addMessage('system',
+        '[Auto-activated skills: ' + autoActivated.join(', ') +
+        '] These were chosen from your message\'s keywords. Do NOT call list_skills.'
+      );
+    }
+
+    const recentToolOutcomes: boolean[] = [];
+    let stuckHintInjected = false;
+    const recentResponseTexts: string[] = [];
+    let repetitionHintInjected = false;
+    const recentToolSigs: string[] = [];
+    let toolLoopHintInjected = false;
+
+    let toolNamesCache: string[] | null = null;
+    let cacheKey: string | null = null;
+
+    const resolveToolNames = (): string[] => {
+      const key = JSON.stringify([[...suppressedTools].sort(), [...this._activeSkills].sort()]);
+      if (toolNamesCache !== null && cacheKey === key) return toolNamesCache;
+      let candidates = this.activeToolNames().filter(t => !suppressedTools.has(t));
+      const must = new Set<string>();
+      for (const s of this._skills) {
+        if (this._activeSkills.has(s.name)) {
+          for (const t of s.requiredTools) must.add(t);
+        }
+      }
+      toolNamesCache = selectRelevantTools(this.toolRegistry, candidates, message, { mustInclude: must });
+      cacheKey = key;
+      return toolNamesCache;
+    };
+
+    try {
+      let fullContent = '';
+      let roundLimit = this._maxToolRounds;
+      let roundCount = 0;
+
+      while (true) {
+        if (roundCount >= roundLimit) {
+          if (roundLimit >= this._maxToolRoundsHardCap) break;
+          const extendBy = Math.min(15, this._maxToolRoundsHardCap - roundLimit);
+          roundLimit += extendBy;
+          this._maxToolRounds = roundLimit;
+          this.memory.addMessage('system', `[Auto-extended tool-round limit by ${extendBy} to ${roundLimit}. Continue working.]`);
+          continue;
+        }
+        roundCount++;
+        roundLimit = Math.max(roundLimit, this._maxToolRounds);
+
+        const messages = await this.messagesWithRecall();
+        const toolNames = resolveToolNames();
+        const toolCallsReceived: ToolCall[] = [];
+        let streamingReasoning: string | undefined;
+        let streamUsage: any = null;
+        let roundContent = '';
+
+        for await (const event of this.llm.streamWithTools(
+          messages,
+          this.name,
+          toolNames.length > 0 ? toolNames : undefined,
+          toolNames.length > 0 ? this.toolRegistry : undefined,
+          Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined
+        )) {
+          if (event.type === 'content') {
+            fullContent += event.text;
+            roundContent += event.text;
+            yield { type: 'content', text: event.text };
+          } else if (event.type === 'tool_call' && event.toolCall) {
+            toolCallsReceived.push(event.toolCall);
+          } else if (event.type === 'error') {
+            yield { type: 'content', text: `\n[Error: ${event.text}]` };
+            if (!assistantStored) this.popLastUserMessage();
+            await this.setState(AgentState.IDLE);
+            return;
+          } else if (event.type === 'reasoning' && event.text) {
+            yield { type: 'reasoning', text: event.text };
+          } else if (event.type === 'done') {
+            streamUsage = event.usage;
+            streamingReasoning = event.reasoningContent;
+          }
+        }
+
+        if (toolCallsReceived.length === 0) {
+          let finalContent = roundContent;
+          if (!fullContent.trim() && delegations.length > 0) {
+            finalContent = synthesizeDelegationSummary(delegations);
+          }
+          this.memory.addMessage('assistant', finalContent, { reasoningContent: streamingReasoning });
+          assistantStored = true;
+          await this.setState(AgentState.IDLE);
+          this.maybeExtractFacts();
+          if (finalContent !== roundContent) yield { type: 'content', text: finalContent };
+          yield { type: 'done' };
+          return;
+        }
+
+        // Record assistant message with tool calls
+        this.memory.addMessage('assistant', roundContent, {
+          toolCalls: toolCallsReceived,
+          reasoningContent: streamingReasoning,
+        });
+        assistantStored = true;
+
+        if (streamUsage) {
+          this.bus.addEvent(new Event(EventType.LLM_CALL, this.name, null, {
+            model: '', usage: streamUsage,
+          }));
+        }
+
+        // ── Phase 1: Parse args, look up tools, emit status ──
+        const toolPrep: Array<{
+          tc: ToolCall;
+          toolName: string;
+          toolArgs: Record<string, any> | null;
+          parseError: string | null;
+          toolLabel: string;
+        }> = [];
+
+        for (const tc of toolCallsReceived) {
+          const toolName = tc.function.name;
+          const rawArgs = tc.function.arguments;
+          let toolArgs: Record<string, any> | null;
+          let parseError: string | null = null;
+
+          if (typeof rawArgs === 'string') {
+            toolArgs = parseToolArgs(rawArgs);
+            if (toolArgs === null) {
+              parseError = formatArgsParseError(toolName, rawArgs);
+            }
+          } else {
+            toolArgs = rawArgs;
+          }
+
+          this.bus.addEvent(new Event(EventType.TOOL_CALL, this.name, null, {
+            tool: toolName, args: toolArgs || {},
+          }));
+
+          const label = toolArgs
+            ? toolStatusLabel(toolName, toolArgs)
+            : `${toolName} (unparseable args)`;
+
+          yield { type: 'tool_status', label, tool_name: toolName, args: toolArgs || {} };
+          toolPrep.push({ tc, toolName, toolArgs, parseError, toolLabel: label });
+        }
+
+        // ── Phase 2: Execute all tool handlers in parallel ──
+        const dedupeKey = (p: typeof toolPrep[0]): string | null => {
+          if (!p.toolArgs) return null;
+          try {
+            return `${p.toolName}:${JSON.stringify(p.toolArgs, Object.keys(p.toolArgs).sort())}`;
+          } catch {
+            return null;
+          }
+        };
+
+        const execResults: Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null> =
+          new Array(toolPrep.length).fill(null);
+        const firstForKey = new Map<string, number>();
+        const execPlan: Array<[number, typeof toolPrep[0]]> = [];
+
+        for (let idx = 0; idx < toolPrep.length; idx++) {
+          const prep = toolPrep[idx];
+          const key = dedupeKey(prep);
+          const tool = this.toolRegistry.get(prep.toolName);
+          if (key && tool && (tool as any).cacheable && !(tool as any).dangerous && firstForKey.has(key)) {
+            continue;
+          }
+          if (key && tool && (tool as any).cacheable && !(tool as any).dangerous) {
+            firstForKey.set(key, idx);
+          }
+          execPlan.push([idx, prep]);
+        }
+
+        const uniqueResults = await Promise.all(
+          execPlan.map(async ([idx, prep]) => {
+            if (prep.parseError) {
+              return { tc: prep.tc, result: prep.parseError, success: false, toolName: prep.toolName };
+            }
+            const tool = this.toolRegistry.get(prep.toolName);
+            if (!tool) {
+              const suggestions = suggestToolNames(prep.toolName, this.toolRegistry);
+              const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
+              suppressedTools.add(prep.toolName);
+              return { tc: prep.tc, result: `Error: Tool '${prep.toolName}' does not exist.${hint}`, success: false, toolName: prep.toolName };
+            }
+            if ((tool as any).dangerous) {
+              log.warn('dangerous_tool_call', { tool: prep.toolName, agent: this.name });
+              if (!await this.checkToolApproval(prep.toolName, prep.toolArgs || {})) {
+                return { tc: prep.tc, result: `[denied] dangerous tool '${prep.toolName}' blocked`, success: false, toolName: prep.toolName };
+              }
+            }
+            await this.setState(AgentState.ACTING);
+            try {
+              const toolResult = await this.toolRegistry.execute(prep.toolName, prep.toolArgs || {});
+              const resultStr = toolResult.result || toolResult.error || '(no output)';
+              return { tc: prep.tc, result: resultStr, success: toolResult.success, toolName: prep.toolName };
+            } catch (e) {
+              return { tc: prep.tc, result: `Tool '${prep.toolName}' execution failed: ${e}`, success: false, toolName: prep.toolName };
+            }
+          })
+        );
+
+        for (let i = 0; i < execPlan.length; i++) {
+          const [idx] = execPlan[i];
+          execResults[idx] = uniqueResults[i];
+        }
+
+        // ── Phase 3: Record results ──
+        let taskCompleted = false;
+        for (const r of execResults) {
+          if (!r) continue;
+          if (typeof r.result === 'string' && r.result.includes('[CircuitBreakerOpen]')) {
+            suppressedTools.add(r.toolName);
+          }
+          if (r.toolName === 'task_done' && r.result === TASK_DONE_SENTINEL) {
+            taskCompleted = true;
+            const prep = toolPrep.find(p => p.tc === r.tc);
+            const summary = prep?.toolArgs?.summary as string || '';
+            const displayResult = summary ? `[Task completed: ${summary}]` : '[Task completed]';
+            this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
+            yield { type: 'tool_done', label: `task_done: ${summary}` || 'task_done', success: true, tool_name: 'task_done', result: displayResult };
+            continue;
+          }
+          this.memory.addMessage('tool', r.result, { name: r.toolName, toolCallId: r.tc.id });
+          const prep = toolPrep.find(p => p.tc === r.tc);
+          yield {
+            type: 'tool_done', label: prep?.toolLabel || r.toolName, success: r.success,
+            tool_name: r.toolName, result: typeof r.result === 'string' ? r.result.slice(0, 800) : String(r.result).slice(0, 800),
+          };
+          if (r.toolName === 'delegate_to') {
+            const target = prep?.toolArgs?.agent as string || '?';
+            delegations.push([target, r.success]);
+          }
+        }
+
+        if (taskCompleted) {
+          if (!assistantStored) this.popLastUserMessage();
+          await this.setState(AgentState.IDLE);
+          yield { type: 'done' };
+          return;
+        }
+
+        // ── Narration-loop detection ──
+        const normalizedRound = roundContent.trim();
+        if (normalizedRound && recentResponseTexts.length > 0) {
+          const highSim = recentResponseTexts.slice(-2).some(prev => textSimilarity(normalizedRound, prev) >= 0.7);
+          if (highSim && !repetitionHintInjected) {
+            this.memory.addMessage('system', '[Stop narrating] Your last response is highly similar to your previous one. Stop writing prose. Either: (1) emit ONLY the next tool call, or (2) output the final deliverable.');
+            repetitionHintInjected = true;
+          }
+        }
+        recentResponseTexts.push(normalizedRound);
+        if (recentResponseTexts.length > 3) recentResponseTexts.shift();
+
+        // ── Tool-signature loop detection ──
+        for (const p of toolPrep) {
+          if (['task_done', 'list_skills', 'use_skill'].includes(p.toolName)) continue;
+          const sig = toolCallSignature(p.toolName, p.toolArgs);
+          if (sig) recentToolSigs.push(sig);
+        }
+        if (recentToolSigs.length > SIG_WINDOW) {
+          recentToolSigs.splice(0, recentToolSigs.length - SIG_WINDOW);
+        }
+        if (recentToolSigs.length > 0) {
+          const counts = new Map<string, number>();
+          for (const s of recentToolSigs) counts.set(s, (counts.get(s) || 0) + 1);
+          let topSig = '';
+          let topCount = 0;
+          for (const [s, c] of counts) { if (c > topCount) { topSig = s; topCount = c; } }
+          if (topCount >= SIG_LOOP_HINT && !toolLoopHintInjected) {
+            this.memory.addMessage('system', `[Tool loop] You have called \`${topSig}\` ${topCount}x in the last ${recentToolSigs.length} tool calls — you are iterating without converging. STOP repeating it.`);
+            toolLoopHintInjected = true;
+          }
+          if (topCount >= SIG_LOOP_HARDSTOP) {
+            this.memory.addMessage('assistant', `I have repeated \`${topSig}\` ${topCount} times without converging. Stopping.`);
+            yield { type: 'content', text: `\n\n[stuck] tool \`${topSig}\` repeated ${topCount}x — stopping.` };
+            await this.setState(AgentState.IDLE);
+            yield { type: 'done' };
+            return;
+          }
+        }
+
+        // ── Stuck-loop detection ──
+        for (const r of execResults) {
+          if (!r || r.toolName === 'task_done') continue;
+          const failed = !r.success || (typeof r.result === 'string' && looksLikeFailedToolResult(r.result));
+          recentToolOutcomes.push(!failed);
+          if (recentToolOutcomes.length > 6) recentToolOutcomes.shift();
+        }
+
+        if (!stuckHintInjected && recentToolOutcomes.length >= 5 &&
+            recentToolOutcomes.filter(Boolean).length <= 1) {
+          this.memory.addMessage('system', '[Recovery hint] Your last several tool calls have mostly failed. Synthesize a partial answer from what worked or ask the user for guidance.');
+          stuckHintInjected = true;
+        }
+
+        if (recentToolOutcomes.length >= 8 && recentToolOutcomes.every(x => !x)) {
+          this.memory.addMessage('assistant', 'Every recent tool call failed. Please give me more context.');
+          yield { type: 'content', text: '\n\n[stuck] every recent tool call failed — stopping.\n' };
+          await this.setState(AgentState.IDLE);
+          yield { type: 'done' };
+          return;
+        }
+
+        // ── Search-storm detection ──
+        const searchStormCount = recentToolSigs.filter(s =>
+          s.startsWith('web_search:') || ['fetch_page', 'http_get'].includes(s)
+        ).length;
+        if (searchStormCount >= 8 && !toolLoopHintInjected) {
+          this.memory.addMessage('system', `[Search storm] ${searchStormCount} search calls. STOP searching and synthesize.`);
+          toolLoopHintInjected = true;
+        }
+        if (searchStormCount >= 12) {
+          this.memory.addMessage('assistant', 'Too many search requests. Synthesizing best answer.');
+          yield { type: 'content', text: `\n\n[stuck] excessive web searching (${searchStormCount} calls) — stopping.\n` };
+          await this.setState(AgentState.IDLE);
+          yield { type: 'done' };
+          return;
+        }
+      }
+
+      // Max iterations reached
+      if (!assistantStored) this.popLastUserMessage();
+      await this.setState(AgentState.IDLE);
+      if (!fullContent.trim() && delegations.length > 0) {
+        const synth = synthesizeDelegationSummary(delegations);
+        this.memory.addMessage('assistant', synth);
+        yield { type: 'content', text: synth };
+      }
+      yield { type: 'truncated', reason: `max tool rounds (${this._maxToolRounds}) reached` };
+      yield { type: 'done' };
+    } catch (e: any) {
+      if (!assistantStored) this.popLastUserMessage();
+      await this.setState(AgentState.ERROR);
+      yield { type: 'content', text: `\n[Error: ${e.message || e}]` };
+    } finally {
+      this.memory.pruneToolMessages();
+    }
+  }
+
+  protected popLastUserMessage(): void {
+    for (let i = this.memory.shortTerm.length - 1; i >= 0; i--) {
+      if (this.memory.shortTerm[i].role === 'user') {
+        this.memory.shortTerm.splice(i, 1);
+        break;
+      }
+    }
+  }
+
+  async compact(keepRecent: number = 12): Promise<string> {
+    const systemMsgs = this.memory.shortTerm.filter(
+      m => m.role === 'system' && !(m.content || '').startsWith('[Earlier-context digest')
+    );
+    const nonSystem = this.memory.shortTerm.filter(m => m.role !== 'system');
+
+    if (nonSystem.length <= keepRecent + 4) return 'context is already compact';
+
+    const toSummarize = nonSystem.slice(0, -keepRecent);
+    const recent = nonSystem.slice(-keepRecent);
+
+    // Extract directives
+    const directiveKeywords = ['don\'t', 'do not', 'never', 'always', 'must', 'no ', '不要', '不准', '禁止', '必须', '一定', '记住'];
+    const directives: string[] = [];
+    for (const m of toSummarize) {
+      if (m.role !== 'user') continue;
+      const content = (m.content || '').trim();
+      if (!content || content.length > 300) continue;
+      if (directiveKeywords.some(k => content.toLowerCase().includes(k))) {
+        directives.push(content);
+      }
+    }
+
+    const text = toSummarize.map(m => {
+      let content = (m.content || '').slice(0, 300);
+      if (m.toolCalls) {
+        const names = m.toolCalls.map((tc: any) => tc.function?.name).join(',');
+        content += ` [tools: ${names}]`;
+      }
+      return `[${m.role}] ${content}`;
+    }).join('\n');
+
+    const resp = await this.llm.complete(
+      [{ role: 'user', content: `Produce a TERSE factual digest. Bullet points only. Max 12 bullets. Preserve directives. \n\n${text}` }],
+      this.name,
+      undefined,
+      false,
+      Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined
+    );
+    const summary = resp.content.trim().slice(0, 800);
+
+    const digestParts = [
+      `[Earlier-context digest — ${toSummarize.length} messages compressed. Reference only.]`,
+      summary,
+    ];
+    if (directives.length > 0) {
+      digestParts.push('Verbatim directives:');
+      digestParts.push(...directives.slice(-8).map(d => `  - "${d}"`));
+    }
+
+    // Atomic update
+    this.memory.shortTerm = [...systemMsgs];
+    this.memory.addMessage('system', digestParts.join('\n'));
+    for (const m of recent) {
+      this.memory.shortTerm.push(m);
+    }
+    this.memory.pruneToolMessages();
+
+    return `compressed ${toSummarize.length} messages (${summary.length} char digest)`;
+  }
+
+  contextUsage(): Record<string, any> {
+    const usage = this.memory.getContextWindowUsage();
+    return {
+      estimatedTokens: usage.estimatedTokens,
+      maxTokens: 128000,
+      pct: Math.min(100, Math.round((usage.estimatedTokens / 128000) * 100)),
+      messageCount: usage.messageCount,
+      model: (this.config as any).llm?.defaultModel || 'unknown',
+    };
+  }
+
+  protected shouldAutoCompact(): boolean {
+    const usage = this.memory.getContextWindowUsage();
+    return (usage.estimatedTokens / 128000) > 0.92;
+  }
+
+  protected activeToolNames(): string[] {
+    const names = this.toolRegistry.listNames();
+    const seen = new Set(names);
+    let restriction: Set<string> | null = null;
+    let anyUnrestricted = false;
+
+    for (const skill of this._skills) {
+      if (!this._activeSkills.has(skill.name)) continue;
+      for (const tn of skill.requiredTools) {
+        if (!seen.has(tn)) {
+          names.push(tn);
+          seen.add(tn);
+        }
+      }
+      if (skill.allowedTools === null) {
+        anyUnrestricted = true;
+      } else {
+        if (restriction === null) restriction = new Set();
+        for (const t of skill.allowedTools) restriction.add(t);
+      }
+    }
+
+    if (restriction !== null && !anyUnrestricted) {
+      return names.filter(n => restriction!.has(n));
+    }
+    return names;
+  }
+
+  // ── Fact extraction ──
+
+  private readonly EXTRACT_PROMPT = `你是一个事实抽取助手。从下面的对话中抽取**用户透露的稳定、可复用的事实**。
+
+**应该抽取**：
+- 工具/技术偏好（pkg_mgr=pnpm, editor=neovim, framework=FastAPI）
+- 项目信息（project_lang=Python, project_name=skyloom）
+- 长期目标（goal=build_url_shortener）
+- 关键约束（os=Windows, python_version=3.13）
+
+**输出格式**：纯 JSON 数组：
+[{"key": "pkg_mgr", "value": "pnpm", "category": "user_pref"}]
+
+对话：
+{conversation}
+
+输出：`;
+
+  protected maybeExtractFacts(): void {
+    if (process.env.WA_NO_EXTRACT === '1') return;
+    const everyN = parseInt(process.env.WA_EXTRACT_EVERY_N || '20', 10);
+    if (everyN <= 0) return;
+
+    this._userTurnsSinceExtract++;
+    if (this._userTurnsSinceExtract < everyN) return;
+    this._userTurnsSinceExtract = 0;
+
+    const p = this.extractFactsAsync();
+    this._pendingExtracts.add(p);
+    p.then(() => this._pendingExtracts.delete(p)).catch(() => this._pendingExtracts.delete(p));
+  }
+
+  private async extractFactsAsync(): Promise<number> {
+    try {
+      const recent = this.memory.shortTerm.slice(-20);
+      const convoMsgs = recent.filter(m => (m.role === 'user' || m.role === 'assistant') && m.content);
+      if (convoMsgs.length < 4) return 0;
+      const convoText = convoMsgs.map(m => `${m.role}: ${(m.content || '').slice(0, 500)}`).join('\n');
+      const prompt = this.EXTRACT_PROMPT.replace('{conversation}', convoText);
+      const response = await this.llm.complete([{ role: 'user', content: prompt }], `${this.name}_extract`, undefined);
+      const facts = this.parseExtractedFacts(response.content);
+      let written = 0;
+      for (const f of facts) {
+        const key = f.key;
+        const value = f.value;
+        const category = f.category || 'auto_extracted';
+        if (typeof key !== 'string' || !key.trim() || value == null || value === '') continue;
+        await this.memory.remember(key.trim(), value, String(category));
+        written++;
+      }
+      if (written) log.info('auto_extracted_facts', { agent: this.name, count: written });
+      return written;
+    } catch (e) {
+      log.warn('fact_extract_failed', { error: String(e) });
+      return 0;
+    }
+  }
+
+  private parseExtractedFacts(content: string): Array<{ key: string; value: any; category?: string }> {
+    const text = (content || '').trim();
+    if (!text) return [];
+
+    // 1. Direct parse
+    try {
+      const data = JSON.parse(text);
+      if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
+    } catch { /* continue */ }
+
+    // 2. Markdown-fenced JSON
+    const fenceMatch = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+    if (fenceMatch) {
+      try {
+        const data = JSON.parse(fenceMatch[1]);
+        if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
+      } catch { /* continue */ }
+    }
+
+    // 3. First JSON array substring
+    const arrayMatch = text.match(/\[[\s\S]*?\]/);
+    if (arrayMatch) {
+      try {
+        const data = JSON.parse(arrayMatch[0]);
+        if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
+      } catch { /* continue */ }
+    }
+    return [];
+  }
+
+  protected async messagesWithRecall(): Promise<Record<string, any>[]> {
+    const messages = this.memory.getMessages();
+    if (!messages || process.env.WA_NO_RECALL === '1') return messages;
+
+    const lastUserIdx = messages.length - 1 - [...messages].reverse().findIndex(m => m.role === 'user');
+    if (lastUserIdx < 0) return messages;
+
+    const query = String(messages[lastUserIdx].content || '').slice(0, 200);
+    const stripped = query.trim();
+    if (stripped.length < 4) return messages;
+
+    try {
+      const facts = await this.memory.recallForInjection(query, 3);
+      if (!facts.length) return messages;
+      const block = Memory.formatFactsBlock(facts);
+      if (!block) return messages;
+      messages.splice(lastUserIdx, 0, { role: 'system', content: block });
+    } catch { /* ignore */ }
+    return messages;
+  }
+
+  protected async llmLoop(options?: {
+    maxIterations?: number;
+    onStatus?: ((status: string) => void) | null;
+    ephemeral?: boolean;
+  }): Promise<LLMResponse> {
+    const maxIterations = options?.maxIterations ?? this._maxToolRounds;
+    const ephemeral = options?.ephemeral ?? false;
+    const onStatus = options?.onStatus ?? null;
+
+    let response: LLMResponse = { content: '', toolCalls: [], model: '', usage: { promptTokens: 0, completionTokens: 0 }, cost: 0, truncated: false };
+    const fullToolNames = this.activeToolNames();
+
+    const lastUser = [...this.memory.shortTerm].reverse().find(m => m.role === 'user');
+    const must = new Set<string>();
+    for (const s of this._skills) {
+      if (this._activeSkills.has(s.name)) {
+        for (const t of s.requiredTools) must.add(t);
+      }
+    }
+    const toolNames = selectRelevantTools(
+      this.toolRegistry, fullToolNames, lastUser?.content || '', { mustInclude: must }
+    );
+
+    try {
+      let limit = maxIterations;
+      let rounds = 0;
+      while (true) {
+        if (rounds >= limit) {
+          if (limit >= this._maxToolRoundsHardCap) break;
+          const extendBy = Math.min(15, this._maxToolRoundsHardCap - limit);
+          limit += extendBy;
+          this._maxToolRounds = limit;
+          this.memory.addMessage('system', `[Auto-extended limit by ${extendBy} to ${limit}.]`);
+          continue;
+        }
+        rounds++;
+        limit = Math.max(limit, this._maxToolRounds);
+
+        const messages = await this.messagesWithRecall();
+        if (onStatus) onStatus('thinking...');
+        response = await this.llm.complete(
+          messages, this.name,
+          toolNames.length > 0 ? toolNames : undefined, false,
+          Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined
+        );
+
+        if (!response.toolCalls || response.toolCalls.length === 0) {
+          return response;
+        }
+
+        this.bus.addEvent(new Event(EventType.LLM_CALL, this.name, null, {
+          model: response.model, usage: response.usage,
+        }));
+
+        // Record assistant message
+        this.memory.addMessage('assistant', response.content || '', {
+          toolCalls: response.toolCalls,
+          reasoningContent: response.reasoningContent,
+          ephemeral,
+        });
+
+        // ── Tool execution pipeline ──
+        const parsed: Array<{
+          tc: ToolCall; toolName: string; toolArgs: Record<string, any> | null;
+          tool: ToolDefinition | undefined; parseError: string | null; toolLabel: string; denied: boolean;
+        }> = [];
+        let anyDangerous = false;
+
+        for (const tc of response.toolCalls) {
+          const toolName = tc.function.name;
+          const rawArgs = tc.function.arguments;
+          let parseError: string | null = null;
+          let toolArgs: Record<string, any> | null;
+
+          if (typeof rawArgs === 'string') {
+            toolArgs = parseToolArgs(rawArgs);
+            if (toolArgs === null) parseError = formatArgsParseError(toolName, rawArgs);
+          } else {
+            toolArgs = rawArgs;
+          }
+
+          const tool = this.toolRegistry.get(toolName);
+          const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
+
+          this.bus.addEvent(new Event(EventType.TOOL_CALL, this.name, null, {
+            tool: toolName, args: toolArgs || {},
+          }));
+
+          if (tool && (tool as any).dangerous) anyDangerous = true;
+          parsed.push({ tc, toolName, toolArgs, tool, parseError, toolLabel: label, denied: false });
+        }
+
+        // Phase B: dangerous-tool approval
+        if (anyDangerous) {
+          for (const p of parsed) {
+            if (p.tool && (p.tool as any).dangerous && !p.denied) {
+              log.warn('dangerous_tool_call', { tool: p.toolName, agent: this.name });
+              if (!await this.checkToolApproval(p.toolName, p.toolArgs || {})) {
+                p.denied = true;
+              }
+            }
+          }
+        }
+
+        // Phase C: execute all tools in parallel
+        const outcomes = await Promise.all(
+          parsed.map(async (p) => {
+            if (p.parseError) return { tc: p.tc, result: p.parseError };
+            if (p.denied) return { tc: p.tc, result: `[denied] dangerous tool '${p.toolName}' blocked` };
+            if (!p.tool) {
+              const suggestions = suggestToolNames(p.toolName, this.toolRegistry);
+              const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
+              return { tc: p.tc, result: `Error: Tool '${p.toolName}' does not exist.${hint}` };
+            }
+            if (onStatus) onStatus(p.toolLabel);
+            await this.setState(AgentState.ACTING);
+            const toolResult2 = await this.toolRegistry.execute(p.toolName, p.toolArgs || {});
+            return { tc: p.tc, result: toolResult2.result || toolResult2.error || '(no output)' };
+          })
+        );
+
+        // Phase D: write results to memory
+        for (const o of outcomes) {
+          this.memory.addMessage('tool', o.result, {
+            name: parsed.find(p => p.tc === o.tc)?.toolName,
+            toolCallId: o.tc.id,
+            ephemeral,
+          });
+        }
+
+        await this.setState(AgentState.THINKING);
+      }
+
+      response.truncated = true;
+      if (!response.content) {
+        response.content = `[truncated] max tool rounds (${maxIterations}) reached.`;
+      }
+      return response;
+    } catch (e) {
+      this.memory.pruneToolMessages();
+      throw e;
+    }
+  }
+
+  async executeTask(
+    task: Task,
+    onStatus?: ((status: string) => void) | null
+  ): Promise<TaskResult> {
+    return this.withTurnLock(() => this.executeTaskImpl(task, onStatus));
+  }
+
+  private async executeTaskImpl(
+    task: Task,
+    onStatus?: ((status: string) => void) | null
+  ): Promise<TaskResult> {
+    await this.setState(AgentState.THINKING);
+    task.transitionTo(TaskState.RUNNING);
+    this.memory.setWorking('current_task', task);
+
+    const prompt = `Complete this task NOW using your available tools. Then write the actual deliverable content in your final reply.\n\nTask: ${task.description}`;
+    if (task.metadata) {
+      const ctxData: Record<string, any> = {};
+      for (const [k, v] of Object.entries(task.metadata)) {
+        if (k !== 'goal') ctxData[k] = v;
+      }
+      if (Object.keys(ctxData).length > 0) {
+        prompt + `\nContext: ${JSON.stringify(ctxData)}`;
+      }
+    }
+
+    // Save and isolate short-term for task execution
+    let savedShortTerm: Message[];
+    try {
+      // @ts-ignore - accessing private lock
+      savedShortTerm = [...this.memory.shortTerm];
+      this.memory.shortTerm = this.memory.shortTerm.filter(m => m.role === 'system');
+    } catch {
+      savedShortTerm = [...this.memory.shortTerm];
+      this.memory.shortTerm = this.memory.shortTerm.filter(m => m.role === 'system');
+    }
+
+    this.memory.addMessage('user', prompt);
+    const preLen = this.memory.shortTerm.length;
+
+    try {
+      const response = await this.llmLoop({ onStatus, ephemeral: true });
+      const filePaths = extractFilePathsFromMessages(this.memory.shortTerm.slice(preLen));
+      const enriched = enrichResponseWithArtifacts(response.content, filePaths);
+      this.memory.addMessage('assistant', enriched, { toolCalls: response.toolCalls, reasoningContent: response.reasoningContent });
+
+      task.transitionTo(TaskState.COMPLETED);
+      task.result = enriched;
+      await this.setState(AgentState.IDLE);
+      return new TaskResult(true, enriched);
+    } catch (e) {
+      task.transitionTo(TaskState.FAILED);
+      task.result = String(e);
+      this.memory.pruneToolMessages();
+      await this.setState(AgentState.ERROR);
+      return new TaskResult(false, String(e));
+    } finally {
+      // Restore chat history
+      this.memory.shortTerm = savedShortTerm!;
+    }
+  }
+
+  protected async checkToolApproval(toolName: string, toolArgs: Record<string, any>): Promise<boolean> {
+    const mode = (this.config as any).cli?.approvalMode || 'auto';
+    if (mode === 'strict') return false;
+    if (mode === 'interactive' && this.approvalCallback) {
+      return this.approvalCallback(toolName, toolArgs);
+    }
+    return true;
+  }
+
+  async requestHelp(targetAgent: string, description: string, timeout: number = 60): Promise<string> {
+    const correlationId = Math.random().toString(36).slice(2, 14);
+
+    const promise = new Promise<string>((resolve, reject) => {
+      this._pendingRequests.set(correlationId, { resolve, reject });
+    });
+
+    await this.bus.publish(new Event(
+      EventType.AGENT_REQUEST, this.name, targetAgent,
+      { correlation_id: correlationId, description, source: this.name }
+    ));
+
+    try {
+      const result = await Promise.race([
+        promise,
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error(`Timeout after ${timeout}s`)), timeout * 1000)
+        ),
+      ]);
+      return result;
+    } catch {
+      this._pendingRequests.delete(correlationId);
+      return `[${targetAgent} did not respond within ${timeout}s]`;
+    }
+  }
+
+  protected async handleRequest(event: Event): Promise<void> {
+    const description = event.data?.description || '';
+    const correlationId = event.data?.correlation_id || '';
+    const source = event.data?.source || '';
+    if (!correlationId) return;
+
+    const task = new Task({
+      id: `req-${correlationId.slice(0, 8)}`,
+      description,
+      assignedTo: this.name,
+    });
+
+    try {
+      const result = await this.executeTask(task);
+      await this.bus.publish(new Event(
+        EventType.AGENT_RESPONSE, this.name, source,
+        { correlation_id: correlationId, content: result.content, success: result.success }
+      ));
+    } catch (e) {
+      await this.bus.publish(new Event(
+        EventType.AGENT_RESPONSE, this.name, source,
+        { correlation_id: correlationId, content: `[error] ${e}`, success: false }
+      ));
+    }
+  }
+
+  protected handleResponse(event: Event): void {
+    const correlationId = event.data?.correlation_id || '';
+    if (!correlationId) return;
+    const pending = this._pendingRequests.get(correlationId);
+    if (pending) {
+      this._pendingRequests.delete(correlationId);
+      pending.resolve(event.data?.content || '');
+    }
+  }
+
+  getStatus(): Record<string, any> {
+    return {
+      name: this.name,
+      displayName: this.displayName,
+      emoji: this.emoji,
+      specialty: this.specialty,
+      state: this.state,
+      skills: this.getAvailableSkills(),
+    };
+  }
+
+  // ── Turn lock ──
+
+  private async withTurnLock<T>(fn: () => Promise<T>): Promise<T> {
+    while (this._turnLockCounter > 0) {
+      await new Promise<void>(resolve => {
+        const oldResolve = this._turnLockResolve;
+        this._turnLockResolve = () => { oldResolve?.(); resolve(); };
+      });
+    }
+    this._turnLockCounter++;
+    try {
+      return await fn();
+    } finally {
+      this._turnLockCounter--;
+      if (this._turnLockResolve) {
+        const r = this._turnLockResolve;
+        this._turnLockResolve = null;
+        r();
+      }
+    }
+  }
+}
