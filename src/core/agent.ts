@@ -501,6 +501,147 @@ export class BaseAgent {
     }));
   }
 
+  /**
+   * Shared tool execution pipeline — parse, deduplicate, execute, record.
+   *
+   * Both chatStreamImpl (streaming) and llmLoop (batch) use the same tool
+   * execution flow. Extracting it here eliminates ~80 lines of duplicated
+   * Phase-A/B/C/D logic and ensures consistent behavior (dangerous-tool
+   * approval, dedup, error handling) across both paths.
+   *
+   * @returns Array of { tc, result, success, toolName } for each tool call
+   */
+  protected async executeToolCalls(
+    toolCalls: ToolCall[],
+    options?: {
+      dedupCacheable?: boolean;         // Enable dedup for cacheable tools
+      onStatus?: (label: string) => void;
+      suppressedTools?: Set<string>;     // Tools to mark as suppressed on error
+      ephemeral?: boolean;               // Don't persist tool messages
+    }
+  ): Promise<Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>> {
+    const suppressed = options?.suppressedTools;
+    const ephemeral = options?.ephemeral ?? false;
+    const onStatus = options?.onStatus;
+
+    // Phase A: Parse all tool calls and resolve tools
+    const parsed = toolCalls.map((tc) => {
+      const toolName = tc.function.name;
+      const rawArgs = tc.function.arguments;
+      let toolArgs: Record<string, any> | null = null;
+      let parseError: string | null = null;
+
+      if (typeof rawArgs === 'string') {
+        toolArgs = parseToolArgs(rawArgs);
+        if (toolArgs === null) parseError = formatArgsParseError(toolName, rawArgs);
+      } else {
+        toolArgs = rawArgs;
+      }
+
+      this.bus.addEvent(new Event(EventType.TOOL_CALL, this.name, null, {
+        tool: toolName, args: toolArgs || {},
+      }));
+
+      const tool = this.toolRegistry.get(toolName);
+      const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
+
+      return { tc, toolName, toolArgs, tool, parseError, label, denied: false };
+    });
+
+    // Phase B: Approve dangerous tools (serial — may prompt user)
+    const dangerousCalls = parsed.filter(p => p.tool && (p.tool as ToolDefinition).dangerous);
+    if (dangerousCalls.length > 0) {
+      for (const p of dangerousCalls) {
+        if (!await this.checkToolApproval(p.toolName, p.toolArgs || {})) {
+          p.denied = true;
+        }
+      }
+    }
+
+    // Build execution plan with optional dedup
+    const execPlan: Array<{ idx: number; prep: typeof parsed[0]; isDuplicate: boolean }> = [];
+    const seenDedupKeys = new Map<string, number>();
+
+    for (let i = 0; i < parsed.length; i++) {
+      const p = parsed[i];
+      // Dedup: only for cacheable, non-dangerous tools with identical args
+      if (options?.dedupCacheable && p.toolArgs && p.tool && (p.tool as ToolDefinition).cacheable && !(p.tool as ToolDefinition).dangerous) {
+        const key = `${p.toolName}:${JSON.stringify(p.toolArgs, Object.keys(p.toolArgs).sort())}`;
+        if (seenDedupKeys.has(key)) {
+          execPlan.push({ idx: i, prep: p, isDuplicate: true });
+          continue;
+        }
+        seenDedupKeys.set(key, i);
+      }
+      execPlan.push({ idx: i, prep: p, isDuplicate: false });
+    }
+
+    // Phase C: Execute all unique tool calls in parallel
+    const results = new Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null>(parsed.length).fill(null);
+    const uniqueExecutions = execPlan
+      .filter(e => !e.isDuplicate)
+      .map(async ({ idx, prep }) => {
+        const p = prep;
+
+        if (p.parseError) {
+          return { idx, result: { tc: p.tc, result: p.parseError, success: false, toolName: p.toolName } };
+        }
+        if (p.denied) {
+          return { idx, result: { tc: p.tc, result: `[denied] dangerous tool '${p.toolName}' blocked`, success: false, toolName: p.toolName } };
+        }
+        if (!p.tool) {
+          if (suppressed) suppressed.add(p.toolName);
+          const suggestions = suggestToolNames(p.toolName, this.toolRegistry);
+          const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
+          return { idx, result: { tc: p.tc, result: `Error: Tool '${p.toolName}' does not exist.${hint}`, success: false, toolName: p.toolName } };
+        }
+
+        if (onStatus) onStatus(p.label);
+        await this.setState(AgentState.ACTING);
+
+        try {
+          const toolResult = await this.toolRegistry.execute(p.toolName, p.toolArgs || {});
+          const resultStr = toolResult.result || toolResult.error || '(no output)';
+          return { idx, result: { tc: p.tc, result: resultStr, success: toolResult.success, toolName: p.toolName } };
+        } catch (e) {
+          return { idx, result: { tc: p.tc, result: `Tool '${p.toolName}' execution failed: ${e}`, success: false, toolName: p.toolName } };
+        }
+      });
+
+    const completed = await Promise.all(uniqueExecutions);
+    for (const { idx, result } of completed) {
+      results[idx] = result;
+    }
+
+    // Fill in dedup results from originals
+    for (const e of execPlan) {
+      if (e.isDuplicate && e.prep.toolArgs) {
+        const dedupKey = `${e.prep.toolName}:${JSON.stringify(e.prep.toolArgs, Object.keys(e.prep.toolArgs).sort())}`;
+        const originalIdx = seenDedupKeys.get(dedupKey);
+        if (originalIdx !== undefined && results[originalIdx]) {
+          results[e.idx] = { ...results[originalIdx]!, tc: e.prep.tc };
+        }
+      }
+    }
+
+    // Phase D: Record results to memory
+    for (const r of results) {
+      if (!r) continue;
+
+      if (typeof r.result === 'string' && r.result.includes('[CircuitBreakerOpen]')) {
+        if (suppressed) suppressed.add(r.toolName);
+      }
+
+      this.memory.addMessage('tool', r.result, {
+        name: r.toolName,
+        toolCallId: r.tc.id,
+        ephemeral,
+      });
+    }
+
+    return results.filter(Boolean) as Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>;
+  }
+
   async close(): Promise<void> {
     // Drain in-flight background work BEFORE closing memory
     const pending = [...this._pendingExtracts];
@@ -747,128 +888,44 @@ export class BaseAgent {
           }));
         }
 
-        // ── Phase 1: Parse args, look up tools, emit status ──
-        const toolPrep: Array<{
-          tc: ToolCall;
-          toolName: string;
-          toolArgs: Record<string, any> | null;
-          parseError: string | null;
-          toolLabel: string;
-        }> = [];
-
+        // ── Execute all tools via shared pipeline ──
+        // Emit tool_status events before execution
         for (const tc of toolCallsReceived) {
           const toolName = tc.function.name;
           const rawArgs = tc.function.arguments;
-          let toolArgs: Record<string, any> | null;
-          let parseError: string | null = null;
-
-          if (typeof rawArgs === 'string') {
-            toolArgs = parseToolArgs(rawArgs);
-            if (toolArgs === null) {
-              parseError = formatArgsParseError(toolName, rawArgs);
-            }
-          } else {
-            toolArgs = rawArgs;
-          }
-
-          this.bus.addEvent(new Event(EventType.TOOL_CALL, this.name, null, {
-            tool: toolName, args: toolArgs || {},
-          }));
-
-          const label = toolArgs
-            ? toolStatusLabel(toolName, toolArgs)
-            : `${toolName} (unparseable args)`;
-
+          const toolArgs = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
+          const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
           yield { type: 'tool_status', label, tool_name: toolName, args: toolArgs || {} };
-          toolPrep.push({ tc, toolName, toolArgs, parseError, toolLabel: label });
         }
 
-        // ── Phase 2: Execute all tool handlers in parallel ──
-        const dedupeKey = (p: typeof toolPrep[0]): string | null => {
-          if (!p.toolArgs) return null;
-          try {
-            return `${p.toolName}:${JSON.stringify(p.toolArgs, Object.keys(p.toolArgs).sort())}`;
-          } catch {
-            return null;
-          }
-        };
+        const execResults = await this.executeToolCalls(toolCallsReceived, {
+          dedupCacheable: true,
+          suppressedTools,
+        });
 
-        const execResults: Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null> =
-          new Array(toolPrep.length).fill(null);
-        const firstForKey = new Map<string, number>();
-        const execPlan: Array<[number, typeof toolPrep[0]]> = [];
-
-        for (let idx = 0; idx < toolPrep.length; idx++) {
-          const prep = toolPrep[idx];
-          const key = dedupeKey(prep);
-          const tool = this.toolRegistry.get(prep.toolName);
-          if (key && tool && (tool as any).cacheable && !(tool as any).dangerous && firstForKey.has(key)) {
-            continue;
-          }
-          if (key && tool && (tool as any).cacheable && !(tool as any).dangerous) {
-            firstForKey.set(key, idx);
-          }
-          execPlan.push([idx, prep]);
-        }
-
-        const uniqueResults = await Promise.all(
-          execPlan.map(async ([idx, prep]) => {
-            if (prep.parseError) {
-              return { tc: prep.tc, result: prep.parseError, success: false, toolName: prep.toolName };
-            }
-            const tool = this.toolRegistry.get(prep.toolName);
-            if (!tool) {
-              const suggestions = suggestToolNames(prep.toolName, this.toolRegistry);
-              const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
-              suppressedTools.add(prep.toolName);
-              return { tc: prep.tc, result: `Error: Tool '${prep.toolName}' does not exist.${hint}`, success: false, toolName: prep.toolName };
-            }
-            if ((tool as any).dangerous) {
-              log.warn('dangerous_tool_call', { tool: prep.toolName, agent: this.name });
-              if (!await this.checkToolApproval(prep.toolName, prep.toolArgs || {})) {
-                return { tc: prep.tc, result: `[denied] dangerous tool '${prep.toolName}' blocked`, success: false, toolName: prep.toolName };
-              }
-            }
-            await this.setState(AgentState.ACTING);
-            try {
-              const toolResult = await this.toolRegistry.execute(prep.toolName, prep.toolArgs || {});
-              const resultStr = toolResult.result || toolResult.error || '(no output)';
-              return { tc: prep.tc, result: resultStr, success: toolResult.success, toolName: prep.toolName };
-            } catch (e) {
-              return { tc: prep.tc, result: `Tool '${prep.toolName}' execution failed: ${e}`, success: false, toolName: prep.toolName };
-            }
-          })
-        );
-
-        for (let i = 0; i < execPlan.length; i++) {
-          const [idx] = execPlan[i];
-          execResults[idx] = uniqueResults[i];
-        }
-
-        // ── Phase 3: Record results ──
+        // ── Record results with streaming ──
         let taskCompleted = false;
         for (const r of execResults) {
-          if (!r) continue;
-          if (typeof r.result === 'string' && r.result.includes('[CircuitBreakerOpen]')) {
-            suppressedTools.add(r.toolName);
-          }
           if (r.toolName === 'task_done' && r.result === TASK_DONE_SENTINEL) {
             taskCompleted = true;
-            const prep = toolPrep.find(p => p.tc === r.tc);
-            const summary = prep?.toolArgs?.summary as string || '';
+            const tc = toolCallsReceived.find(t => t.id === r.tc.id);
+            const rawArgs = tc?.function?.arguments;
+            const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
+            const summary = (args?.summary as string) || '';
             const displayResult = summary ? `[Task completed: ${summary}]` : '[Task completed]';
             this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
             yield { type: 'tool_done', label: `task_done: ${summary}` || 'task_done', success: true, tool_name: 'task_done', result: displayResult };
             continue;
           }
-          this.memory.addMessage('tool', r.result, { name: r.toolName, toolCallId: r.tc.id });
-          const prep = toolPrep.find(p => p.tc === r.tc);
-          yield {
-            type: 'tool_done', label: prep?.toolLabel || r.toolName, success: r.success,
-            tool_name: r.toolName, result: typeof r.result === 'string' ? r.result.slice(0, 800) : String(r.result).slice(0, 800),
-          };
+
+          const tc = toolCallsReceived.find(t => t.id === r.tc.id);
+          const rawArgs = tc?.function?.arguments;
+          const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
+          const label = args ? toolStatusLabel(r.toolName, args) : r.toolName;
+          const truncated = (r.result || '').slice(0, 800);
+          yield { type: 'tool_done', label, success: r.success, tool_name: r.toolName, result: truncated };
           if (r.toolName === 'delegate_to') {
-            const target = prep?.toolArgs?.agent as string || '?';
+            const target = (args?.agent as string) || '?';
             delegations.push([target, r.success]);
           }
         }
@@ -893,9 +950,12 @@ export class BaseAgent {
         if (recentResponseTexts.length > 3) recentResponseTexts.shift();
 
         // ── Tool-signature loop detection ──
-        for (const p of toolPrep) {
-          if (['task_done', 'list_skills', 'use_skill'].includes(p.toolName)) continue;
-          const sig = toolCallSignature(p.toolName, p.toolArgs);
+        for (const tc of toolCallsReceived) {
+          const tName = tc.function.name;
+          if (['task_done', 'list_skills', 'use_skill'].includes(tName)) continue;
+          const rawArgs = tc.function.arguments;
+          const tArgs = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
+          const sig = toolCallSignature(tName, tArgs);
           if (sig) recentToolSigs.push(sig);
         }
         if (recentToolSigs.length > SIG_WINDOW) {
@@ -1262,75 +1322,8 @@ export class BaseAgent {
           ephemeral,
         });
 
-        // ── Tool execution pipeline ──
-        const parsed: Array<{
-          tc: ToolCall; toolName: string; toolArgs: Record<string, any> | null;
-          tool: ToolDefinition | undefined; parseError: string | null; toolLabel: string; denied: boolean;
-        }> = [];
-        let anyDangerous = false;
-
-        for (const tc of response.toolCalls) {
-          const toolName = tc.function.name;
-          const rawArgs = tc.function.arguments;
-          let parseError: string | null = null;
-          let toolArgs: Record<string, any> | null;
-
-          if (typeof rawArgs === 'string') {
-            toolArgs = parseToolArgs(rawArgs);
-            if (toolArgs === null) parseError = formatArgsParseError(toolName, rawArgs);
-          } else {
-            toolArgs = rawArgs;
-          }
-
-          const tool = this.toolRegistry.get(toolName);
-          const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
-
-          this.bus.addEvent(new Event(EventType.TOOL_CALL, this.name, null, {
-            tool: toolName, args: toolArgs || {},
-          }));
-
-          if (tool && (tool as any).dangerous) anyDangerous = true;
-          parsed.push({ tc, toolName, toolArgs, tool, parseError, toolLabel: label, denied: false });
-        }
-
-        // Phase B: dangerous-tool approval
-        if (anyDangerous) {
-          for (const p of parsed) {
-            if (p.tool && (p.tool as any).dangerous && !p.denied) {
-              log.warn('dangerous_tool_call', { tool: p.toolName, agent: this.name });
-              if (!await this.checkToolApproval(p.toolName, p.toolArgs || {})) {
-                p.denied = true;
-              }
-            }
-          }
-        }
-
-        // Phase C: execute all tools in parallel
-        const outcomes = await Promise.all(
-          parsed.map(async (p) => {
-            if (p.parseError) return { tc: p.tc, result: p.parseError };
-            if (p.denied) return { tc: p.tc, result: `[denied] dangerous tool '${p.toolName}' blocked` };
-            if (!p.tool) {
-              const suggestions = suggestToolNames(p.toolName, this.toolRegistry);
-              const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
-              return { tc: p.tc, result: `Error: Tool '${p.toolName}' does not exist.${hint}` };
-            }
-            if (onStatus) onStatus(p.toolLabel);
-            await this.setState(AgentState.ACTING);
-            const toolResult2 = await this.toolRegistry.execute(p.toolName, p.toolArgs || {});
-            return { tc: p.tc, result: toolResult2.result || toolResult2.error || '(no output)' };
-          })
-        );
-
-        // Phase D: write results to memory
-        for (const o of outcomes) {
-          this.memory.addMessage('tool', o.result, {
-            name: parsed.find(p => p.tc === o.tc)?.toolName,
-            toolCallId: o.tc.id,
-            ephemeral,
-          });
-        }
-
+        // ── Execute all tools via shared pipeline ──
+        await this.executeToolCalls(response.toolCalls, { onStatus: onStatus ?? undefined, ephemeral });
         await this.setState(AgentState.THINKING);
       }
 
