@@ -14,25 +14,6 @@ import { ToolRegistry } from './tool';
 
 const log = getLogger('factory');
 
-// Agent class map — imported lazily to avoid circular dependencies
-const AGENT_CLASSES: Record<string, new (...args: any[]) => BaseAgent> = {};
-
-try {
-  // Dynamic imports for agents
-  const loadAgent = async (name: string) => {
-    try {
-      const mod = await import(`../agents/${name}`);
-      const className = name.charAt(0).toUpperCase() + name.slice(1) + 'Agent';
-      return mod[className];
-    } catch {
-      log.warn(`agent_class_not_found`, { agent: name });
-      return null;
-    }
-  };
-
-  // We'll set these lazily; for now, export the factory functions
-} catch { /* ignore */ }
-
 export class SystemContext {
   config: ReturnType<typeof loadConfig>;
   bus: MessageBus;

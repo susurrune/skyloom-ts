@@ -7,17 +7,13 @@
 
 import { Command } from 'commander';
 import * as fs from 'fs';
-import * as path from 'path';
 import * as readline from 'readline';
 import chalk from 'chalk';
 import { createSystemContext, orchestrateTask } from '../core/factory';
 import { loadConfig, USER_CONFIG_DIR } from '../core/config';
-import { iconText } from '../core/icons';
-import { classify, pickAgentForGoal } from '../core/router';
-import { getLogger } from '../core/logger';
+import { classify } from '../core/router';
 import { InteractiveMode, ModeController } from './mode';
 
-const log = getLogger('cli');
 const MODE = new ModeController();
 const VERSION = '1.4.0';
 

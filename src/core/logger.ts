@@ -6,9 +6,6 @@
  *   log.info("chat_request", { userMessage: "hello", agent: "fog" });
  */
 
-import * as fs from "fs";
-import * as path from "path";
-
 export enum LogLevel {
   DEBUG = 0,
   INFO = 1,
@@ -38,7 +35,6 @@ export class Logger {
   }
 
   private formatEntry(
-    level: LogLevel,
     levelName: string,
     msg: string,
     extra?: Record<string, unknown>
@@ -51,18 +47,14 @@ export class Logger {
       ...extra,
     };
 
-    if (requestId) {
-      entry.request_id = requestId;
-    }
-
     return entry;
   }
 
   private output(level: LogLevel, levelName: string, msg: string, extra?: Record<string, unknown>) {
     if (level < this.minLevel) return;
 
-    const entry = this.formatEntry(level, levelName, msg, extra);
-    const line = JSON.stringify(entry, (key, value) => {
+    const entry = this.formatEntry(levelName, msg, extra);
+    const line = JSON.stringify(entry, (_key, value) => {
       // Ensure dates are serializable
       if (value instanceof Date) {
         return value.toISOString();

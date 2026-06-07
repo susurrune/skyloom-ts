@@ -11,7 +11,7 @@ import { LLMClient, type LLMResponse, type ToolCall } from './llm';
 import { getLogger } from './logger';
 import { Memory, Message } from './memory';
 import { Skill, SkillRegistry } from './skill';
-import { type ToolDefinition, type ToolParameter, ToolRegistry } from './tool';
+import { type ToolDefinition, ToolRegistry } from './tool';
 import {
   parseToolArgs,
   looksLikeFailedToolResult,

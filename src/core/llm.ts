@@ -5,11 +5,8 @@
  * with automatic fallback chains, prompt caching for Anthropic, and cost estimation.
  */
 
-import * as os from "os";
 import type { Logger } from "./logger";
 import { LLMCache } from "./cache";
-import type { SkyloomConfig } from "./config";
-type AppConfig = any;
 import type { ToolRegistry } from "./tool";
 
 /**
@@ -178,7 +175,7 @@ function toolCompatibleModels(
  * Adding `cache_control: {"type": "ephemeral"}` to system prompt and tools
  * enables 5-minute KV cache, reducing input cost ~80% on subsequent turns.
  */
-function applyAnthropicCacheControl(
+function _applyAnthropicCacheControl(
   model: string,
   messages: Record<string, unknown>[],
   toolSchemas: Record<string, unknown>[] | null
@@ -257,7 +254,7 @@ function applyAnthropicCacheControl(
  * Estimate token count for mixed CJK/English text.
  * CJK characters ~2 tokens each, non-CJK ~4 chars per token.
  */
-function estimateTokens(text: string): number {
+function _estimateTokens(text: string): number {
   // Count CJK characters (simplified check)
   const cjkRegex = /[\u4E00-\u9FFF\u3040-\u309F\uAC00-\uD7AF]/g;
   const cjkCount = (text.match(cjkRegex) || []).length;
@@ -466,22 +463,22 @@ function formatUserFacingError(model: string, err: unknown): string {
  * Unified LLM client with retry, fallback chains, caching, cost tracking, and budget control.
  */
 export class LLMClient {
-  private config: AppConfig;
-  private toolRegistry: ToolRegistry;
-  private cache: LLMCache;
+  private config: any;
+  private _toolRegistry: ToolRegistry;
+  private _cache: LLMCache;
   private usageStats: Map<string, Record<string, number>> = new Map();
   private totalCost: number = 0;
   private costLimit: number | null;
   private log: Logger | null = null;
 
   constructor(
-    config: AppConfig,
+    config: any,
     toolRegistry: ToolRegistry,
     costLimit: number | null = null
   ) {
     this.config = config;
-    this.toolRegistry = toolRegistry;
-    this.cache = new LLMCache(256, 120);
+    this._toolRegistry = toolRegistry;
+    this._cache = new LLMCache(256, 120);
     this.costLimit = costLimit;
   }
 
@@ -508,7 +505,7 @@ export class LLMClient {
   /**
    * Get max retries from config.
    */
-  private getRetries(): number {
+  private _getRetries(): number {
     return (this.config.llm as any)?.maxRetries ?? 2;
   }
 
@@ -669,10 +666,10 @@ export class LLMClient {
    */
   private async completeWithRetry(
     model: string,
-    messages: Record<string, unknown>[],
-    agentName?: string,
-    tools?: string[],
-    stream: boolean = false,
+    _messages: Record<string, unknown>[],
+    _agentName?: string,
+    _tools?: string[],
+    _stream: boolean = false,
     overrides?: Record<string, unknown>
   ): Promise<LLMResponse> {
     // This is a placeholder. Real implementation would:
@@ -683,8 +680,8 @@ export class LLMClient {
     // 5. Track usage and cost
     // 6. Cache results if appropriate
 
-    const temperature = (overrides?.temperature as number) ?? 0.7;
-    const maxTokens = (overrides?.maxTokens as number) ?? 2000;
+    const _temperature = (overrides?.temperature as number) ?? 0.7;
+    const _maxTokens = (overrides?.maxTokens as number) ?? 2000;
 
     // For now, return a dummy response
     return {
@@ -701,8 +698,8 @@ export class LLMClient {
    * Stream a completion (placeholder).
    */
   async *stream(
-    messages: Record<string, unknown>[],
-    agentName?: string
+    _messages: Record<string, unknown>[],
+    _agentName?: string
   ): AsyncGenerator<string> {
     // Placeholder implementation
     yield "Streaming response...";
@@ -712,11 +709,11 @@ export class LLMClient {
    * Stream completion with tool awareness (placeholder).
    */
   async *streamWithTools(
-    messages: Record<string, unknown>[],
-    agentName?: string,
-    tools?: string[],
-    toolRegistry?: ToolRegistry,
-    overrides?: Record<string, unknown>
+    _messages: Record<string, unknown>[],
+    _agentName?: string,
+    _tools?: string[],
+    _toolRegistry?: ToolRegistry,
+    _overrides?: Record<string, unknown>
   ): AsyncGenerator<StreamEvent> {
     // Placeholder implementation
     yield {

@@ -10,10 +10,6 @@ import { spawn, ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import type { Logger } from "./logger";
-import type { ToolParameter } from "./tool";
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-type _ToolParam = ToolParameter;
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const CLIENT_INFO = { name: "skyloom", version: "1.0.0" };
@@ -60,16 +56,6 @@ interface JsonRpcMessage {
 }
 
 /**
- * SSE event object.
- */
-interface SSEEvent {
-  event: string;
-  data?: string;
-  id?: string;
-  retry?: string;
-}
-
-/**
  * Client for connecting to a single MCP server.
  *
  * Supports both stdio (subprocess) and SSE (text/event-stream) transports.
@@ -85,13 +71,9 @@ export class MCPClient {
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
   }> = new Map();
-  private readerTask: Promise<void> | null = null;
-  private stderrTask: Promise<void> | null = null;
-  private sendLock = Promise.resolve();
   private log: Logger | null = null;
 
   // SSE-specific state
-  private httpClient: any = null;
   private sseResponse: any = null;
   private sseMessageUrl: string = "";
 
@@ -164,8 +146,8 @@ export class MCPClient {
         }
 
         // Start background reading tasks
-        this.readerTask = this.readStdioLoop();
-        this.stderrTask = this.drainStderr();
+        this.readStdioLoop();
+        this.drainStderr();
 
         // Send initialize request
         this.requestStdio("initialize", {
@@ -280,8 +262,9 @@ export class MCPClient {
 
         // Process complete lines (JSON-RPC messages are newline-delimited)
         while (buffer.includes("\n")) {
-          const [line, rest] = buffer.split("\n", 1);
-          buffer = buffer.slice(line.length + 1);
+          const idx = buffer.indexOf("\n");
+          const line = idx >= 0 ? buffer.slice(0, idx) : buffer;
+          buffer = idx >= 0 ? buffer.slice(idx + 1) : "";
 
           const msg = this.parseJsonLine(line);
           if (!msg) {
@@ -450,7 +433,7 @@ export class MCPClient {
   /**
    * POST JSON data via HTTP (SSE).
    */
-  private async postJson(data: JsonRpcMessage): Promise<void> {
+  private async postJson(_data: JsonRpcMessage): Promise<void> {
     if (!this.sseMessageUrl) {
       throw new Error("SSE message URL not set");
     }

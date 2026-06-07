@@ -15,7 +15,6 @@ export type CircuitBreakerState = "closed" | "open" | "half_open";
  * Circuit breaker implementation
  */
 export class CircuitBreaker {
-  private name: string;
   private state: CircuitBreakerState = "closed";
   private failureCount = 0;
   private successCount = 0;
@@ -25,7 +24,6 @@ export class CircuitBreaker {
   private resetTimeout: number;
 
   constructor(config: CircuitBreakerConfig) {
-    this.name = config.name;
     this.failureThreshold = config.failureThreshold ?? 5;
     this.successThreshold = config.successThreshold ?? 3;
     this.resetTimeout = config.resetTimeout ?? 60000; // 60 seconds
