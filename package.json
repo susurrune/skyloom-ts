@@ -2,7 +2,7 @@
   "name": "skyloom",
   "version": "1.4.0",
   "description": "Weather-themed multi-agent system: Fog, Rain, Frost, Snow, Dew, Fair — a universal AI tool orchestration framework",
-  "type": "module",
+  "type": "commonjs",
   "main": "./dist/index.js",
   "bin": {
     "sky": "./dist/cli/main.js"
