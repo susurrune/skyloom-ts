@@ -80,6 +80,22 @@ program
     }
   });
 
+// ── MCP command ──
+
+program
+  .command('mcp')
+  .description('Start MCP server (stdio JSON-RPC for Claude Desktop etc.)')
+  .action(async () => {
+    try {
+      console.error(chalk.cyan('Starting MCP server on stdio...'));
+      const { startMCPServer } = await import('../core/mcp_server');
+      await startMCPServer();
+    } catch (e) {
+      console.error(chalk.red(`MCP server error: ${e}`));
+      process.exit(1);
+    }
+  });
+
 // ── Config command ──
 
 program

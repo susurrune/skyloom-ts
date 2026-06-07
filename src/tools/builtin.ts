@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { ToolRegistry } from '../core/tool';
 import { getLogger } from '../core/logger';
+import { registerComputerTools } from './computer';
 
 const log = getLogger('builtin-tools');
 
@@ -13,6 +14,8 @@ const log = getLogger('builtin-tools');
  * Register all built-in tools into the given registry.
  */
 export function registerBuiltinTools(registry: ToolRegistry): void {
+  // Register computer tools
+  registerComputerTools(registry);
   // ── File Tools ──
 
   registry.register({
