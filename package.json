@@ -19,7 +19,9 @@
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",
-    "pretest": "npm run type-check"
+    "pretest": "npm run type-check",
+    "setup": "node scripts/install.js",
+    "postinstall": "node scripts/link.js"
   },
   "keywords": [
     "multi-agent",
