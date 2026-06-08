@@ -1,6 +1,6 @@
 {
   "name": "skyloom",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "天空织机 Skyloom — 6 weather-themed AI agents: Fog, Rain, Frost, Snow, Dew, Fair",
   "preferGlobal": true,
   "type": "commonjs",

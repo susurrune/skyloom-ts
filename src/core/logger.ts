@@ -69,9 +69,8 @@ export class Logger {
       return value;
     });
 
-    // Output to stderr for logs, stdout for normal output
-    const output = level >= LogLevel.WARN ? console.error : console.log;
-    output(line);
+    // Write all logs to stderr to keep stdout clean for chat/TUI
+    process.stderr.write(line + "\n");
   }
 
   debug(msg: string, extra?: Record<string, unknown>) {
@@ -100,7 +99,7 @@ export class Logger {
  */
 const loggers = new Map<string, Logger>();
 let requestId: string | null = null;
-let defaultLogLevel = LogLevel.INFO;
+let defaultLogLevel = LogLevel.WARN; // Only warnings+errors by default
 
 /**
  * Get or create a logger for a component

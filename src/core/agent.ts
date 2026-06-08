@@ -729,13 +729,14 @@ export class BaseAgent {
     try {
       if (onStatus) onStatus('thinking...');
       const response = await this.llmLoop({ onStatus });
-      this.memory.addMessage('assistant', response.content, {
-        toolCalls: response.toolCalls,
-        reasoningContent: response.reasoningContent,
+      const content = response?.content || '(no response)';
+      this.memory.addMessage('assistant', content, {
+        toolCalls: response?.toolCalls || [],
+        reasoningContent: response?.reasoningContent,
       });
       await this.setState(AgentState.IDLE);
       this.maybeExtractFacts();
-      return response.content;
+      return content;
     } catch (e) {
       await this.setState(AgentState.ERROR);
       this.popLastUserMessage();

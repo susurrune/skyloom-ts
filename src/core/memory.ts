@@ -276,7 +276,9 @@ export class Memory {
   private dbRun(sql: string, params?: any[]): void {
     if (!this.db) return;
     try {
-      this.db.run(sql, params);
+      // Sql.js rejects `undefined` in bind arrays; normalize to `null`
+      const safe = params ? params.map((v) => v === undefined ? null : v) : undefined;
+      this.db.run(sql, safe);
     } catch (err) {
       logger.warn('db_run_failed', { sql: sql.slice(0, 80), error: String(err) });
     }
