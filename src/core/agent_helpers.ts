@@ -448,6 +448,41 @@ export function toolStatusLabel(name: string, args: Record<string, any>): string
 }
 
 /**
+ * Parse LLM fact-extraction output into a list of {key,value,category} records.
+ * Tolerant of raw JSON, markdown-fenced JSON, and a JSON array embedded in prose.
+ * Pure — extracted from BaseAgent (Phase 3).
+ */
+export function parseExtractedFacts(content: string): Array<{ key: string; value: any; category?: string }> {
+  const text = (content || '').trim();
+  if (!text) return [];
+
+  // 1. Direct parse
+  try {
+    const data = JSON.parse(text);
+    if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
+  } catch { /* continue */ }
+
+  // 2. Markdown-fenced JSON
+  const fenceMatch = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+  if (fenceMatch) {
+    try {
+      const data = JSON.parse(fenceMatch[1]);
+      if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
+    } catch { /* continue */ }
+  }
+
+  // 3. First JSON array substring
+  const arrayMatch = text.match(/\[[\s\S]*?\]/);
+  if (arrayMatch) {
+    try {
+      const data = JSON.parse(arrayMatch[0]);
+      if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
+    } catch { /* continue */ }
+  }
+  return [];
+}
+
+/**
  * Build a short fallback line shown when a turn ends with delegate_to calls but no plain text.
  */
 export function synthesizeDelegationSummary(delegations: Array<[string, boolean]>): string {

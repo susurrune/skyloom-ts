@@ -223,6 +223,14 @@ export interface SkyloomConfig {
   agents: Record<string, AgentConfig>;
   providers?: Record<string, ProviderEntry>;
   models?: Record<string, ModelEntry[]>;
+  /** Top-level default model chosen by the setup wizard (e.g. "deepseek-v4-flash"). */
+  default_model?: string;
+  /** Top-level default provider chosen by the setup wizard. */
+  default_provider?: string;
+  /** LLM defaults block from default.yaml / user config (snake_case keys). */
+  llm?: Record<string, any>;
+  /** Other passthrough top-level config (memory, workspace, cli, mcp, plugins, tts…). */
+  [key: string]: any;
 }
 
 /**
@@ -261,18 +269,26 @@ export function mergeConfigs(defaultCfg: SkyloomConfig, userCfg: SkyloomConfig |
     return defaultCfg;
   }
 
+  // Preserve all top-level keys (default_model, default_provider, llm, memory,
+  // workspace, …) with the user winning, then deep-merge the known sub-objects.
   return {
+    ...defaultCfg,
+    ...userCfg,
     agents: {
       ...defaultCfg.agents,
       ...userCfg.agents,
     },
     providers: {
-      ...defaultCfg.providers,
-      ...userCfg.providers,
+      ...(defaultCfg.providers || {}),
+      ...(userCfg.providers || {}),
     },
     models: {
-      ...defaultCfg.models,
-      ...userCfg.models,
+      ...(defaultCfg.models || {}),
+      ...(userCfg.models || {}),
+    },
+    llm: {
+      ...(defaultCfg.llm || {}),
+      ...(userCfg.llm || {}),
     },
   };
 }

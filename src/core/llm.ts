@@ -499,7 +499,10 @@ export class LLMClient {
         return String(agentCfg.model);
       }
     }
-    return this.config.llm?.defaultModel || "gpt-4o";
+    // Honor the user's configured default (set by the /setup wizard). YAML uses
+    // snake_case; the legacy camelCase read is kept as a last resort.
+    const c: any = this.config;
+    return c.default_model || c.llm?.default_model || c.llm?.defaultModel || "gpt-4o";
   }
 
   /**
@@ -792,13 +795,113 @@ export class LLMClient {
     yield response.content;
   }
 
+  /**
+   * Real SSE token streaming for OpenAI-compatible providers (openai, deepseek,
+   * groq, openrouter, mistral, xai, ollama). Content + reasoning deltas are
+   * yielded as they arrive; tool-call deltas are accumulated by index and
+   * emitted once complete. Usage comes from the final `stream_options` chunk.
+   */
+  private async *callOpenAIStream(
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number
+  ): AsyncGenerator<StreamEvent> {
+    const apiKey = this.getApiKey(m);
+    const baseUrl = this.getBaseUrl(m);
+    const body: Record<string, unknown> = {
+      model: m, messages, temperature: temp ?? 0.7, max_tokens: maxTok ?? 4096,
+      stream: true, stream_options: { include_usage: true },
+    };
+    if (tools?.length) {
+      const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
+      if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters || []) } }));
+    }
+    const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body) });
+    if (!resp.ok || !resp.body) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
+
+    const reader = (resp.body as any).getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+    let usage: UsageStats = { promptTokens: 0, completionTokens: 0 };
+    let reasoning = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        const data = t.slice(5).trim();
+        if (data === "[DONE]") continue;
+        let json: any; try { json = JSON.parse(data); } catch { continue; }
+        if (json.usage) usage = { promptTokens: json.usage.prompt_tokens || 0, completionTokens: json.usage.completion_tokens || 0 };
+        const delta = json.choices?.[0]?.delta;
+        if (!delta) continue;
+        if (delta.content) yield { type: "content", text: delta.content };
+        if (delta.reasoning_content) { reasoning += delta.reasoning_content; yield { type: "reasoning", text: delta.reasoning_content }; }
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            const acc = toolAcc.get(idx) || { id: "", name: "", args: "" };
+            if (tc.id) acc.id = tc.id;
+            if (tc.function?.name) acc.name = tc.function.name;
+            if (tc.function?.arguments) acc.args += tc.function.arguments;
+            toolAcc.set(idx, acc);
+          }
+        }
+      }
+    }
+    for (const acc of toolAcc.values()) {
+      if (acc.name) yield { type: "tool_call", toolCall: { id: acc.id || ("call_" + acc.name), type: "function", function: { name: acc.name, arguments: acc.args || "{}" } } };
+    }
+    yield { type: "done", usage, reasoningContent: reasoning || undefined };
+  }
+
   async *streamWithTools(
     messages: Record<string, unknown>[], agentName?: string, tools?: string[],
     _toolRegistry?: ToolRegistry, overrides?: Record<string, unknown>
   ): AsyncGenerator<StreamEvent> {
-    const response = await this.complete(messages, agentName, tools, false, overrides);
-    if (response.content) yield { type: "content", text: response.content };
-    for (const tc of response.toolCalls || []) yield { type: "tool_call", toolCall: tc };
-    yield { type: "done", usage: response.usage, reasoningContent: response.reasoningContent };
+    this.checkBudget();
+    const ov = overrides || {};
+    const model: string = typeof ov.model === "string" ? ov.model : this.getModel(agentName);
+    const temperature = (ov.temperature as number) ?? 0.7;
+    const maxTokens = (ov.maxTokens as number) ?? 4096;
+    const isAnthropic = model.includes("claude") || model.startsWith("anthropic/");
+
+    // Blocking fallback used for Anthropic (different wire format) and on
+    // failures before any content has streamed (preserves fallback chain + retry).
+    const blockingFallback = async function* (this: LLMClient): AsyncGenerator<StreamEvent> {
+      const response = await this.complete(messages, agentName, tools, false, overrides);
+      if (response.content) yield { type: "content", text: response.content };
+      for (const tc of response.toolCalls || []) yield { type: "tool_call", toolCall: tc };
+      yield { type: "done", usage: response.usage, reasoningContent: response.reasoningContent };
+    }.bind(this);
+
+    if (isAnthropic) { yield* blockingFallback(); return; }
+
+    let started = false;
+    let usage: UsageStats = { promptTokens: 0, completionTokens: 0 };
+    try {
+      for await (const ev of this.callOpenAIStream(model, messages, tools, temperature, maxTokens)) {
+        if (ev.type === "content" || ev.type === "tool_call") started = true;
+        if (ev.type === "done" && ev.usage) usage = ev.usage;
+        yield ev;
+      }
+    } catch (e: any) {
+      if (started) { yield { type: "error", text: String(e?.message || e) }; yield { type: "done", usage }; return; }
+      this.log?.warn("stream_failed_fallback", { model, error: String(e?.message || e) });
+      yield* blockingFallback();
+      return;
+    }
+
+    // Usage + cost bookkeeping (mirrors completeWithRetry).
+    const name = agentName || "default";
+    if (!this.usageStats.has(name)) this.usageStats.set(name, { prompt_tokens: 0, completion_tokens: 0, calls: 0, cost: 0 });
+    const s = this.usageStats.get(name)!;
+    s.prompt_tokens += usage.promptTokens; s.completion_tokens += usage.completionTokens; s.calls += 1;
+    const cost = estimateCost(model, usage.promptTokens, usage.completionTokens);
+    s.cost += cost; this.totalCost += cost;
   }
 }

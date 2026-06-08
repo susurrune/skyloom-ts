@@ -6,24 +6,20 @@ llm:
   temperature: 0.7
   max_tokens: 4096
 
+# Per-agent models inherit `llm.default_model` (or the user's wizard-chosen
+# top-level default_model) unless an agent sets its own `model:` here.
 agents:
   fog:
-    model: gpt-4o
     temperature: 0.7
   rain:
-    model: gpt-4o
     temperature: 0.7
   frost:
-    model: gpt-4o
     temperature: 0.3
   snow:
-    model: gpt-4o
     temperature: 0.5
   dew:
-    model: gpt-4o
     temperature: 0.3
   fair:
-    model: gpt-4o
     temperature: 0.9
 
 memory:

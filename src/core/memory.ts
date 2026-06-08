@@ -514,18 +514,25 @@ export class Memory {
 
     const ephemeral = kwargs?.ephemeral ?? false;
 
-    // Mutex-locked section
-    this.shortTermLock.lock(async () => {
-      this.shortTerm.push(msg);
+    // Push synchronously so getMessages()/shortTerm reflect the message in the
+    // same tick — callers (chatImpl/chatStreamImpl) read it immediately after.
+    // (Single-threaded JS makes the push atomic; only the array-rewriting prune
+    // needs the mutex.) Previously the push lived inside the async lock body,
+    // so a fresh session's first user message was missing from the first LLM
+    // request and messagesWithRecall() crashed on undefined.content.
+    this.shortTerm.push(msg);
 
-      if (this.shortTerm.length > this.config.shortTermLimit) {
-        const systemMsgs = this.shortTerm.filter(m => m.role === 'system');
-        const otherMsgs = this.shortTerm.filter(m => m.role !== 'system');
-        const keep = Math.max(0, this.config.shortTermLimit - systemMsgs.length);
-        this.shortTerm = systemMsgs.concat(keep > 0 ? otherMsgs.slice(-keep) : []);
-        this.pruneDanglingToolCalls();
-      }
-    });
+    if (this.shortTerm.length > this.config.shortTermLimit) {
+      this.shortTermLock.lock(async () => {
+        if (this.shortTerm.length > this.config.shortTermLimit) {
+          const systemMsgs = this.shortTerm.filter(m => m.role === 'system');
+          const otherMsgs = this.shortTerm.filter(m => m.role !== 'system');
+          const keep = Math.max(0, this.config.shortTermLimit - systemMsgs.length);
+          this.shortTerm = systemMsgs.concat(keep > 0 ? otherMsgs.slice(-keep) : []);
+          this.pruneDanglingToolCalls();
+        }
+      });
+    }
 
     // Persist message if not ephemeral
     if (this.db && role !== 'system' && !ephemeral) {
