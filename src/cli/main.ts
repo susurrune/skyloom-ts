@@ -10,6 +10,7 @@ import { createSystemContext, orchestrateTask } from "../core/factory";
 import { loadConfig, USER_CONFIG_DIR } from "../core/config";
 import { classify } from "../core/router";
 import { InteractiveMode, ModeController } from "./mode";
+import { readInput, type TUIContext } from "./tui";
 
 const MODE = new ModeController();
 const VERSION = (() => { try { return require("../../package.json").version; } catch { return "1.5.2"; } })();
@@ -217,54 +218,56 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
 
   process.stdout.write(chalk.dim("  Key: " + haveKey + "\n\n"));
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  // ── TUI loop ──
+  const ctx_: TUIContext = { agent: currentAgent, agents: ctx.agentMap, model: "default", cost: "$0", width: 80, height: 24 };
 
-  function ask() { rl.question(chalk.cyan("  " + currentAgent.displayName + " ❯ "), handler); }
-  async function handler(inp: string) {
-    inp = inp.trim();
-    if (!inp) { ask(); return; }
+  while (true) {
+    const inp = await readInput(process.stdin, process.stdout, ctx_);
+    if (!inp) continue;
 
     const cmdL = inp.toLowerCase();
 
     // Agent switch
+    let switched = false;
     for (const n of AGENT_NAMES) {
-      if (cmdL === "/" + n) { const a = ctx.agentMap.get(n); if (a) { await a.init(); currentAgent = a; } process.stdout.write(chalk.dim("  ⟳ " + AGENT_DISPLAY[n] + "\n")); ask(); return; }
+      if (cmdL === "/" + n) { const a = ctx.agentMap.get(n); if (a) { await a.init(); currentAgent = a; ctx_.agent = a; } switched = true; break; }
     }
-
-    if (cmdL === "/quit" || cmdL === "/exit") { process.stdout.write(chalk.dim("\n  Session ended\n")); rl.close(); await ctx.closeAll(); process.exit(0); return; }
-    if (cmdL === "/help") { process.stdout.write(helpText()); ask(); return; }
-    if (cmdL === "/clear") { console.clear(); welcome(agent); process.stdout.write(chalk.dim("  Key: " + haveKey + "\n\n")); ask(); return; }
-    if (cmdL === "/status") { process.stdout.write(chalk.bold("\n  " + currentAgent.displayName + " (" + currentAgent.name + ")\n") + chalk.dim("  State: " + currentAgent.state + "  ·  Memory: " + currentAgent.memory.shortTerm.length + " msgs\n\n")); ask(); return; }
-    if (cmdL === "/cost") { process.stdout.write(chalk.bold("\n  Total: " + formatCost(ctx.llm.getTotalCost()) + "\n\n")); ask(); return; }
-    if (cmdL === "/compact") { const r = await currentAgent.compact(); process.stdout.write(chalk.green("  ✓ " + r + "\n\n")); ask(); return; }
-    if (cmdL === "/version") { process.stdout.write("  Skyloom v" + VERSION + "\n"); ask(); return; }
-    if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); ask(); return; }
-    if (cmdL.startsWith("/apikey set ")) { const parts = inp.split(/\s+/); if (parts.length >= 4) { saveApiKey(parts[2], parts[3]); process.stdout.write(chalk.green("  ✓ Saved " + parts[2] + " API key to ~/.skyloom/config.yaml\n\n")); } else { process.stdout.write(chalk.yellow("  Usage: /apikey set <provider> <key>\n\n")); } ask(); return; }
-    if (cmdL === "/apikey") {
-      const providers = ["openai","deepseek","anthropic","groq","openrouter"];
-      process.stdout.write(chalk.bold("\n  API Keys:\n"));
-      for (const p of providers) { const envVar = p.toUpperCase() + "_API_KEY"; const hasEnv = !!process.env[envVar]; process.stdout.write(chalk.dim("  " + p.padEnd(14) + (hasEnv ? chalk.green("env") : chalk.dim("—")) + "\n")); }
-      process.stdout.write(chalk.dim("\n  Save: /apikey set <provider> <key>\n\n"));
-      ask(); return;
-    }
-    if (inp.startsWith("/")) { process.stdout.write(helpText()); ask(); return; }
+    if (switched) continue;
+    if (cmdL === "/quit" || cmdL === "/exit") break;
+    if (cmdL === "/clear") { console.clear(); continue; }
+    if (cmdL === "/help") { process.stdout.write(helpText()); continue; }
+    if (cmdL === "/version") { process.stdout.write("  Skyloom v" + VERSION + "\n"); continue; }
+    if (cmdL === "/status") { process.stdout.write(chalk.bold("\n  " + currentAgent.displayName + " (" + currentAgent.name + ")\n") + chalk.dim("  State: " + currentAgent.state + "  ·  Memory: " + currentAgent.memory.shortTerm.length + " msgs\n\n")); continue; }
+    if (cmdL === "/cost") { process.stdout.write(chalk.bold("\n  Total: " + formatCost(ctx.llm.getTotalCost()) + "\n\n")); continue; }
+    if (cmdL === "/cost reset") { (ctx.llm as any).resetUsageStats?.(); process.stdout.write(chalk.dim("  Stats reset\n")); continue; }
+    if (cmdL === "/compact") { const r = await currentAgent.compact(); process.stdout.write(chalk.green("  ✓ " + r + "\n\n")); continue; }
+    if (cmdL === "/memory") { process.stdout.write(chalk.dim("  Short-term: " + currentAgent.memory.shortTerm.length + " msgs  ·  Working: " + Object.keys(currentAgent.memory.working).length + " keys\n")); continue; }
+    if (cmdL === "/memory clear") { await currentAgent.memory.clearShortTerm(); process.stdout.write(chalk.dim("  Memory cleared\n")); continue; }
+    if (cmdL === "/workspace") { process.stdout.write(chalk.dim("  " + (ctx.workspacePath || "default") + "\n")); continue; }
+    if (cmdL === "/sessions") { const ss = await currentAgent.memory.listSessions(); process.stdout.write(chalk.bold("\n  Sessions:\n")); for (const s of ss.slice(0, 10)) process.stdout.write(chalk.dim("  " + s.id?.slice(0, 10) + "... " + s.preview + " (" + s.messageCount + " msgs)\n")); continue; }
+    if (cmdL === "/mcp") { process.stdout.write(chalk.dim("  " + (ctx.mcpStatus?.join(", ") || "none") + "\n")); continue; }
+    if (cmdL.startsWith("/apikey set ")) { const p = inp.split(/\s+/); if (p.length >= 4) { saveApiKey(p[2], p[3]); process.stdout.write(chalk.green("  ✓ Saved " + p[2] + " API key\n")); } else { process.stdout.write(chalk.yellow("  Usage: /apikey set <provider> <key>\n")); } continue; }
+    if (cmdL === "/apikey") { process.stdout.write(chalk.bold("\n  API Keys:\n")); for (const p of ["openai","deepseek","anthropic","groq","openrouter"]) { process.stdout.write(chalk.dim("  " + p.padEnd(14) + (!!process.env[p.toUpperCase() + "_API_KEY"] ? chalk.green("env") : chalk.dim("—")) + "\n")); } process.stdout.write("\n"); continue; }
+    if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); continue; }
+    if (cmdL.startsWith("/model")) { process.stdout.write(chalk.dim("  Configure in ~/.skyloom/config.yaml\n\n")); continue; }
+    if (inp.startsWith("/")) { process.stdout.write(helpText()); continue; }
 
     // ── Chat ──
     process.stdout.write(chalk.dim("  " + currentAgent.displayName + " thinking...\r"));
     try {
       const response = await currentAgent.chat(inp);
       process.stdout.write("\r" + " ".repeat(40) + "\r\n");
-      const lines = render(response);
-      for (const l of lines) process.stdout.write(l + "\n");
+      for (const l of render(response)) process.stdout.write(l + "\n");
       process.stdout.write("\n");
     } catch (e: any) {
       process.stdout.write("\r" + " ".repeat(40) + "\r");
       process.stdout.write(chalk.red("  ✗ " + (e.message || e) + "\n\n"));
     }
-    ask();
   }
 
-  ask();
+  process.stdout.write(chalk.dim("\n  Session ended\n"));
+  await ctx.closeAll();
+  process.exit(0);
 }
 
 /* ═══════════════════════════════════════
