@@ -152,15 +152,13 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'timeout', type: 'number', description: 'Timeout in milliseconds (default: 30000)', required: false },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
       const cmd = params.command as string;
       const timeout = (params.timeout as number) || 30000;
       try {
-        const result = execSync(cmd, { encoding: 'utf-8', timeout, maxBuffer: 10 * 1024 * 1024 });
-        return result || '(command produced no output)';
-      } catch (e: any) {
-        return `Error: ${e.message || e}`;
-      }
+        const { runInSandbox, formatSandboxResult } = require('../core/sandbox');
+        const result = runInSandbox(cmd, { timeoutMs: timeout });
+        return formatSandboxResult(result);
+      } catch (e: any) { return `Error: ${e.message || e}`; }
     },
     dangerous: true,
   });

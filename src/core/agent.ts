@@ -338,6 +338,36 @@ export class BaseAgent {
         return `✓ Tool-round limit extended by ${n} (was ${old}, now ${this._maxToolRounds}).`;
       },
     });
+
+    // ── Self-evolve tool: analyze failures and suggest prompt improvements ──
+    this.toolRegistry.register({
+      name: 'self_evolve',
+      description: 'Analyze recent failure patterns and suggest System Prompt improvements. Use this when you repeatedly make the same mistake.',
+      parameters: [{
+        name: 'reason',
+        type: 'string',
+        description: 'Why you want to evolve (e.g. "I keep searching too many times before answering")',
+        required: false,
+      }],
+      handler: async (kwargs: Record<string, any>) => {
+        try {
+          const { queryExperiences, analyzeFailures, applyPromptDiff } = require('./evolve');
+          const experiences = queryExperiences(kwargs.reason as string || "", 5);
+          if (experiences.length === 0) return 'No relevant failure patterns found. Keep going!';
+          const analysis = analyzeFailures(self.name, experiences, self.systemPrompt);
+          if (!analysis.suggestedDiffs.length) return 'No prompt improvements suggested. Current prompt looks good.';
+          const diffs = analysis.suggestedDiffs;
+          let result = `Analyzed ${experiences.length} failure patterns. Suggested improvements:\n\n`;
+          let applied = 0;
+          for (const diff of diffs) {
+            result += `- ${diff.reason}\n  → ${diff.after}\n\n`;
+            if (applyPromptDiff(self, diff)) applied++;
+          }
+          result += `${applied}/${diffs.length} improvements applied. Agent will perform better next time.`;
+          return result;
+        } catch (e: any) { return `Evolve error: ${e.message || e}`; }
+      },
+    });
   }
 
   activateSkill(name: string): boolean {
