@@ -6,7 +6,7 @@
   "type": "commonjs",
   "main": "./dist/index.js",
   "bin": {
-    "sky": "./dist/cli/main.js"
+    "sky": "dist/cli/main.js"
   },
   "scripts": {
     "build": "tsc",
