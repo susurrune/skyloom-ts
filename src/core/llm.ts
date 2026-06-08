@@ -756,9 +756,23 @@ export class LLMClient {
     else { const l = model.toLowerCase(); if (l.includes("claude")) provider = "anthropic"; else if (l.includes("deepseek")) provider = "deepseek"; else if (l.includes("groq")) provider = "groq"; else if (l.includes("openrouter")) provider = "openrouter"; else if (l.includes("gemini")) provider = "gemini"; }
     const envMap = getProviderEnvMap();
     const envVar = envMap.get(provider) || (provider.toUpperCase() + "_API_KEY");
-    const key = process.env[envVar];
-    if (!key) throw new Error("Missing " + envVar + ". Set environment variable or configure in ~/.skyloom/config.yaml");
-    return key;
+
+    // 1. Check environment variable first
+    let key = process.env[envVar];
+    if (key) return key;
+
+    // 2. Check config file (~/.skyloom/config.yaml)
+    try {
+      const fs = require("fs"); const path = require("path"); const yaml = require("yaml");
+      const cfgPath = path.join(require("os").homedir(), ".skyloom", "config.yaml");
+      if (fs.existsSync(cfgPath)) {
+        const cfg = yaml.parse(fs.readFileSync(cfgPath, "utf-8")) || {};
+        const keys = cfg.api_keys || {};
+        if (keys[provider]) return keys[provider];
+      }
+    } catch { /* ignore */ }
+
+    throw new Error("Missing " + envVar + ". Run: sky apikey set " + provider + " YOUR_KEY");
   }
 
   private getBaseUrl(model: string): string {

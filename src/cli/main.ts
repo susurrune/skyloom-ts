@@ -77,6 +77,12 @@ program.command("web").option("-p,--port <p>", "port", "3000")
 program.command("mcp").action(() => { import("../core/mcp_server").then(m => m.startMCPServer()); });
 program.command("config").action(() => { const c = loadConfig(); process.stdout.write(chalk.cyan("\nConfig: ") + USER_CONFIG_DIR + "\n"); for (const [n, a] of Object.entries(c.agents || {})) process.stdout.write(`  ${chalk.bold(n)}: ${(a as any).model || "default"}\n`); });
 program.command("init").action(() => { if (!fs.existsSync(USER_CONFIG_DIR)) fs.mkdirSync(USER_CONFIG_DIR, { recursive: true }); process.stdout.write(chalk.green("✓ ") + USER_CONFIG_DIR + "\n"); });
+program.command("apikey").description("Manage API keys (persisted to ~/.skyloom/config.yaml)")
+  .argument("[action]", "set|list").argument("[provider]", "e.g. deepseek").argument("[key]", "API key")
+  .action((action?: string, provider?: string, key?: string) => {
+    if (action === "set" && provider && key) { saveApiKey(provider, key); process.stdout.write(chalk.green("✓ Saved " + provider + " API key\n")); }
+    else { process.stdout.write(chalk.dim("Usage: sky apikey set deepseek YOUR_KEY\n")); }
+  });
 program.command("version").action(() => { process.stdout.write(`Skyloom v${VERSION}\n`); });
 
 /* ═══════════════════════════════════════
@@ -143,20 +149,45 @@ function render(text: string): string[] {
 /* ═══════════════════════════════════════
    Chat loop
    ═══════════════════════════════════════ */
-/* Check for API key availability */
+/* API key persistence — read from config file too */
 function checkApiKeys(): string | null {
-  const keys = ["DEEPSEEK_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GROQ_API_KEY","OPENROUTER_API_KEY"];
-  for (const k of keys) { if (process.env[k]) return k; }
+  // Check env vars
+  const envKeys = ["DEEPSEEK_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GROQ_API_KEY","OPENROUTER_API_KEY"];
+  for (const k of envKeys) { if (process.env[k]) return "env:" + k; }
+  // Check config file
+  try {
+    const path = require("path"); const fs = require("fs"); const yaml = require("yaml");
+    const cfgPath = path.join(require("os").homedir(), ".skyloom", "config.yaml");
+    if (fs.existsSync(cfgPath)) {
+      const cfg = yaml.parse(fs.readFileSync(cfgPath, "utf-8")) || {};
+      const keys = cfg.api_keys || {};
+      for (const [p, k] of Object.entries(keys)) { if (k) return "cfg:" + p; }
+    }
+  } catch { /* ignore */ }
   return null;
+}
+
+/** Save API key to config file */
+function saveApiKey(provider: string, key: string): void {
+  const path = require("path"); const fs = require("fs"); const yaml = require("yaml");
+  const cfgPath = path.join(require("os").homedir(), ".skyloom", "config.yaml");
+  const dir = path.dirname(cfgPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  let cfg: any = {};
+  if (fs.existsSync(cfgPath)) { try { cfg = yaml.parse(fs.readFileSync(cfgPath, "utf-8")) || {}; } catch { } }
+  if (!cfg.api_keys) cfg.api_keys = {};
+  cfg.api_keys[provider] = key;
+  fs.writeFileSync(cfgPath, yaml.stringify(cfg), "utf-8");
 }
 
 async function chat(agentName: string, modelOverride?: string): Promise<void> {
   const haveKey = checkApiKeys();
   if (!haveKey) {
     process.stdout.write("\n" + chalk.yellow("  ⚠ No API key configured.\n"));
-    process.stdout.write(chalk.dim("  Set one:  $env:DEEPSEEK_API_KEY = \"sk-your-key\"  (PowerShell)\n"));
-    process.stdout.write(chalk.dim("            export DEEPSEEK_API_KEY=sk-your-key    (Bash)\n\n"));
-    process.stdout.write(chalk.dim("  Then run: sky\n\n"));
+    process.stdout.write(chalk.dim("  Quick setup:\n"));
+    process.stdout.write(chalk.dim("    sky apikey set deepseek sk-your-key-here\n"));
+    process.stdout.write(chalk.dim("  Or env var:\n"));
+    process.stdout.write(chalk.dim("    $env:DEEPSEEK_API_KEY = \"sk-your-key\"\n\n"));
     process.exit(1);
   }
 
@@ -208,6 +239,14 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
     if (cmdL === "/compact") { const r = await currentAgent.compact(); process.stdout.write(chalk.green("  ✓ " + r + "\n\n")); ask(); return; }
     if (cmdL === "/version") { process.stdout.write("  Skyloom v" + VERSION + "\n"); ask(); return; }
     if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); ask(); return; }
+    if (cmdL.startsWith("/apikey set ")) { const parts = inp.split(/\s+/); if (parts.length >= 4) { saveApiKey(parts[2], parts[3]); process.stdout.write(chalk.green("  ✓ Saved " + parts[2] + " API key to ~/.skyloom/config.yaml\n\n")); } else { process.stdout.write(chalk.yellow("  Usage: /apikey set <provider> <key>\n\n")); } ask(); return; }
+    if (cmdL === "/apikey") {
+      const providers = ["openai","deepseek","anthropic","groq","openrouter"];
+      process.stdout.write(chalk.bold("\n  API Keys:\n"));
+      for (const p of providers) { const envVar = p.toUpperCase() + "_API_KEY"; const hasEnv = !!process.env[envVar]; process.stdout.write(chalk.dim("  " + p.padEnd(14) + (hasEnv ? chalk.green("env") : chalk.dim("—")) + "\n")); }
+      process.stdout.write(chalk.dim("\n  Save: /apikey set <provider> <key>\n\n"));
+      ask(); return;
+    }
     if (inp.startsWith("/")) { process.stdout.write(helpText()); ask(); return; }
 
     // ── Chat ──
