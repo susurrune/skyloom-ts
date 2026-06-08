@@ -12,7 +12,7 @@ import { classify } from "../core/router";
 import { InteractiveMode, ModeController } from "./mode";
 
 const MODE = new ModeController();
-const VERSION = "1.4.4";
+const VERSION = (() => { try { return require("../../package.json").version; } catch { return "1.5.2"; } })();
 
 const AGENT_DISPLAY: Record<string, string> = {
   fog: "≋ 雾 Fog", rain: "⸽ 雨 Rain", frost: "✱ 霜 Frost",
