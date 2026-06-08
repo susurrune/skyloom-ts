@@ -23,6 +23,9 @@
 import * as readline from "readline";
 import chalk from "chalk";
 
+/** Version read from package.json so the header never goes stale. */
+const TUI_VERSION = (() => { try { return require("../../package.json").version; } catch { return ""; } })();
+
 export interface TUIContext {
   agent: any;
   agents: Map<string, any>;
@@ -190,7 +193,7 @@ export function readInput(stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream, 
       const sidebarW = 16;
 
       // Header
-      stdout.write(chalk.bgBlack.cyan(" 天空织机 Skyloom v1.10 ".padEnd(w - 20, " ")) + chalk.bgBlack.dim(" deepseek".padEnd(10)) + chalk.bgBlack("\n"));
+      stdout.write(chalk.bgBlack.cyan(` 天空织机 Skyloom v${TUI_VERSION} `.padEnd(w - 20, " ")) + chalk.bgBlack.dim(" deepseek".padEnd(10)) + chalk.bgBlack("\n"));
       stdout.write(chalk.dim(bar("", B.h, "", w)) + "\n");
 
       // Sidebar

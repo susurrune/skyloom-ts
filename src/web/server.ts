@@ -98,8 +98,22 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: Return
   const agent = ctx.agentMap.get(agentName);
   if (!agent) { res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: `Agent '${agentName}' not found` })); return; }
   await agent.init();
-  try { res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ response: await agent.chat(message) })); }
-  catch (e) { res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: String(e) })); }
+
+  // Real streaming over SSE — tokens, reasoning, and tool events as they happen.
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  const send = (ev: Record<string, unknown>) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+  try {
+    for await (const ev of agent.chatStream(message)) send(ev as Record<string, unknown>);
+  } catch (e) {
+    send({ type: "error", text: String(e) });
+  }
+  send({ type: "end" });
+  res.end();
 }
 
 function handleAgents(res: ServerResponse, ctx: ReturnType<typeof createSystemContext>) {
@@ -599,26 +613,38 @@ function addMsg(role,text){
 function addSys(t){addMsg('system',t)}
 function scrollBottom(){msgsEl.scrollTop=msgsEl.scrollHeight}
 
-function typewriter(el,text){
-  return new Promise(resolve=>{
-    let i=0;el.innerHTML='';
-    function tick(){if(i<text.length){el.innerHTML+=text[i]==='\\n'?'<br>':text[i];i++;scrollBottom();setTimeout(tick,text[i-1]==='。'||text[i-1]==='，'?70:text[i-1]===' '?18:22+Math.random()*14)}else resolve()}
-    tick();
-  });
-}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function render(s){return esc(s).replace(/\\n/g,'<br>')}
 
+/* Consume the SSE stream: tokens render live, tool calls appear as weather events. */
 async function sendMessage(){
   const text=input.value.trim();if(!text||isStreaming)return;
   input.value='';input.style.height='auto';isStreaming=true;sendBtn.disabled=true;
-  addMsg('user',esc(text));const thinking=addMsg('assistant','<span class="typing">…</span>');
+  addMsg('user',esc(text));
+  const el=addMsg('assistant','<span class="typing">…</span>');
+  const body=el.querySelector('.msg-body');
+  let content='',started=false;
   try{
     const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,agent:currentAgent.name})});
-    const data=await resp.json();thinking.remove();
-    if(data.error){addSys('× '+esc(data.error))}else{const el=addMsg('assistant','');await typewriter(el,data.response)}
-  }catch(e){thinking.remove();addSys('× 连接中断')}
+    const reader=resp.body.getReader(),dec=new TextDecoder();let buf='';
+    while(true){
+      const {done,value}=await reader.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const parts=buf.split('\\n\\n');buf=parts.pop();
+      for(const p of parts){
+        const line=p.replace(/^data: /,'').trim();if(!line)continue;
+        let ev;try{ev=JSON.parse(line)}catch{continue}
+        if(ev.type==='content'){if(!started){started=true;body.innerHTML=''}content+=ev.text;body.innerHTML=render(content);scrollBottom()}
+        else if(ev.type==='tool_status'){addSys(currentAgent.kanji+' '+esc(ev.tool_name)+' …')}
+        else if(ev.type==='tool_done'){addSys((ev.success?'✓ ':'× ')+esc(ev.tool_name))}
+        else if(ev.type==='error'){addSys('× '+esc(ev.text||'出错了'))}
+        else if(ev.type==='truncated'){addSys('⚠ '+esc(ev.reason||'截断'))}
+      }
+    }
+    if(!content.trim())body.innerHTML='<span style="opacity:.5">（无回复）</span>';
+  }catch(e){body.innerHTML='';addSys('× 连接中断')}
   isStreaming=false;sendBtn.disabled=false;input.focus();
 }
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
 input.addEventListener('input',()=>{input.style.height='auto';input.style.height=Math.min(input.scrollHeight,140)+'px'});
 input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});

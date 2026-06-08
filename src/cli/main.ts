@@ -8,6 +8,8 @@ import * as readline from "readline";
 import chalk from "chalk";
 import { createSystemContext, orchestrateTask } from "../core/factory";
 import { loadConfig, USER_CONFIG_DIR } from "../core/config";
+import { listProviders, modelsFor, providerLabel, validateModel } from "../core/catalog";
+import { agentTheme } from "../core/theme";
 import { classify } from "../core/router";
 import { InteractiveMode, ModeController } from "./mode";
 import { readInput, type TUIContext } from "./tui";
@@ -15,10 +17,6 @@ import { readInput, type TUIContext } from "./tui";
 const MODE = new ModeController();
 const VERSION = (() => { try { return require("../../package.json").version; } catch { return "1.5.2"; } })();
 
-const AGENT_DISPLAY: Record<string, string> = {
-  fog: "≋ 雾 Fog", rain: "⸽ 雨 Rain", frost: "✱ 霜 Frost",
-  snow: "❉ 雪 Snow", dew: "∘ 露 Dew", fair: "☼ 晴 Fair",
-};
 const AGENT_NAMES = ["fog", "rain", "frost", "snow", "dew", "fair"] as const;
 
 /* ═══════════════════════════════════════
@@ -91,16 +89,21 @@ program.command("version").action(() => { process.stdout.write(`Skyloom v${VERSI
    ═══════════════════════════════════════ */
 function welcome(agent: any) {
   const w = process.stdout.columns || 80;
+  const active = agentTheme(agent.name);
+  const seal = chalk.hex(active.hex);
   const pad = " ".repeat(Math.max(0, Math.floor((w - 34) / 2)));
-  process.stdout.write("\n" + pad + chalk.cyan("✦    天 空 织 机    ✦\n"));
+  process.stdout.write("\n" + pad + seal("✦    天 空 织 机    ✦\n"));
   process.stdout.write(pad + chalk.dim("S K Y L O O M\n\n"));
+  // Six shuttles, each in its own mineral pigment; active one bolded with a seal.
   const parts: string[] = [];
   for (const n of AGENT_NAMES) {
-    const a = n === agent.name;
-    const s = `${AGENT_DISPLAY[n].split(" ")[0]} ${AGENT_DISPLAY[n].split(" ")[1]}`;
-    parts.push(a ? chalk.bold.cyan(s) : chalk.dim(s));
+    const t = agentTheme(n);
+    const isActive = n === agent.name;
+    const label = `${t.symbol} ${t.kanji}`;
+    parts.push(isActive ? chalk.bold.hex(t.hex)(`▣ ${label}`) : chalk.hex(t.hex).dim(label));
   }
-  process.stdout.write("  " + parts.join(chalk.dim("  ·  ")) + "\n\n");
+  process.stdout.write("  " + parts.join(chalk.dim("  ·  ")) + "\n");
+  process.stdout.write("  " + chalk.dim.italic(active.poem) + "\n\n");
   process.stdout.write(chalk.dim("  /help for commands  ·  /quit to exit\n\n"));
 }
 
@@ -124,27 +127,62 @@ function formatCost(c: number): string {
 }
 
 /* ═══════════════════════════════════════
-   Response render
+   Streaming renderer — consumes agent.chatStream()
    ═══════════════════════════════════════ */
-function render(text: string): string[] {
-  const out: string[] = [];
-  for (const para of text.split("\n\n")) {
-    const t = para.trim();
-    if (!t) continue;
-    if (t.startsWith("```")) {
-      const lines = t.split("\n");
-      out.push(chalk.dim("  ╭─ code ──"));
-      for (let i = 1; i < lines.length - 1; i++) out.push(`  ${chalk.dim("│")} ${chalk.gray(lines[i].slice(0, 72))}`);
-      out.push(chalk.dim("  ╰────────"));
-    } else {
-      for (const line of t.split("\n")) {
-        if (line.startsWith("# ")) out.push("  " + chalk.bold(line));
-        else if (line.startsWith("- ") || line.startsWith("* ")) out.push("  " + chalk.dim("• ") + line.slice(2));
-        else out.push("  " + line);
-      }
+/**
+ * Render a streamed turn live: reasoning in faint ink, content in mineral
+ * pigment, tool calls as pulsing weather events. Replaces the old blocking
+ * chat() + fake render. Tokens appear as they arrive.
+ */
+async function streamResponse(agent: any, input: string): Promise<void> {
+  const theme = agentTheme(agent.name);
+  const pigment = chalk.hex(theme.hex);
+  let mode: "none" | "reasoning" | "content" = "none";
+  let atLineStart = true;
+
+  const writeContent = (text: string) => {
+    for (const ch of text) {
+      if (atLineStart) { process.stdout.write("  "); atLineStart = false; }
+      process.stdout.write(ch);
+      if (ch === "\n") atLineStart = true;
+    }
+  };
+
+  // Thinking indicator until the first event lands
+  process.stdout.write(chalk.dim(`  ${theme.symbol} ${theme.pigment} …\r`));
+  let cleared = false;
+  const clearThinking = () => { if (!cleared) { process.stdout.write("\r" + " ".repeat(40) + "\r"); cleared = true; } };
+
+  for await (const ev of agent.chatStream(input)) {
+    switch (ev.type) {
+      case "reasoning":
+        clearThinking();
+        if (mode !== "reasoning") { process.stdout.write(chalk.dim("\n  ◦ ")); mode = "reasoning"; }
+        process.stdout.write(chalk.dim.italic(String(ev.text).replace(/\n/g, " ")));
+        break;
+      case "content":
+        clearThinking();
+        if (mode !== "content") { process.stdout.write(mode === "reasoning" ? "\n\n" : "\n"); atLineStart = true; mode = "content"; }
+        writeContent(String(ev.text));
+        break;
+      case "tool_status":
+        clearThinking();
+        process.stdout.write("\n" + pigment(`  ${theme.symbol} ${ev.tool_name}`) + chalk.dim(`  ${ev.label || ""} …`) + "\n");
+        atLineStart = true; mode = "none";
+        break;
+      case "tool_done":
+        process.stdout.write((ev.success ? chalk.green("  ✓ ") : chalk.red("  ✗ ")) + chalk.dim(String(ev.tool_name)) + "\n");
+        atLineStart = true; mode = "none";
+        break;
+      case "truncated":
+        process.stdout.write(chalk.yellow(`\n  ⚠ 截断: ${ev.reason}\n`));
+        break;
+      case "done":
+        break;
     }
   }
-  return out;
+  clearThinking();
+  process.stdout.write("\n\n");
 }
 
 /* ═══════════════════════════════════════
@@ -185,17 +223,13 @@ function saveApiKey(provider: string, key: string): void {
    Interactive setup wizard
    ═══════════════════════════════════════ */
 async function setupWizard(): Promise<{ provider: string; key: string; model: string } | null> {
-  const providers = [
-    { id: "deepseek", name: "DeepSeek", models: ["deepseek-chat","deepseek-v4-flash","deepseek-v4-pro","deepseek-reasoner"] },
-    { id: "openai", name: "OpenAI", models: ["gpt-4.1","gpt-4o","gpt-4o-mini","o4-mini"] },
-    { id: "anthropic", name: "Anthropic", models: ["claude-sonnet-4-6","claude-opus-4-7","claude-haiku-4-5"] },
-    { id: "google", name: "Google Gemini", models: ["gemini-2.5-pro","gemini-2.5-flash"] },
-    { id: "groq", name: "Groq", models: ["llama-3.3-70b","mixtral-8x7b"] },
-    { id: "openrouter", name: "OpenRouter (多模型)", models: ["openai/gpt-4.1","anthropic/claude-sonnet-4-6","google/gemini-2.5-flash","meta-llama/llama-4-maverick"] },
-    { id: "mistral", name: "Mistral", models: ["mistral-large","mistral-small"] },
-    { id: "xai", name: "xAI (Grok)", models: ["grok-4"] },
-    { id: "ollama", name: "Ollama 本地", models: ["llama3","qwen2.5","deepseek-r1"] },
-  ];
+  // Derived from the single-source model catalog (config/models.yaml).
+  // Every listed model is callable — no hardcoded/fictional entries.
+  const providers = listProviders().map((id) => ({
+    id,
+    name: providerLabel(id),
+    models: modelsFor(id).map((m) => m.id),
+  }));
 
   process.stdout.write("\n" + chalk.cyan("  ✦ API Key 设置向导 ✦\n\n"));
   process.stdout.write(chalk.dim("  选择 Provider（Key 保存在 ~/.skyloom/config.yaml）:\n\n"));
@@ -250,6 +284,20 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
   const ctx = createSystemContext();
   let agent = ctx.agentMap.get(agentName);
   if (!agent) { process.stdout.write(chalk.red("Unknown agent: " + agentName) + "\n"); return; }
+
+  // Validate the active model is real — catches stale/fictional configs
+  // before they 404 mid-request.
+  try {
+    const cfg = loadConfig();
+    const activeModel = cfg.agents?.[agentName]?.model || (cfg as any).llm?.default_model;
+    const v = validateModel(activeModel);
+    if (!v.ok) {
+      process.stdout.write(chalk.yellow(`\n  ⚠ 配置的模型 "${activeModel || "(未设置)"}" 不在可用目录中。\n`));
+      process.stdout.write(chalk.dim(`     可选: ${v.suggestions.join(", ")}\n`));
+      process.stdout.write(chalk.dim(`     运行 /setup 重新选择，或编辑 ~/.skyloom/config.yaml。\n\n`));
+    }
+  } catch { /* validation is best-effort */ }
+
   await agent.init();
 
   // Wire up security approval — prompt user for HIGH/CRITICAL operations
@@ -282,10 +330,19 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
 
     const cmdL = inp.toLowerCase();
 
-    // Agent switch
+    // Agent switch — stamp a mineral seal on change
     let switched = false;
     for (const n of AGENT_NAMES) {
-      if (cmdL === "/" + n) { const a = ctx.agentMap.get(n); if (a) { await a.init(); currentAgent = a; ctx_.agent = a; } switched = true; break; }
+      if (cmdL === "/" + n) {
+        const a = ctx.agentMap.get(n);
+        if (a) {
+          await a.init(); currentAgent = a; ctx_.agent = a;
+          const t = agentTheme(n);
+          process.stdout.write("\n  " + chalk.bold.hex(t.hex)(`▣ ${t.kanji} ${t.pigment}`) + chalk.dim(`  · ${t.specialty}`) + "\n");
+          process.stdout.write("  " + chalk.dim.italic(t.poem) + "\n\n");
+        }
+        switched = true; break;
+      }
     }
     if (switched) continue;
     if (cmdL === "/quit" || cmdL === "/exit") break;
@@ -308,13 +365,9 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
     if (cmdL.startsWith("/model")) { process.stdout.write(chalk.dim("  Run /setup to reconfigure models\n")); continue; }
     if (inp.startsWith("/")) { process.stdout.write(helpText()); continue; }
 
-    // ── Chat ──
-    process.stdout.write(chalk.dim("  " + currentAgent.displayName + " thinking...\r"));
+    // ── Chat (real streaming) ──
     try {
-      const response = await currentAgent.chat(inp);
-      process.stdout.write("\r" + " ".repeat(40) + "\r\n");
-      for (const l of render(response)) process.stdout.write(l + "\n");
-      process.stdout.write("\n");
+      await streamResponse(currentAgent, inp);
     } catch (e: any) {
       process.stdout.write("\r" + " ".repeat(40) + "\r");
       process.stdout.write(chalk.red("  ✗ " + (e.message || e) + "\n\n"));

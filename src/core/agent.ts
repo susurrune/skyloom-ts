@@ -23,6 +23,7 @@ import {
   suggestToolNames,
   toolStatusLabel,
   synthesizeDelegationSummary,
+  parseExtractedFacts,
   SIG_WINDOW,
   SIG_LOOP_HINT,
   SIG_LOOP_HARDSTOP,
@@ -31,93 +32,10 @@ import { selectRelevantTools } from './tool_router';
 
 const log = getLogger('agent');
 
-export enum AgentState {
-  IDLE = 'idle',
-  THINKING = 'thinking',
-  ACTING = 'acting',
-  WAITING = 'waiting',
-  ERROR = 'error',
-}
-
-export enum TaskState {
-  PENDING = 'pending',
-  RUNNING = 'running',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
-  SKIPPED = 'skipped',
-}
-
-const VALID_TRANSITIONS: Record<TaskState, Set<TaskState>> = {
-  [TaskState.PENDING]: new Set([TaskState.RUNNING, TaskState.SKIPPED, TaskState.FAILED]),
-  [TaskState.RUNNING]: new Set([TaskState.RUNNING, TaskState.COMPLETED, TaskState.FAILED]),
-  [TaskState.FAILED]: new Set([TaskState.RUNNING, TaskState.SKIPPED]),
-  [TaskState.COMPLETED]: new Set(),
-  [TaskState.SKIPPED]: new Set(),
-};
-
-export class Task {
-  id: string;
-  description: string;
-  assignedTo: string | null = null;
-  parentId: string | null = null;
-  dependsOn: string[] = [];
-  status: TaskState = TaskState.PENDING;
-  priority: number = 0;
-  result: string | null = null;
-  metadata: Record<string, any> = {};
-
-  constructor(config: {
-    id: string;
-    description: string;
-    assignedTo?: string | null;
-    parentId?: string | null;
-    dependsOn?: string[];
-    status?: TaskState;
-    priority?: number;
-    result?: string | null;
-    metadata?: Record<string, any>;
-  }) {
-    this.id = config.id;
-    this.description = config.description;
-    this.assignedTo = config.assignedTo ?? null;
-    this.parentId = config.parentId ?? null;
-    this.dependsOn = config.dependsOn || [];
-    this.status = config.status ?? TaskState.PENDING;
-    this.priority = config.priority ?? 0;
-    this.result = config.result ?? null;
-    this.metadata = config.metadata || {};
-  }
-
-  transitionTo(newState: TaskState): void {
-    const allowed = VALID_TRANSITIONS[this.status] || new Set();
-    if (!allowed.has(newState)) {
-      throw new Error(
-        `Invalid task state transition: ${this.status} -> ${newState}`
-      );
-    }
-    this.status = newState;
-  }
-
-  get allDeps(): string[] {
-    const deps = [...this.dependsOn];
-    if (this.parentId && !deps.includes(this.parentId)) {
-      deps.push(this.parentId);
-    }
-    return deps;
-  }
-}
-
-export class TaskResult {
-  success: boolean;
-  content: string;
-  data: Record<string, any> = {};
-
-  constructor(success: boolean, content: string, data?: Record<string, any>) {
-    this.success = success;
-    this.content = content;
-    this.data = data || {};
-  }
-}
+// Domain model lives in ./agent/task — re-exported here so importers of
+// '../core/agent' are unaffected by the Phase 3 split.
+import { AgentState, TaskState, Task, TaskResult } from './agent/task';
+export { AgentState, TaskState, Task, TaskResult };
 
 // Re-export Message type from memory for convenience
 export type { Message };
@@ -171,7 +89,15 @@ export class BaseAgent {
     this.bus = bus;
     this.toolRegistry = toolRegistry;
     this.skillRegistry = skillRegistry || new SkillRegistry();
-    this.memory = new Memory((config as any).memory || { dbPath: '~/.skyloom', shortTermLimit: 100 }, this.name);
+    // Normalize the memory config — YAML uses snake_case (db_path/short_term_limit)
+    // while Memory expects camelCase. Tolerate both so a preserved config block
+    // doesn't break construction.
+    const mc: any = (config as any).memory || {};
+    this.memory = new Memory({
+      dbPath: mc.dbPath || mc.db_path || '~/.skyloom',
+      shortTermLimit: mc.shortTermLimit || mc.short_term_limit || 100,
+      maxPersistedMessages: mc.maxPersistedMessages || mc.max_persisted_messages,
+    }, this.name);
     this._maxToolRounds = 20;
   }
 
@@ -1227,7 +1153,7 @@ export class BaseAgent {
       const convoText = convoMsgs.map(m => `${m.role}: ${(m.content || '').slice(0, 500)}`).join('\n');
       const prompt = this.EXTRACT_PROMPT.replace('{conversation}', convoText);
       const response = await this.llm.complete([{ role: 'user', content: prompt }], `${this.name}_extract`, undefined);
-      const facts = this.parseExtractedFacts(response.content);
+      const facts = parseExtractedFacts(response.content);
       let written = 0;
       for (const f of facts) {
         const key = f.key;
@@ -1245,44 +1171,15 @@ export class BaseAgent {
     }
   }
 
-  private parseExtractedFacts(content: string): Array<{ key: string; value: any; category?: string }> {
-    const text = (content || '').trim();
-    if (!text) return [];
-
-    // 1. Direct parse
-    try {
-      const data = JSON.parse(text);
-      if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
-    } catch { /* continue */ }
-
-    // 2. Markdown-fenced JSON
-    const fenceMatch = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
-    if (fenceMatch) {
-      try {
-        const data = JSON.parse(fenceMatch[1]);
-        if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
-      } catch { /* continue */ }
-    }
-
-    // 3. First JSON array substring
-    const arrayMatch = text.match(/\[[\s\S]*?\]/);
-    if (arrayMatch) {
-      try {
-        const data = JSON.parse(arrayMatch[0]);
-        if (Array.isArray(data)) return data.filter(f => typeof f === 'object');
-      } catch { /* continue */ }
-    }
-    return [];
-  }
-
   protected async messagesWithRecall(): Promise<Record<string, any>[]> {
     const messages = this.memory.getMessages();
     if (!messages || process.env.WA_NO_RECALL === '1') return messages;
 
-    const lastUserIdx = messages.length - 1 - [...messages].reverse().findIndex(m => m.role === 'user');
-    if (lastUserIdx < 0) return messages;
+    const revIdx = [...messages].reverse().findIndex(m => m.role === 'user');
+    if (revIdx < 0) return messages; // no user message yet — nothing to recall against
+    const lastUserIdx = messages.length - 1 - revIdx;
 
-    const query = String(messages[lastUserIdx].content || '').slice(0, 200);
+    const query = String(messages[lastUserIdx]?.content || '').slice(0, 200);
     const stripped = query.trim();
     if (stripped.length < 4) return messages;
 

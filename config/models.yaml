@@ -55,12 +55,12 @@ deepseek:
     context: 65536
     cost_in: 0.55
     cost_out: 2.19
-    desc: "深度推理"
+    desc: "深度推理 (alias → v4-flash)"
   - name: deepseek-v4-flash
     context: 131072
     cost_in: 0.14
     cost_out: 0.28
-    desc: "极速低成本"
+    desc: "极速低成本 (deepseek-chat 实际后端)"
   - name: deepseek-v4-pro
     context: 131072
     cost_in: 1.74
