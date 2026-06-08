@@ -50,6 +50,7 @@ const ACTION_CMDS: [string, string][] = [
   ["/cost reset", "费用归零"],
   ["/compact", "压缩上下文"],
   ["/retry", "重发上条"],
+  ["/setup", "配置向导"],
   ["/apikey set <p> <k>", "保存API Key"],
   ["/apikey", "查看API Key"],
   ["/model", "模型管理"],

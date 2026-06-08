@@ -1,0 +1,155 @@
+# Model Catalog — latest models per provider
+# Every model listed here is directly callable via the LLM client.
+
+openai:
+  - name: gpt-4.1
+    context: 1048576
+    cost_in: 2.00
+    cost_out: 8.00
+    desc: "旗舰，百万token上下文"
+  - name: gpt-4.1-mini
+    context: 1048576
+    cost_in: 0.40
+    cost_out: 1.60
+    desc: "轻量，同款长上下文"
+  - name: gpt-4o
+    context: 131072
+    cost_in: 2.50
+    cost_out: 10.00
+    desc: "多模态全能"
+  - name: gpt-4o-mini
+    context: 131072
+    cost_in: 0.15
+    cost_out: 0.60
+    desc: "小模型高性价比"
+  - name: o4-mini
+    context: 204800
+    cost_in: 1.10
+    cost_out: 4.40
+    desc: "推理模型轻量版"
+
+anthropic:
+  - name: claude-sonnet-4-6
+    context: 204800
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "编程+推理首选"
+  - name: claude-opus-4-7
+    context: 204800
+    cost_in: 5.00
+    cost_out: 25.00
+    desc: "最强旗舰"
+  - name: claude-haiku-4-5
+    context: 204800
+    cost_in: 0.80
+    cost_out: 4.00
+    desc: "速度最快"
+
+deepseek:
+  - name: deepseek-chat
+    context: 131072
+    cost_in: 0.27
+    cost_out: 1.10
+    desc: "通用对话"
+  - name: deepseek-reasoner
+    context: 65536
+    cost_in: 0.55
+    cost_out: 2.19
+    desc: "深度推理"
+  - name: deepseek-v4-flash
+    context: 131072
+    cost_in: 0.14
+    cost_out: 0.28
+    desc: "极速低成本"
+  - name: deepseek-v4-pro
+    context: 131072
+    cost_in: 1.74
+    cost_out: 3.48
+    desc: "旗舰版"
+
+google:
+  - name: gemini-2.5-pro
+    context: 1048576
+    cost_in: 1.25
+    cost_out: 10.00
+    desc: "旗舰推理"
+  - name: gemini-2.5-flash
+    context: 1048576
+    cost_in: 0.30
+    cost_out: 2.50
+    desc: "快速长上下文"
+
+groq:
+  - name: llama-4-scout
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Meta最新，免费额度"
+  - name: llama-3.3-70b
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama旗舰"
+  - name: mixtral-8x7b
+    context: 32768
+    cost_in: 0
+    cost_out: 0
+    desc: "MoE混合专家"
+
+mistral:
+  - name: mistral-large
+    context: 131072
+    cost_in: 2.00
+    cost_out: 6.00
+    desc: "旗舰通用"
+  - name: mistral-small
+    context: 32768
+    cost_in: 0.20
+    cost_out: 0.60
+    desc: "轻量高效"
+
+openrouter:
+  - name: openai/gpt-4.1
+    context: 1048576
+    cost_in: 2.00
+    cost_out: 8.00
+    desc: "通过OpenRouter"
+  - name: anthropic/claude-sonnet-4-6
+    context: 204800
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "通过OpenRouter"
+  - name: google/gemini-2.5-flash
+    context: 1048576
+    cost_in: 0.30
+    cost_out: 2.50
+    desc: "通过OpenRouter"
+  - name: meta-llama/llama-4-maverick
+    context: 131072
+    cost_in: 0.20
+    cost_out: 0.60
+    desc: "Meta旗舰"
+
+xai:
+  - name: grok-4
+    context: 131072
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "Grok最新"
+
+ollama:
+  - name: llama3
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "本地部署"
+  - name: qwen2.5
+    context: 32768
+    cost_in: 0
+    cost_out: 0
+    desc: "通义千问"
+  - name: deepseek-r1
+    context: 32768
+    cost_in: 0
+    cost_out: 0
+    desc: "本地推理"

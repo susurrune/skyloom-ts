@@ -181,15 +181,70 @@ function saveApiKey(provider: string, key: string): void {
   fs.writeFileSync(cfgPath, yaml.stringify(cfg), "utf-8");
 }
 
+/* ═══════════════════════════════════════
+   Interactive setup wizard
+   ═══════════════════════════════════════ */
+async function setupWizard(): Promise<{ provider: string; key: string; model: string } | null> {
+  const providers = [
+    { id: "deepseek", name: "DeepSeek", models: ["deepseek-chat","deepseek-v4-flash","deepseek-v4-pro","deepseek-reasoner"] },
+    { id: "openai", name: "OpenAI", models: ["gpt-4.1","gpt-4o","gpt-4o-mini","o4-mini"] },
+    { id: "anthropic", name: "Anthropic", models: ["claude-sonnet-4-6","claude-opus-4-7","claude-haiku-4-5"] },
+    { id: "google", name: "Google Gemini", models: ["gemini-2.5-pro","gemini-2.5-flash"] },
+    { id: "groq", name: "Groq", models: ["llama-3.3-70b","mixtral-8x7b"] },
+    { id: "openrouter", name: "OpenRouter (多模型)", models: ["openai/gpt-4.1","anthropic/claude-sonnet-4-6","google/gemini-2.5-flash","meta-llama/llama-4-maverick"] },
+    { id: "mistral", name: "Mistral", models: ["mistral-large","mistral-small"] },
+    { id: "xai", name: "xAI (Grok)", models: ["grok-4"] },
+    { id: "ollama", name: "Ollama 本地", models: ["llama3","qwen2.5","deepseek-r1"] },
+  ];
+
+  process.stdout.write("\n" + chalk.cyan("  ✦ API Key 设置向导 ✦\n\n"));
+  process.stdout.write(chalk.dim("  选择 Provider（Key 保存在 ~/.skyloom/config.yaml）:\n\n"));
+
+  for (let i = 0; i < providers.length; i++) {
+    process.stdout.write(chalk.dim(`  ${String(i+1).padStart(2)}. ${providers[i].name.padEnd(22)} ${providers[i].models.slice(0,3).join(", ")}\n`));
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
+
+  const choice = await ask(chalk.cyan("\n  编号 (1-"+providers.length+", q退出): "));
+  if (choice === "q") { rl.close(); return null; }
+  const idx = parseInt(choice) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= providers.length) { rl.close(); process.stdout.write(chalk.dim("  已取消\n")); return null; }
+
+  const prov = providers[idx];
+  const key = await ask(chalk.cyan(`  ${prov.name} API Key: `));
+  if (!key.trim()) { rl.close(); return null; }
+
+  saveApiKey(prov.id, key.trim());
+
+  process.stdout.write(chalk.dim("\n  可用模型:\n"));
+  for (let i = 0; i < prov.models.length; i++) process.stdout.write(chalk.dim(`  ${i+1}. ${prov.models[i]}\n`));
+
+  const mc = await ask(chalk.cyan("\n  选择模型 (1-"+prov.models.length+", 默认1): ")) || "1";
+  const mi = (parseInt(mc) || 1) - 1;
+  const model = prov.models[Math.max(0, Math.min(mi, prov.models.length - 1))];
+
+  // Save to config
+  const path = require("path"); const fs = require("fs"); const yaml = require("yaml");
+  const cfgPath = path.join(require("os").homedir(), ".skyloom", "config.yaml");
+  let cfg: any = {}; if (fs.existsSync(cfgPath)) { try { cfg = yaml.parse(fs.readFileSync(cfgPath, "utf-8")) || {}; } catch { } }
+  cfg.default_model = model; cfg.default_provider = prov.id;
+  fs.writeFileSync(cfgPath, yaml.stringify(cfg), "utf-8");
+
+  rl.close();
+  process.stdout.write(chalk.green(`\n  ✓ ${prov.name} · ${model} · 就绪!\n\n`));
+  return { provider: prov.id, key: key.trim(), model };
+}
+
 async function chat(agentName: string, modelOverride?: string): Promise<void> {
   const haveKey = checkApiKeys();
   if (!haveKey) {
-    process.stdout.write("\n" + chalk.yellow("  ⚠ No API key configured.\n"));
-    process.stdout.write(chalk.dim("  Quick setup:\n"));
-    process.stdout.write(chalk.dim("    sky apikey set deepseek sk-your-key-here\n"));
-    process.stdout.write(chalk.dim("  Or env var:\n"));
-    process.stdout.write(chalk.dim("    $env:DEEPSEEK_API_KEY = \"sk-your-key\"\n\n"));
-    process.exit(1);
+    process.stdout.write("\n" + chalk.cyan("  ✦ 天空织机 Skyloom ✦\n"));
+    process.stdout.write(chalk.dim("  检测到未配置 API Key，进入设置向导...\n\n"));
+    const result = await setupWizard();
+    if (!result) { process.stdout.write(chalk.red("  设置未完成，请重新运行 sky 配置。\n")); process.exit(0); }
+    process.stdout.write(chalk.green(`  ✓ ${result.provider} 已就绪 · 模型: ${result.model}\n\n`));
   }
 
   const ctx = createSystemContext();
@@ -249,7 +304,8 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
     if (cmdL.startsWith("/apikey set ")) { const p = inp.split(/\s+/); if (p.length >= 4) { saveApiKey(p[2], p[3]); process.stdout.write(chalk.green("  ✓ Saved " + p[2] + " API key\n")); } else { process.stdout.write(chalk.yellow("  Usage: /apikey set <provider> <key>\n")); } continue; }
     if (cmdL === "/apikey") { process.stdout.write(chalk.bold("\n  API Keys:\n")); for (const p of ["openai","deepseek","anthropic","groq","openrouter"]) { process.stdout.write(chalk.dim("  " + p.padEnd(14) + (!!process.env[p.toUpperCase() + "_API_KEY"] ? chalk.green("env") : chalk.dim("—")) + "\n")); } process.stdout.write("\n"); continue; }
     if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); continue; }
-    if (cmdL.startsWith("/model")) { process.stdout.write(chalk.dim("  Configure in ~/.skyloom/config.yaml\n\n")); continue; }
+    if (cmdL === "/setup") { const r = await setupWizard(); if (r) process.stdout.write(chalk.green(`  ${r.provider} · ${r.model} — Ready!\n`)); continue; }
+    if (cmdL.startsWith("/model")) { process.stdout.write(chalk.dim("  Run /setup to reconfigure models\n")); continue; }
     if (inp.startsWith("/")) { process.stdout.write(helpText()); continue; }
 
     // ── Chat ──
