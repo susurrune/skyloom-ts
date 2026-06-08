@@ -1,29 +1,18 @@
 /**
- * 天空织机 TUI — Full-screen terminal interface
+ * 天空织机 TUI — a polished *linear* terminal interface.
  *
- * Layout:
- *   ┌─────────────────────────────────────────┐
- *   │ ≋ 雾 Fog · deepseek-chat · $0.02 · ⏻   │ ← header bar
- *   ├──────────┬──────────────────────────────┤
- *   │ ☼ 晴 Fair│  ✦ 你好！有什么可以帮你的？  │
- *   │ ✱ 霜     │                              │ ← messages
- *   │ ≋ 雾 ▸   │  用户消息右对齐               │
- *   │ ❉ 雪     │                              │
- *   │ ∘ 露     │                              │
- *   │ ⸽ 雨     │                              │
- *   ├──────────┴──────────────────────────────┤
- *   │ ┌─ /fog  /rain  /frost  /snow  ───────┐│ ← command palette (popup)
- *   │ ▶ /fog    Switch to Fog                ││
- *   │   /rain   Switch to Rain               ││
- *   │ └──────────────────────────────────────┘│
- *   │ > hello world                    [send] │ ← input bar
- *   └─────────────────────────────────────────┘
+ * Design note: the previous version tried to be a full-screen app, redrawing
+ * the whole screen on every keystroke while the reply streamed linearly below
+ * it — the two fought, the conversation never persisted, and hand-rolled
+ * raw-mode editing mangled CJK width. This rewrite is linear (like Claude Code
+ * / opencode): real readline line-editing + a CJK-aware wrapping stream
+ * renderer. Robust, flicker-free, and it actually reads like a conversation.
  */
 
 import * as readline from "readline";
 import chalk from "chalk";
+import { agentTheme, PALETTE } from "../core/theme";
 
-/** Version read from package.json so the header never goes stale. */
 const TUI_VERSION = (() => { try { return require("../../package.json").version; } catch { return ""; } })();
 
 export interface TUIContext {
@@ -35,238 +24,197 @@ export interface TUIContext {
   height: number;
 }
 
-/* ── Slash commands with icons ── */
-const AGENT_CMDS: [string, string, string][] = [
-  ["≋", "/fog", "雾 Fog · 松烟墨"],
-  ["⸽", "/rain", "雨 Rain · 石青"],
-  ["✱", "/frost", "霜 Frost · 石绿"],
-  ["❉", "/snow", "雪 Snow · 铅白"],
-  ["∘", "/dew", "露 Dew · 赭石"],
-  ["☼", "/fair", "晴 Fair · 朱砂"],
-];
-
-const ACTION_CMDS: [string, string][] = [
-  ["/help", "所有命令"],
-  ["/clear", "清屏"],
-  ["/status", "状态总览"],
-  ["/cost", "费用统计"],
-  ["/cost reset", "费用归零"],
-  ["/compact", "压缩上下文"],
-  ["/retry", "重发上条"],
+/* ── Slash commands (for tab-completion + the inline palette) ── */
+export const SLASH_COMMANDS: [string, string][] = [
+  ["/fog", "≋ 雾 · 探索洞察"],
+  ["/rain", "⸽ 雨 · 创造产出"],
+  ["/frost", "✱ 霜 · 精炼品质"],
+  ["/snow", "❉ 雪 · 架构规划"],
+  ["/dew", "∘ 露 · 可靠守护"],
+  ["/fair", "☼ 晴 · 情感陪伴"],
+  ["/help", "查看所有命令"],
   ["/setup", "配置向导"],
-  ["/apikey set <p> <k>", "保存API Key"],
-  ["/apikey", "查看API Key"],
-  ["/model", "模型管理"],
-  ["/task <goal>", "多Agent编排"],
+  ["/model", "模型信息"],
+  ["/cost", "费用统计"],
+  ["/status", "状态总览"],
   ["/memory", "记忆状态"],
-  ["/memory clear", "清除记忆"],
   ["/sessions", "会话列表"],
   ["/workspace", "工作空间"],
-  ["/mcp", "MCP服务器"],
+  ["/compact", "压缩上下文"],
+  ["/clear", "清屏"],
+  ["/task ", "多 Agent 编排"],
+  ["/mcp", "MCP 服务器"],
   ["/version", "版本信息"],
   ["/quit", "退出"],
 ];
 
-/* ── Box drawing characters ── */
-const B = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│", l: "├", r: "┤", cross: "┼", t: "┬", b: "┴", L: "░", o: "●" };
-
-function bar(start: string, fill: string, end: string, width: number): string {
-  return start + fill.repeat(Math.max(0, width)) + end;
+/* ════════════════════════════════════════
+   CJK-aware display width
+   ════════════════════════════════════════ */
+/** Visual columns occupied by a single code point (CJK / fullwidth = 2). */
+export function charWidth(cp: number): number {
+  if (cp === 0) return 0;
+  if (cp < 32 || (cp >= 0x7f && cp < 0xa0)) return 0; // control
+  // East-Asian wide / fullwidth ranges
+  if (
+    (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+    (cp >= 0x2e80 && cp <= 0x303e) || // CJK radicals, Kangxi, punctuation
+    (cp >= 0x3041 && cp <= 0x33ff) || // Hiragana…CJK symbols
+    (cp >= 0x3400 && cp <= 0x4dbf) || // CJK Ext A
+    (cp >= 0x4e00 && cp <= 0x9fff) || // CJK Unified
+    (cp >= 0xa000 && cp <= 0xa4cf) || // Yi
+    (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
+    (cp >= 0xf900 && cp <= 0xfaff) || // CJK compat
+    (cp >= 0xfe10 && cp <= 0xfe19) ||
+    (cp >= 0xfe30 && cp <= 0xfe6f) || // CJK compat forms
+    (cp >= 0xff00 && cp <= 0xff60) || // Fullwidth forms
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1faff) // emoji / pictographs
+  ) return 2;
+  return 1;
 }
 
-/* ── Render sidebar ── */
-function renderSidebar(agent: any, agents: Map<string, any>, h: number): string[] {
-  const lines: string[] = [];
-  const W = 14; // sidebar width in chars
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
-  // Header
-  lines.push(chalk.cyan(bar(B.L + " 天空织机 ".padEnd(W - 2, B.L) + B.r, "", "", 0)));
-  lines.push(chalk.dim(B.v + " Skyloom    " + B.v));
-
-  for (const n of ["fog", "rain", "frost", "snow", "dew", "fair"]) {
-    const isActive = agent.name === n;
-    const display: Record<string, string> = { fog: "≋ 雾 Fog", rain: "⸽ 雨 Rain", frost: "✱ 霜 Frost", snow: "❉ 雪 Snow", dew: "∘ 露 Dew", fair: "☼ 晴 Fair" };
-    const line = isActive
-      ? chalk.cyan(B.v + " " + B.o + " " + display[n].padEnd(W - 5) + B.v)
-      : chalk.dim(B.v + "   " + display[n].padEnd(W - 5) + B.v);
-    lines.push(line);
-  }
-
-  // Fill remaining space
-  for (let i = lines.length; i < h; i++) {
-    lines.push(chalk.dim(B.v + " ".repeat(W - 2) + B.v));
-  }
-
-  // Footer
-  try {
-    const cu = agent.contextUsage();
-    const pct = cu.pct || 0;
-    lines.push(chalk.dim(B.v + " ctx " + String(pct).padStart(3) + "%" + " ".repeat(W - 10) + B.v));
-  } catch { lines.push(chalk.dim(B.v + " ".repeat(W - 2) + B.v)); }
-
-  lines.push(chalk.dim(bar(B.bl, B.h, B.br, W - 2)));
-  return lines;
+/** Visual width of a string, ignoring ANSI color codes. */
+export function visualWidth(s: string): number {
+  let w = 0;
+  for (const ch of s.replace(ANSI_RE, "")) w += charWidth(ch.codePointAt(0) || 0);
+  return w;
 }
 
-/* ── Render command palette ── */
-function renderPalette(filter: string, selIdx: number, width: number): string[] {
-  const lines: string[] = [];
-  const W = Math.min(width - 4, 56);
-
-  // Agent section first
-  const agentMatches = AGENT_CMDS.filter(([, cmd]) => cmd.includes(filter) || filter === "/");
-  const actionMatches = ACTION_CMDS.filter(([cmd]) => cmd.includes(filter));
-
-  const allItems: string[] = [];
-  for (const [icon, cmd, desc] of agentMatches) allItems.push(`${icon} ${cmd.padEnd(16)} ${desc}`);
-  for (const [cmd, desc] of actionMatches) allItems.push(`  ${cmd.padEnd(18)} ${desc}`);
-
-  if (allItems.length === 0 && filter.length > 1) {
-    // No matches — show message
-    lines.push(chalk.dim(bar(B.tl, B.h, B.tr, W)));
-    lines.push(chalk.dim(B.v + "  未找到匹配命令 (esc 关闭)".padEnd(W) + B.v));
-    lines.push(chalk.dim(bar(B.bl, B.h, B.br, W)));
-    return lines;
-  }
-
-  if (allItems.length === 0) return lines;
-
-  const start = Math.max(0, Math.min(selIdx - 5, allItems.length - 10));
-  const end = Math.min(allItems.length, start + 10);
-
-  lines.push(chalk.dim(bar(B.tl, B.h, B.tr, W - 5)) + "  ".padEnd(5));
-
-  for (let i = start; i < end; i++) {
-    const item = allItems[i];
-    const isSelected = i === selIdx;
-    const pad = W - item.replace(/\x1b\[[0-9;]*m/g, "").length + 2; // account for ANSI codes
-    lines.push(isSelected
-      ? chalk.cyan(B.v + " ▶ " + item).padEnd(W + 10) + chalk.cyan(B.v)
-      : chalk.dim(B.v + "   " + item).padEnd(W + 10) + chalk.dim(B.v));
-  }
-
-  lines.push(chalk.dim(bar(B.bl, B.h, B.br, W - 5)) + "  ".padEnd(5));
-  return lines;
+/** Pad a string (containing ANSI) to a visual width. */
+export function padVisual(s: string, width: number): string {
+  const diff = width - visualWidth(s);
+  return diff > 0 ? s + " ".repeat(diff) : s;
 }
 
-/* ── Render message ── */
-function renderMessage(role: string, text: string, width: number): string[] {
-  const lines: string[] = [];
-  const maxW = Math.min(width - 24, 60);
-  const prefix = role === "user" ? "  " : "  ";
-  const suffix = role === "user" ? "" : "";
+/* ════════════════════════════════════════
+   Streaming renderer — word-wrap aware, CJK aware
+   ════════════════════════════════════════ */
+/**
+ * Writes streamed text with a fixed left gutter, wrapping at the terminal
+ * width. English wraps on word boundaries; CJK wraps per glyph. Color is
+ * applied per flushed chunk so styling survives wrapping.
+ */
+export class StreamRenderer {
+  private col = 0;
+  private word = "";
+  private atLineStart = true;
+  private out: NodeJS.WriteStream;
+  private gutter: string;
+  private maxCols: number;
+  private color: (s: string) => string;
 
-  for (const para of text.split("\n")) {
-    let remaining = para;
-    while (remaining.length > 0) {
-      const cut = remaining.length > maxW ? remaining.lastIndexOf(" ", maxW) : remaining.length;
-      const idx = cut > 0 ? cut : maxW;
-      const line = remaining.slice(0, idx).trimEnd();
-      if (role === "user") {
-        lines.push(chalk.dim(" ".repeat(Math.max(0, width - line.length - 4))) + chalk.cyan(line) + "  ");
-      } else if (role === "assistant") {
-        lines.push(prefix + line + suffix);
+  constructor(out: NodeJS.WriteStream, opts?: { gutter?: string; color?: (s: string) => string }) {
+    this.out = out;
+    this.gutter = opts?.gutter ?? "  ";
+    this.color = opts?.color ?? ((s) => s);
+    const cols = out.columns || 80;
+    // content width excludes the gutter; clamp for readability
+    this.maxCols = Math.max(32, Math.min(cols - visualWidth(this.gutter) - 1, 96));
+  }
+
+  /** Lazily emit the left gutter at the start of each visual line. */
+  private startLine() { if (this.atLineStart) { this.out.write(this.gutter); this.atLineStart = false; } }
+  private newline() { this.out.write("\n"); this.atLineStart = true; this.col = 0; }
+
+  private flushWord() {
+    if (!this.word) return;
+    const w = visualWidth(this.word);
+    if (this.col > 0 && this.col + w > this.maxCols) this.newline();
+    this.startLine();
+    this.out.write(this.color(this.word));
+    this.col += w;
+    this.word = "";
+  }
+
+  /** Feed a chunk of streamed text. */
+  write(text: string) {
+    for (const ch of text) {
+      if (ch === "\r") continue; // normalize CRLF / stray CR from providers
+      if (ch === "\n") { this.flushWord(); this.newline(); continue; }
+      if (ch === " " || ch === "\t") {
+        this.flushWord();
+        if (this.col > 0 && this.col < this.maxCols) { this.startLine(); this.out.write(" "); this.col += 1; }
+        continue;
+      }
+      const cp = ch.codePointAt(0) || 0;
+      if (charWidth(cp) === 2) {
+        // CJK / wide: flush any pending latin word, then place this glyph
+        this.flushWord();
+        if (this.col > 0 && this.col + 2 > this.maxCols) this.newline();
+        this.startLine();
+        this.out.write(this.color(ch));
+        this.col += 2;
       } else {
-        lines.push(chalk.dim("  " + line));
+        this.word += ch;
+        // very long unbroken token: hard-break to avoid overflow
+        if (visualWidth(this.word) >= this.maxCols) this.flushWord();
       }
-      remaining = remaining.slice(idx).trimStart();
     }
   }
-  return lines;
+
+  /** Flush any buffered word (call before switching styles / ending). */
+  flush() { this.flushWord(); }
 }
 
-/* ── Read input with command palette ── */
-export function readInput(stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream, ctx: TUIContext): Promise<string> {
-  return new Promise(resolve => {
-    let buf = "";
-    let cursor = 0;
-    let palette = false;
-    let selIdx = 0;
+/* ════════════════════════════════════════
+   Input — readline-based, robust line editing
+   ════════════════════════════════════════ */
+/** Tab-completer for slash commands. */
+function slashCompleter(line: string): [string[], string] {
+  if (!line.startsWith("/")) return [[], line];
+  const names = SLASH_COMMANDS.map(([c]) => c.trimEnd());
+  const hits = names.filter((c) => c.startsWith(line));
+  return [hits.length ? hits : names, line];
+}
 
-    function render() {
-      // Clear screen and render full TUI
-      readline.cursorTo(stdout, 0, 0);
-      readline.clearScreenDown(stdout);
+/** The prompt string for an agent: a small mineral seal + chevron. */
+export function promptFor(agentName: string): string {
+  const t = agentTheme(agentName);
+  return chalk.hex(t.hex)(`  ${t.symbol} ${t.kanji} `) + chalk.hex(PALETTE.inkLight)("❯ ");
+}
 
-      const w = stdout.columns || 80;
-      const h = stdout.rows || 24;
-      const sidebarW = 16;
+/** Cross-turn input history (↑/↓), shared by every per-turn reader. */
+const inputHistory: string[] = [];
 
-      // Header
-      stdout.write(chalk.bgBlack.cyan(` 天空织机 Skyloom v${TUI_VERSION} `.padEnd(w - 20, " ")) + chalk.bgBlack.dim(" deepseek".padEnd(10)) + chalk.bgBlack("\n"));
-      stdout.write(chalk.dim(bar("", B.h, "", w)) + "\n");
-
-      // Sidebar
-      const sidebar = renderSidebar(ctx.agent, ctx.agents, h - 5);
-      for (let i = 0; i < sidebar.length && i < h - 5; i++) {
-        stdout.write(sidebar[i] + "\n");
-      }
-
-      // Command palette (overlaid)
-      if (palette) {
-        const paletteLines = renderPalette(buf, selIdx, w);
-        // Move cursor up to position palette below header
-        const paletteY = 2;
-        for (let i = 0; i < paletteLines.length; i++) {
-          stdout.write(`\x1b[${paletteY + i};${sidebarW}H`); // position cursor
-          stdout.write(paletteLines[i]);
-        }
-      }
-
-      // Input bar at bottom
-      readline.cursorTo(stdout, sidebarW, h - 1);
-      stdout.write(chalk.dim(B.l + B.h.repeat(w - sidebarW - 2) + B.r));
-      readline.cursorTo(stdout, sidebarW, h);
-      stdout.write(chalk.cyan(" > ") + buf.slice(0, cursor) + chalk.inverse(buf[cursor] || " ") + buf.slice(cursor + 1));
-    }
-
-    if (!stdin.isTTY) {
-      const rl = readline.createInterface({ input: stdin });
-      rl.on("line", (line) => { rl.close(); resolve(line.trim()); });
-      return;
-    }
-
-    stdin.setRawMode(true);
-    stdin.resume();
-    render();
-
-    let escBuf = "";
-    stdin.on("data", (data: Buffer) => {
-      const str = data.toString();
-      escBuf += str;
-
-      if (escBuf.startsWith("\x1b[") && escBuf.length >= 3) {
-        const code = escBuf[2]; escBuf = "";
-        if (code === "A") { if (palette) selIdx = Math.max(0, selIdx - 1); render(); return; }
-        if (code === "B") { if (palette) { const all = [...AGENT_CMDS.map(c => c[1]), ...ACTION_CMDS.map(c => c[0])]; selIdx = Math.min(all.filter(a => a.includes(buf)).length - 1, selIdx + 1); } render(); return; }
-        if (code === "C") { if (cursor < buf.length) cursor++; render(); return; }
-        if (code === "D") { if (cursor > 0) cursor--; render(); return; }
-      }
-
-      for (const ch of escBuf) {
-        escBuf = "";
-        if (ch === "\x1b") { palette = false; render(); return; }
-        if (ch === "\r" || ch === "\n") {
-          if (palette) {
-            const all = [...AGENT_CMDS.map(c => c[1]), ...ACTION_CMDS.map(c => c[0])];
-            const filtered = all.filter(a => a.includes(buf));
-            if (filtered[selIdx]) buf = filtered[selIdx];
-            palette = false;
-            render();
-            stdin.setRawMode(false); stdin.pause(); resolve(buf.trim()); return;
-          }
-          stdin.setRawMode(false); stdin.pause(); resolve(buf.trim()); return;
-        }
-        if (ch === "\t") { /* ignore */ return; }
-        if (ch === "\x7f" || ch === "\b") { if (cursor > 0) { buf = buf.slice(0, cursor - 1) + buf.slice(cursor); cursor--; } if (!buf) palette = false; render(); return; }
-        if (ch === "\x03") { stdin.setRawMode(false); stdin.pause(); resolve("/quit"); return; }
-        if (ch >= " ") {
-          buf = buf.slice(0, cursor) + ch + buf.slice(cursor); cursor++;
-          if (ch === "/") { palette = true; selIdx = 0; }
-          else if (palette) selIdx = 0;
-          render(); return;
-        }
-      }
+/**
+ * Read one line with the agent-themed prompt. A fresh readline interface is
+ * created and closed per call — this deliberately avoids clashing with the
+ * separate readline prompts used by the setup wizard and tool-approval flow
+ * (two live interfaces on one stdin corrupt input). History is preserved
+ * manually across turns.
+ */
+export function readLine(agentName: string, out: NodeJS.WriteStream = process.stdout): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: out,
+      completer: slashCompleter,
+      terminal: process.stdin.isTTY ?? false,
+      history: [...inputHistory],
+      historySize: 200,
+    } as any);
+    rl.on("SIGINT", () => { out.write("\n" + chalk.dim("  再会。\n")); rl.close(); process.exit(0); });
+    rl.question(promptFor(agentName), (answer) => {
+      const trimmed = answer.trim();
+      if (trimmed) inputHistory.unshift(trimmed);
+      rl.close();
+      resolve(trimmed);
     });
   });
+}
+
+/** Render the inline slash-command palette (printed, not full-screen). */
+export function renderPalette(filter: string): string {
+  const f = filter.toLowerCase();
+  const matches = SLASH_COMMANDS.filter(([c]) => c.toLowerCase().startsWith(f));
+  const list = matches.length ? matches : SLASH_COMMANDS;
+  const lines = list.slice(0, 12).map(([cmd, desc]) => {
+    const isAgent = ["/fog", "/rain", "/frost", "/snow", "/dew", "/fair"].includes(cmd.trim());
+    const name = isAgent ? chalk.hex(agentTheme(cmd.trim().slice(1)).hex)(cmd.padEnd(12)) : chalk.hex(PALETTE.inkMid)(cmd.padEnd(12));
+    return "    " + name + chalk.hex(PALETTE.inkLight)(desc);
+  });
+  return chalk.dim("  命令 · Tab 补全\n") + lines.join("\n") + "\n";
 }

@@ -12,7 +12,7 @@ import { listProviders, modelsFor, providerLabel, validateModel } from "../core/
 import { agentTheme } from "../core/theme";
 import { classify } from "../core/router";
 import { InteractiveMode, ModeController } from "./mode";
-import { readInput, type TUIContext } from "./tui";
+import { readLine, renderPalette, StreamRenderer } from "./tui";
 
 const MODE = new ModeController();
 const VERSION = (() => { try { return require("../../package.json").version; } catch { return "1.5.2"; } })();
@@ -137,52 +137,59 @@ function formatCost(c: number): string {
 async function streamResponse(agent: any, input: string): Promise<void> {
   const theme = agentTheme(agent.name);
   const pigment = chalk.hex(theme.hex);
+  const out = process.stdout;
+
+  // ── Thinking spinner (animates until the first token lands; TTY only) ──
+  const isTTY = !!out.isTTY;
+  const frames = ["·  ", "·· ", " ··", "  ·"];
+  let fi = 0, spinning = true;
+  const draw = () => { if (spinning && isTTY) out.write(`\r  ${pigment(theme.symbol)} ${chalk.dim("思忖 " + frames[fi++ % frames.length])}`); };
+  const timer = isTTY ? setInterval(draw, 140) : null; draw();
+  const stopSpinner = () => { if (spinning) { spinning = false; if (timer) clearInterval(timer); if (isTTY) out.write("\r" + " ".repeat(20) + "\r"); } };
+
+  let headerShown = false;
   let mode: "none" | "reasoning" | "content" = "none";
-  let atLineStart = true;
+  let renderer: StreamRenderer | null = null;
+  const header = () => { if (!headerShown) { out.write("\n  " + chalk.bold.hex(theme.hex)(`${theme.symbol} ${theme.kanji}`) + chalk.hex(theme.hex)(` ${theme.name}`) + "\n\n"); headerShown = true; } };
+  const endBlock = () => { if (renderer) { renderer.flush(); renderer = null; out.write("\n"); } };
 
-  const writeContent = (text: string) => {
-    for (const ch of text) {
-      if (atLineStart) { process.stdout.write("  "); atLineStart = false; }
-      process.stdout.write(ch);
-      if (ch === "\n") atLineStart = true;
+  try {
+    for await (const ev of agent.chatStream(input)) {
+      switch (ev.type) {
+        case "reasoning":
+          stopSpinner();
+          if (mode !== "reasoning") { out.write(chalk.dim("  ◦ 思考  ")); mode = "reasoning"; }
+          out.write(chalk.dim.italic(String(ev.text).replace(/\s+/g, " ")));
+          break;
+        case "content":
+          stopSpinner();
+          if (mode === "reasoning") out.write("\n");
+          if (mode !== "content") { header(); renderer = new StreamRenderer(out, { gutter: "  " }); mode = "content"; }
+          renderer!.write(String(ev.text));
+          break;
+        case "tool_status":
+          stopSpinner();
+          endBlock();
+          out.write("\n  " + pigment(`${theme.symbol} ${ev.tool_name}`) + (ev.label ? chalk.dim(`  ${ev.label}`) : "") + chalk.dim(" …") + "\n");
+          mode = "none";
+          break;
+        case "tool_done":
+          out.write("  " + (ev.success ? chalk.hex("#3a7a6e")("✓") : chalk.hex("#b3342d")("✗")) + " " + chalk.dim(String(ev.tool_name)) + "\n");
+          mode = "none";
+          break;
+        case "truncated":
+          endBlock();
+          out.write(chalk.yellow(`\n  ⚠ ${ev.reason}\n`));
+          break;
+        case "done":
+          break;
+      }
     }
-  };
-
-  // Thinking indicator until the first event lands
-  process.stdout.write(chalk.dim(`  ${theme.symbol} ${theme.pigment} …\r`));
-  let cleared = false;
-  const clearThinking = () => { if (!cleared) { process.stdout.write("\r" + " ".repeat(40) + "\r"); cleared = true; } };
-
-  for await (const ev of agent.chatStream(input)) {
-    switch (ev.type) {
-      case "reasoning":
-        clearThinking();
-        if (mode !== "reasoning") { process.stdout.write(chalk.dim("\n  ◦ ")); mode = "reasoning"; }
-        process.stdout.write(chalk.dim.italic(String(ev.text).replace(/\n/g, " ")));
-        break;
-      case "content":
-        clearThinking();
-        if (mode !== "content") { process.stdout.write(mode === "reasoning" ? "\n\n" : "\n"); atLineStart = true; mode = "content"; }
-        writeContent(String(ev.text));
-        break;
-      case "tool_status":
-        clearThinking();
-        process.stdout.write("\n" + pigment(`  ${theme.symbol} ${ev.tool_name}`) + chalk.dim(`  ${ev.label || ""} …`) + "\n");
-        atLineStart = true; mode = "none";
-        break;
-      case "tool_done":
-        process.stdout.write((ev.success ? chalk.green("  ✓ ") : chalk.red("  ✗ ")) + chalk.dim(String(ev.tool_name)) + "\n");
-        atLineStart = true; mode = "none";
-        break;
-      case "truncated":
-        process.stdout.write(chalk.yellow(`\n  ⚠ 截断: ${ev.reason}\n`));
-        break;
-      case "done":
-        break;
-    }
+  } finally {
+    stopSpinner();
+    endBlock();
   }
-  clearThinking();
-  process.stdout.write("\n\n");
+  out.write("\n");
 }
 
 /* ═══════════════════════════════════════
@@ -319,14 +326,14 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
   let currentAgent = agent; // mutable for agent switching
   welcome(agent);
 
-  process.stdout.write(chalk.dim("  Key: " + haveKey + "\n\n"));
-
-  // ── TUI loop ──
-  const ctx_: TUIContext = { agent: currentAgent, agents: ctx.agentMap, model: "default", cost: "$0", width: 80, height: 24 };
+  process.stdout.write(chalk.dim("  · 输入 / 看命令（Tab 补全）· ↑↓ 翻历史 · Ctrl-C 退出\n\n"));
 
   while (true) {
-    const inp = await readInput(process.stdin, process.stdout, ctx_);
+    const inp = await readLine(currentAgent.name);
     if (!inp) continue;
+
+    // Bare "/" → show the inline command palette
+    if (inp === "/") { process.stdout.write("\n" + renderPalette("") + "\n"); continue; }
 
     const cmdL = inp.toLowerCase();
 
@@ -336,7 +343,7 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
       if (cmdL === "/" + n) {
         const a = ctx.agentMap.get(n);
         if (a) {
-          await a.init(); currentAgent = a; ctx_.agent = a;
+          await a.init(); currentAgent = a;
           const t = agentTheme(n);
           process.stdout.write("\n  " + chalk.bold.hex(t.hex)(`▣ ${t.kanji} ${t.pigment}`) + chalk.dim(`  · ${t.specialty}`) + "\n");
           process.stdout.write("  " + chalk.dim.italic(t.poem) + "\n\n");
@@ -347,7 +354,7 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
     if (switched) continue;
     if (cmdL === "/quit" || cmdL === "/exit") break;
     if (cmdL === "/clear") { console.clear(); continue; }
-    if (cmdL === "/help") { process.stdout.write(helpText()); continue; }
+    if (cmdL === "/help") { process.stdout.write("\n" + renderPalette("") + "\n"); continue; }
     if (cmdL === "/version") { process.stdout.write("  Skyloom v" + VERSION + "\n"); continue; }
     if (cmdL === "/status") { process.stdout.write(chalk.bold("\n  " + currentAgent.displayName + " (" + currentAgent.name + ")\n") + chalk.dim("  State: " + currentAgent.state + "  ·  Memory: " + currentAgent.memory.shortTerm.length + " msgs\n\n")); continue; }
     if (cmdL === "/cost") { process.stdout.write(chalk.bold("\n  Total: " + formatCost(ctx.llm.getTotalCost()) + "\n\n")); continue; }
@@ -363,7 +370,7 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
     if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); continue; }
     if (cmdL === "/setup") { const r = await setupWizard(); if (r) process.stdout.write(chalk.green(`  ${r.provider} · ${r.model} — Ready!\n`)); continue; }
     if (cmdL.startsWith("/model")) { process.stdout.write(chalk.dim("  Run /setup to reconfigure models\n")); continue; }
-    if (inp.startsWith("/")) { process.stdout.write(helpText()); continue; }
+    if (inp.startsWith("/")) { process.stdout.write("\n" + chalk.dim(`  未知命令 ${inp.split(" ")[0]}\n`) + renderPalette(cmdL.split(" ")[0]) + "\n"); continue; }
 
     // ── Chat (real streaming) ──
     try {
@@ -391,21 +398,6 @@ async function runTask(goal: string): Promise<void> {
   await ctx.closeAll();
 }
 
-function helpText(): string {
-  const groups: [string, [string, string][]][] = [
-    ["Agent", [["/fog /rain /frost", "Switch agents"], ["/snow /dew /fair", "Switch agents"]]],
-    ["Chat", [["/help", "Commands"], ["/clear", "Clear"], ["/compact", "Compress"], ["/retry", "Resend"]]],
-    ["Info", [["/status", "Status"], ["/cost", "Cost"], ["/memory", "Memory"], ["/sessions", "Sessions"], ["/workspace", "Workspace"], ["/version", "Version"]]],
-    ["Orch.", [["/task <goal>", "Multi-agent"]]],
-  ];
-  let s = "";
-  for (const [title, cmds] of groups) {
-    s += chalk.cyan(`  ${title}\n`);
-    for (const [c, d] of cmds) s += `    ${chalk.cyan(c.padEnd(18))}${chalk.dim(d)}\n`;
-  }
-  s += "\n";
-  return s;
-}
 
 /* ═══════════════════════════════════════
    Entry

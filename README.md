@@ -46,7 +46,7 @@ sky
 ## 命令
 
 ```bash
-sky                  # 全屏 TUI 交互对话
+sky                  # 进入交互对话（线性流式 TUI）
 sky fog              # 直接和雾对话
 sky task "写一个CLI"  # 多 Agent 编排
 sky web              # Web UI → http://localhost:3000
@@ -56,27 +56,22 @@ sky mcp              # MCP Server
 sky init             # 初始化
 ```
 
-## TUI
+## 交互界面
 
-输入 `/` 弹出命令面板，↑↓ 选择，字母过滤，Enter 确认：
+线性对话流（如 Claude Code）—— 真实行编辑（←→ / Home·End / 退格 / 粘贴 / 中文均正确）、`↑↓` 历史、`/` 命令 `Tab` 补全。回复**真流式**逐字呈现，按终端宽度智能换行（中英文/长链接都不溢出）。每位灵以矿物色印章入场：
 
 ```
-┌── 天空织机 v1.13 ──────────────────┐
-├──────────┬─────────────────────────┤
-│ ≋ 雾 Fog│                         │
-│ ⸽ 雨 ▸  │  用户消息                │
-│ ✱ 霜    │                         │
-│ ❉ 雪    │  助手回复                │
-│ ∘ 露    │                         │
-│ ☼ 晴    │                         │
-├──────────┴─────────────────────────┤
-│ ┌── commands ────────────────────┐ │
-│ ▶ ≋ /fog    雾 Fog · 松烟墨      │ │
-│     /setup  配置向导              │ │
-│     /cost   费用统计              │ │
-│ └────────────────────────────────┘ │
-│ > /                                 │
-└─────────────────────────────────────┘
+  ≋ 霧 ❯ 帮我写一个读取 CSV 的脚本
+
+  ≋ 雾 fog
+  好的。下面是一个最小实现，先看清需求再动手 ——
+
+  ≋ web_search  "node csv parser"  …
+  ✓ web_search
+
+  这里用零依赖的方式读取并解析，按行流式处理避免一次性载入大文件……
+
+  ≋ 霧 ❯ /            ← 输入 / 看命令面板，Tab 补全
 ```
 
 ## Slash 命令
@@ -130,7 +125,7 @@ sky web
 
 ```
 src/
-├── cli/        main.ts (命令注册+TUI循环), tui.ts (全屏渲染+弹窗), mode.ts
+├── cli/        main.ts (命令注册+对话循环), tui.ts (行编辑+流式渲染), mode.ts
 ├── core/       agent, factory, llm, memory, tool, bus, security, learn,
 │              evolve, sandbox, vector, graph, filter, estimate, arbitrate, ...
 ├── agents/     6 Agent (fog/rain/frost/snow/dew/fair)
@@ -141,7 +136,7 @@ src/
 config/
 ├── skills/     17 个内置 SKILL.md
 ├── default.yaml  providers.yaml  models.yaml
-tests/           13 套件 · 129 Vitest 用例
+tests/           14 套件 · 137 Vitest 用例
 docs/            OPTIMIZATION_PLAN.md  AESTHETIC_DESIGN.md
 ```
 
@@ -160,4 +155,4 @@ Skyloom 正朝「顶级开源 Agent 框架」演进，对标 [opencode](https://
 
 ---
 
-**[MIT License](LICENSE)** · **v1.13.0** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)
+**[MIT License](LICENSE)** · **v1.13.1** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)
