@@ -222,9 +222,11 @@ export class BaseAgent {
   protected injectBehaviorRules(prompt: string): string {
     const lang = (this.config as any).llm?.language || 'zh';
     if (lang === 'en') {
-      return prompt + `\n\n## Behavior\n- Act, don't narrate. No "I will..." before tool calls.\n- Stay in scope. Do what's asked, then stop.\n- Batch independent tool calls in one response.\n- Verify writes: read back, report verified state.\n- Call list_skills when the task needs specialized capabilities.`;
+      return prompt +
+        `\n\n## Thinking Protocol\nBefore acting, briefly weigh: (1) **What** is the actual need? (2) **How** sure am I? If <80%, flag with [uncertain] and ask.\nIf stuck, admit it — propose a partial answer or ask the user. Never fabricate.\n\n## Behavior\n- Act, don't narrate. No "I will..." before tool calls.\n- Stay in scope. Do what's asked, then stop.\n- Batch independent tool calls in one response.\n- Verify writes: read back, report verified state.\n- Call list_skills when the task needs specialized capabilities.`;
     }
-    return prompt + `\n\n## 行为守则\n- 直接行动,不预告。不说「我将要...」,直接调用工具\n- 不擅自扩大范围。用户要什么做什么,核心完成即止\n- 独立的工具调用一次发出,并行执行\n- 写入后回读验证,汇报已验证状态而非仅尝试\n- 任务涉及专业能力时（PPT/Excel/PDF/网页设计/代码审查等），先调 list_skills 查看可用技能，再用 use_skill 激活`;
+    return prompt +
+      `\n\n## 思考协议\n行动前快速判断：(1) 用户真实需求是什么？(2) 我有多大把握？低于80%标注 [不确定] 并主动询问。\n卡住时承认，给出部分答案或请求用户指导。绝不编造。\n\n## 行为守则\n- 直接行动,不预告。不说「我将要...」,直接调用工具\n- 不擅自扩大范围。用户要什么做什么,核心完成即止\n- 独立的工具调用一次发出,并行执行\n- 写入后回读验证,汇报已验证状态而非仅尝试\n- 任务涉及专业能力时（PPT/Excel/PDF/网页设计/代码审查等），先调 list_skills 查看可用技能，再用 use_skill 激活`;
   }
 
   protected injectProgrammingWisdom(prompt: string): string {
@@ -1401,12 +1403,20 @@ export class BaseAgent {
     }
   }
 
+  private _security: any = null;
+  get security(): any { if (!this._security) { try { const { getSecurity } = require('./security'); this._security = getSecurity(); } catch { this._security = {}; } } return this._security; }
+
   protected async checkToolApproval(toolName: string, toolArgs: Record<string, any>): Promise<boolean> {
+    try {
+      const sec = this.security;
+      if (sec?.checkApproval) {
+        const [approved, reason] = await sec.checkApproval(toolName, toolArgs, this.name);
+        if (!approved) log.warn('tool_blocked', { tool: toolName, agent: this.name, reason });
+        return approved;
+      }
+    } catch { /* fall through */ }
     const mode = (this.config as any).cli?.approvalMode || 'auto';
     if (mode === 'strict') return false;
-    if (mode === 'interactive' && this.approvalCallback) {
-      return this.approvalCallback(toolName, toolArgs);
-    }
     return true;
   }
 
