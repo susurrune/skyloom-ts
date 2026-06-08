@@ -143,92 +143,73 @@ function render(text: string): string[] {
 /* ═══════════════════════════════════════
    Chat loop
    ═══════════════════════════════════════ */
+/* Check for API key availability */
+function checkApiKeys(): string | null {
+  const keys = ["DEEPSEEK_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GROQ_API_KEY","OPENROUTER_API_KEY"];
+  for (const k of keys) { if (process.env[k]) return k; }
+  return null;
+}
+
 async function chat(agentName: string, modelOverride?: string): Promise<void> {
+  const haveKey = checkApiKeys();
+  if (!haveKey) {
+    process.stdout.write("\n" + chalk.yellow("  ⚠ No API key configured.\n"));
+    process.stdout.write(chalk.dim("  Set one:  $env:DEEPSEEK_API_KEY = \"sk-your-key\"  (PowerShell)\n"));
+    process.stdout.write(chalk.dim("            export DEEPSEEK_API_KEY=sk-your-key    (Bash)\n\n"));
+    process.stdout.write(chalk.dim("  Then run: sky\n\n"));
+    process.exit(1);
+  }
+
   const ctx = createSystemContext();
   let agent = ctx.agentMap.get(agentName);
-  if (!agent) { process.stdout.write(chalk.red(`Unknown agent: ${agentName}\n`)); return; }
+  if (!agent) { process.stdout.write(chalk.red("Unknown agent: " + agentName) + "\n"); return; }
   await agent.init();
+  // eslint-disable-next-line prefer-const
+  let currentAgent = agent; // mutable for agent switching
   welcome(agent);
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const history: string[] = [];
+  process.stdout.write(chalk.dim("  Key: " + haveKey + "\n\n"));
 
-  for await (const line of rl) {
-    const inp = line.trim();
-    if (!inp) continue;
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-    if (inp[0] !== "/" && !history.includes(inp)) {
-      history.push(inp);
-      if (history.length > 50) history.shift();
-    }
+  function ask() { rl.question(chalk.cyan("  " + currentAgent.displayName + " ❯ "), handler); }
+  async function handler(inp: string) {
+    inp = inp.trim();
+    if (!inp) { ask(); return; }
 
-    const cmdLower = inp.toLowerCase();
-    let handled = false;
+    const cmdL = inp.toLowerCase();
 
     // Agent switch
     for (const n of AGENT_NAMES) {
-      if (cmdLower === `/${n}`) {
-        const a = ctx.agentMap.get(n);
-        if (a) { await a.init(); agent = a; process.stdout.write(chalk.dim(`  ⟳ ${AGENT_DISPLAY[n]}\n`)); }
-        handled = true; break;
-      }
+      if (cmdL === "/" + n) { const a = ctx.agentMap.get(n); if (a) { await a.init(); currentAgent = a; } process.stdout.write(chalk.dim("  ⟳ " + AGENT_DISPLAY[n] + "\n")); ask(); return; }
     }
 
-    if (handled) continue;
-    if (cmdLower === "/quit" || cmdLower === "/exit") break;
-    if (cmdLower === "/help") { process.stdout.write(helpText()); handled = true; }
-    if (cmdLower === "/clear") { console.clear(); welcome(agent); handled = true; }
-    if (cmdLower === "/version") { process.stdout.write(`  Skyloom v${VERSION}\n`); handled = true; }
-    if (cmdLower === "/status") { process.stdout.write(chalk.bold(`\n  ${agent.displayName} (${agent.name})\n`) + chalk.dim(`  State: ${agent.state}  ·  Memory: ${agent.memory.shortTerm.length} msgs\n\n`)); handled = true; }
-    if (cmdLower === "/cost") { process.stdout.write(chalk.bold(`\n  Total: ${formatCost(ctx.llm.getTotalCost())}\n\n`)); handled = true; }
-    if (cmdLower === "/cost reset") { (ctx.llm as any).resetUsageStats?.(); process.stdout.write(chalk.dim("  Reset\n\n")); handled = true; }
-    if (cmdLower === "/compact") { const r = await agent.compact(); process.stdout.write(chalk.green(`  ✓ ${r}\n\n`)); handled = true; }
-    if (cmdLower === "/memory") { process.stdout.write(chalk.dim(`  Short-term: ${agent.memory.shortTerm.length} msgs  ·  Working: ${Object.keys(agent.memory.working).length} keys\n\n`)); handled = true; }
-    if (cmdLower === "/workspace") { process.stdout.write(chalk.dim(`  ${ctx.workspacePath || "default"}\n\n`)); handled = true; }
-    if (cmdLower === "/mcp") { process.stdout.write(chalk.dim(`  ${ctx.mcpStatus?.join(", ") || "none"}\n\n`)); handled = true; }
-    if (cmdLower === "/sessions") { const ss = await agent.memory.listSessions(); if (ss.length) { for (const s of ss.slice(0, 10)) process.stdout.write(chalk.dim(`  ${s.id?.slice(0, 10)}... ${s.preview || ""} (${s.messageCount || 0} msgs)\n`)); } else process.stdout.write(chalk.dim("  No saved sessions\n")); process.stdout.write("\n"); handled = true; }
-    if (cmdLower.startsWith("/model")) { process.stdout.write(chalk.dim("  Configure in ~/.skyloom/config.yaml\n\n")); handled = true; }
-
-    if (handled) continue;
-
-    // Task orchestration
-    if (cmdLower.startsWith("/task ")) { const g = inp.slice(6).trim(); if (g) { process.stdout.write(chalk.cyan(`\n  ✦ ${g}\n\n`)); await runTask(g); } continue; }
-
-    // Unknown slash → help
-    if (inp.startsWith("/")) { process.stdout.write(helpText()); continue; }
+    if (cmdL === "/quit" || cmdL === "/exit") { process.stdout.write(chalk.dim("\n  Session ended\n")); rl.close(); await ctx.closeAll(); process.exit(0); return; }
+    if (cmdL === "/help") { process.stdout.write(helpText()); ask(); return; }
+    if (cmdL === "/clear") { console.clear(); welcome(agent); process.stdout.write(chalk.dim("  Key: " + haveKey + "\n\n")); ask(); return; }
+    if (cmdL === "/status") { process.stdout.write(chalk.bold("\n  " + currentAgent.displayName + " (" + currentAgent.name + ")\n") + chalk.dim("  State: " + currentAgent.state + "  ·  Memory: " + currentAgent.memory.shortTerm.length + " msgs\n\n")); ask(); return; }
+    if (cmdL === "/cost") { process.stdout.write(chalk.bold("\n  Total: " + formatCost(ctx.llm.getTotalCost()) + "\n\n")); ask(); return; }
+    if (cmdL === "/compact") { const r = await currentAgent.compact(); process.stdout.write(chalk.green("  ✓ " + r + "\n\n")); ask(); return; }
+    if (cmdL === "/version") { process.stdout.write("  Skyloom v" + VERSION + "\n"); ask(); return; }
+    if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); ask(); return; }
+    if (inp.startsWith("/")) { process.stdout.write(helpText()); ask(); return; }
 
     // ── Chat ──
-    process.stdout.write(chalk.dim(`  ${agent.displayName} thinking...\r`));
-
+    process.stdout.write(chalk.dim("  " + currentAgent.displayName + " thinking...\r"));
     try {
-      const response = await agent.chat(inp);
-      process.stdout.write("\r" + " ".repeat(40) + "\r");
-      for (const l of render(response)) process.stdout.write(l + "\n");
+      const response = await currentAgent.chat(inp);
+      process.stdout.write("\r" + " ".repeat(40) + "\r\n");
+      const lines = render(response);
+      for (const l of lines) process.stdout.write(l + "\n");
       process.stdout.write("\n");
-      // Status bar
-      process.stdout.write("  " + statusBar(agent, ctx) + "\n");
-    } catch (e) {
-      process.stdout.write(chalk.red(`\n  ✗ ${(e as Error).message || e}\n\n`));
+    } catch (e: any) {
+      process.stdout.write("\r" + " ".repeat(40) + "\r");
+      process.stdout.write(chalk.red("  ✗ " + (e.message || e) + "\n\n"));
     }
-
-    // Auto-continue
-    if (MODE.current === InteractiveMode.AUTO && agent.memory.shortTerm.length) {
-      const last = agent.memory.shortTerm[agent.memory.shortTerm.length - 1];
-      if (last?.content && /(?:接下来|下一步|继续|next|let me|I'[vl]l)/i.test(last.content.split("\n").slice(-4).join("\n"))) {
-        process.stdout.write(chalk.yellow("  [auto]\n"));
-        try {
-          const r2 = await agent.chat("请继续完成");
-          process.stdout.write("\n");
-          for (const l of render(r2)) process.stdout.write(l + "\n");
-          process.stdout.write("\n");
-        } catch { /* ignore */ }
-      }
-    }
+    ask();
   }
 
-  process.stdout.write(chalk.dim("\n  Session ended\n"));
-  await ctx.closeAll();
-  process.exit(0);
+  ask();
 }
 
 /* ═══════════════════════════════════════
