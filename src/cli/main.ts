@@ -164,6 +164,22 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
   let agent = ctx.agentMap.get(agentName);
   if (!agent) { process.stdout.write(chalk.red("Unknown agent: " + agentName) + "\n"); return; }
   await agent.init();
+
+  // Wire up security approval — prompt user for HIGH/CRITICAL operations
+  try {
+    const { getSecurity, DangerLevel } = require("../core/security");
+    const sec = getSecurity();
+    sec.setApprovalCallback(async (tool: string, args: Record<string, any>, level: number) => {
+      process.stdout.write(chalk.yellow(`\n  ⚠ ${tool} ( danger level ${level} )\n`));
+      process.stdout.write(chalk.dim(`     args: ${JSON.stringify(args).slice(0, 80)}\n`));
+      const answer = await new Promise<string>(resolve => {
+        const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl2.question(chalk.red("     Approve? [y/N] "), (a: string) => { rl2.close(); resolve(a.trim().toLowerCase()); });
+      });
+      return answer === "y" || answer === "yes";
+    });
+  } catch { /* security module optional */ }
+
   // eslint-disable-next-line prefer-const
   let currentAgent = agent; // mutable for agent switching
   welcome(agent);
