@@ -1,0 +1,39 @@
+# Provider catalog — API key env vars, base URLs, docs
+openai:
+  env_var: OPENAI_API_KEY
+  base_url: https://api.openai.com/v1
+  docs_url: https://platform.openai.com/api-keys
+
+anthropic:
+  env_var: ANTHROPIC_API_KEY
+  base_url: https://api.anthropic.com/v1
+  docs_url: https://console.anthropic.com/settings/keys
+
+deepseek:
+  env_var: DEEPSEEK_API_KEY
+  base_url: https://api.deepseek.com/v1
+  docs_url: https://platform.deepseek.com/api_keys
+
+groq:
+  env_var: GROQ_API_KEY
+  base_url: https://api.groq.com/openai/v1
+
+mistral:
+  env_var: MISTRAL_API_KEY
+  base_url: https://api.mistral.ai/v1
+
+cohere:
+  env_var: COHERE_API_KEY
+  base_url: https://api.cohere.ai/v1
+
+openrouter:
+  env_var: OPENROUTER_API_KEY
+  base_url: https://openrouter.ai/api/v1
+
+gemini:
+  env_var: GEMINI_API_KEY
+  base_url: https://generativelanguage.googleapis.com/v1beta
+
+ollama:
+  base_url: http://localhost:11434/v1
+  env_var: OLLAMA_HOST

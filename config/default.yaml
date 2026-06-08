@@ -1,0 +1,47 @@
+# Skyloom default configuration
+llm:
+  default_model: gpt-4o
+  language: zh
+  max_retries: 2
+  temperature: 0.7
+  max_tokens: 4096
+
+agents:
+  fog:
+    model: gpt-4o
+    temperature: 0.7
+  rain:
+    model: gpt-4o
+    temperature: 0.7
+  frost:
+    model: gpt-4o
+    temperature: 0.3
+  snow:
+    model: gpt-4o
+    temperature: 0.5
+  dew:
+    model: gpt-4o
+    temperature: 0.3
+  fair:
+    model: gpt-4o
+    temperature: 0.9
+
+memory:
+  db_path: ~/.skyloom/memory.db
+  short_term_limit: 100
+  max_persisted_messages: 2000
+
+workspace:
+  path: auto
+
+cli:
+  default_agent: fog
+  approval_mode: interactive
+
+plugins:
+  enabled: true
+  directories:
+    - ~/.skyloom/plugins
+
+mcp:
+  servers: []

@@ -662,63 +662,129 @@ export class LLMClient {
   }
 
   /**
-   * Complete with retry logic (placeholder).
+   * Complete with retry logic — real HTTP call to LLM API.
    */
   private async completeWithRetry(
     model: string,
-    _messages: Record<string, unknown>[],
-    _agentName?: string,
-    _tools?: string[],
-    _stream: boolean = false,
+    messages: Record<string, unknown>[],
+    agentName?: string,
+    tools?: string[],
+    stream: boolean = false,
     overrides?: Record<string, unknown>
   ): Promise<LLMResponse> {
-    // This is a placeholder. Real implementation would:
-    // 1. Validate cache
-    // 2. Call actual LLM API (OpenAI, Anthropic, etc.)
-    // 3. Apply Anthropic cache control if needed
-    // 4. Handle retry logic with exponential backoff
-    // 5. Track usage and cost
-    // 6. Cache results if appropriate
+    const temperature = (overrides?.temperature as number) ?? 0.7;
+    const maxTokens = (overrides?.maxTokens as number) ?? 4096;
+    const maxRetries = (this.config.llm as any)?.maxRetries ?? 2;
+    const isAnthropic = model.includes("claude") || model.startsWith("anthropic/");
 
-    const _temperature = (overrides?.temperature as number) ?? 0.7;
-    const _maxTokens = (overrides?.maxTokens as number) ?? 2000;
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
 
-    // For now, return a dummy response
-    return {
-      content: "Placeholder response from LLM",
-      toolCalls: [],
-      model,
-      usage: { promptTokens: 100, completionTokens: 50 },
-      cost: estimateCost(model, 100, 50),
-      truncated: false,
-    };
+        let content: string;
+        let toolCalls: ToolCall[] = [];
+        let usage: UsageStats = { promptTokens: 0, completionTokens: 0 };
+
+        if (isAnthropic) {
+          const r = await this.callAnthropic(model, messages, tools, temperature, maxTokens);
+          content = r.content; toolCalls = r.toolCalls; usage = r.usage;
+        } else {
+          const r = await this.callOpenAI(model, messages, tools, temperature, maxTokens);
+          content = r.content; toolCalls = r.toolCalls; usage = r.usage;
+        }
+
+        const name = agentName || "default";
+        if (!this.usageStats.has(name)) this.usageStats.set(name, { prompt_tokens: 0, completion_tokens: 0, calls: 0, cost: 0 });
+        const s = this.usageStats.get(name)!;
+        s.prompt_tokens += usage.promptTokens; s.completion_tokens += usage.completionTokens; s.calls += 1;
+        const cost = estimateCost(model, usage.promptTokens, usage.completionTokens);
+        s.cost += cost; this.totalCost += cost;
+
+        return { content, toolCalls, model, usage, cost, truncated: false };
+      } catch (e: any) {
+        lastError = e;
+        if (attempt >= maxRetries) throw e;
+      }
+    }
+    throw lastError || new Error("Unknown error");
   }
 
-  /**
-   * Stream a completion (placeholder).
-   */
+  private async callOpenAI(
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number
+  ): Promise<{ content: string; toolCalls: ToolCall[]; usage: UsageStats }> {
+    const apiKey = this.getApiKey(m);
+    const baseUrl = this.getBaseUrl(m);
+    const body: Record<string, unknown> = { model: m, messages, temperature: temp ?? 0.7, max_tokens: maxTok ?? 4096 };
+    if (tools?.length) {
+      const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
+      if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters || []) } }));
+    }
+    const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body) });
+    if (!resp.ok) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
+    const data: any = await resp.json();
+    const msg = data.choices?.[0]?.message || {};
+    return { content: msg.content || "", toolCalls: (msg.tool_calls || []).map((tc: any) => ({ id: tc.id, type: "function", function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "{}" } })), usage: { promptTokens: data.usage?.prompt_tokens || 0, completionTokens: data.usage?.completion_tokens || 0 } };
+  }
+
+  private async callAnthropic(
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number
+  ): Promise<{ content: string; toolCalls: ToolCall[]; usage: UsageStats }> {
+    const apiKey = this.getApiKey("anthropic");
+    const body: Record<string, unknown> = { model: m, max_tokens: maxTok ?? 4096, messages: messages.filter(msg => msg.role !== "system"), temperature: temp ?? 0.7 };
+    const sys = messages.find(msg => msg.role === "system"); if (sys) body.system = sys.content;
+    if (tools?.length) {
+      const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
+      if (defs.length) body.tools = defs.map(t => ({ name: t.name, description: t.description, input_schema: this.paramsToSchema(t.parameters || []) }));
+    }
+    const resp = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" }, body: JSON.stringify(body) });
+    if (!resp.ok) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
+    const data: any = await resp.json(); let content = ""; const toolCalls: ToolCall[] = [];
+    for (const b of data.content || []) { if (b.type === "text") content += b.text; if (b.type === "tool_use") toolCalls.push({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }); }
+    return { content, toolCalls, usage: { promptTokens: data.usage?.input_tokens || 0, completionTokens: data.usage?.output_tokens || 0 } };
+  }
+
+  private paramsToSchema(params: any[]): Record<string, any> {
+    const props: Record<string, any> = {};
+    for (const p of params) props[p.name] = { type: p.type === "integer" ? "integer" : p.type === "number" ? "number" : p.type === "boolean" ? "boolean" : "string", description: p.description };
+    const required = params.filter(p => p.required).map(p => p.name);
+    return { type: "object", properties: props, ...(required.length > 0 ? { required } : {}) };
+  }
+
+  private getApiKey(model: string): string {
+    let provider = "openai"; const [pr] = splitProvider(model); if (pr) provider = pr;
+    else { const l = model.toLowerCase(); if (l.includes("claude")) provider = "anthropic"; else if (l.includes("deepseek")) provider = "deepseek"; else if (l.includes("groq")) provider = "groq"; else if (l.includes("openrouter")) provider = "openrouter"; else if (l.includes("gemini")) provider = "gemini"; }
+    const envMap = getProviderEnvMap();
+    const envVar = envMap.get(provider) || (provider.toUpperCase() + "_API_KEY");
+    const key = process.env[envVar];
+    if (!key) throw new Error("Missing " + envVar + ". Set environment variable or configure in ~/.skyloom/config.yaml");
+    return key;
+  }
+
+  private getBaseUrl(model: string): string {
+    let provider = "openai"; const [pr] = splitProvider(model); if (pr) provider = pr;
+    else { const l = model.toLowerCase(); if (l.includes("claude")) return "https://api.anthropic.com/v1"; else if (l.includes("deepseek")) return "https://api.deepseek.com/v1"; else if (l.includes("groq")) return "https://api.groq.com/openai/v1"; else if (l.includes("openrouter")) return "https://openrouter.ai/api/v1"; else if (l.includes("ollama")) return ((process.env.OLLAMA_HOST || "http://localhost:11434") + "/v1"); }
+    if (provider === "deepseek") return "https://api.deepseek.com/v1";
+    if (provider === "groq") return "https://api.groq.com/openai/v1";
+    if (provider === "openrouter") return "https://openrouter.ai/api/v1";
+    if (provider === "ollama") return ((process.env.OLLAMA_HOST || "http://localhost:11434") + "/v1");
+    return "https://api.openai.com/v1";
+  }
+
   async *stream(
-    _messages: Record<string, unknown>[],
-    _agentName?: string
+    messages: Record<string, unknown>[], agentName?: string
   ): AsyncGenerator<string> {
-    // Placeholder implementation
-    yield "Streaming response...";
+    const response = await this.complete(messages, agentName);
+    yield response.content;
   }
 
-  /**
-   * Stream completion with tool awareness (placeholder).
-   */
   async *streamWithTools(
-    _messages: Record<string, unknown>[],
-    _agentName?: string,
-    _tools?: string[],
-    _toolRegistry?: ToolRegistry,
-    _overrides?: Record<string, unknown>
+    messages: Record<string, unknown>[], agentName?: string, tools?: string[],
+    _toolRegistry?: ToolRegistry, overrides?: Record<string, unknown>
   ): AsyncGenerator<StreamEvent> {
-    // Placeholder implementation
-    yield {
-      type: "content",
-      text: "Tool-aware streaming response...",
-    };
+    const response = await this.complete(messages, agentName, tools, false, overrides);
+    if (response.content) yield { type: "content", text: response.content };
+    for (const tc of response.toolCalls || []) yield { type: "tool_call", toolCall: tc };
+    yield { type: "done", usage: response.usage, reasoningContent: response.reasoningContent };
   }
 }
