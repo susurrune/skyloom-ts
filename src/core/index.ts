@@ -26,6 +26,12 @@ export * from './skill';
 export * from './router';
 export * from './agent';
 export * from './factory';
+export * from './security';
+export * from './learn';
+export * from './longdoc';
+export * from './filter';
+export * from './estimate';
+export * from './arbitrate';
 
-// Version
-export const VERSION = '1.4.0';
+// Version — read from package.json
+export const VERSION = (() => { try { return require('../../package.json').version; } catch { return '1.6.0'; } })();

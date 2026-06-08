@@ -731,7 +731,9 @@ export class BaseAgent {
     try {
       if (onStatus) onStatus('thinking...');
       const response = await this.llmLoop({ onStatus });
-      const content = response?.content || '(no response)';
+      let content = response?.content || '(no response)';
+      // Apply output filter for sensitive info
+      try { const { filterOutput } = require('./filter'); const fr = filterOutput(content); if (fr.redacted) content = fr.clean; } catch {}
       this.memory.addMessage('assistant', content, {
         toolCalls: response?.toolCalls || [],
         reasoningContent: response?.reasoningContent,
