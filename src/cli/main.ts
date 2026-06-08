@@ -377,22 +377,29 @@ function shouldAutoContinue(text: string): boolean {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  // If no args or just "chat", start interactive chat
-  if (args.length === 0 || args[0] === 'chat' || (args.length === 1 && !args[0].startsWith('-') && !['task', 'web', 'config', 'init', 'version'].includes(args[0]))) {
-    // Check if first arg is an agent name
-    const knownAgents = new Set(['fog', 'rain', 'frost', 'snow', 'dew', 'fair']);
-    let agent = 'fog';
-    let model: string | undefined;
+  // `sky` with no args = start chat directly (fastest path)
+  if (args.length === 0) {
+    await interactiveChat('fog');
+    return;
+  }
 
-    for (let i = 0; i < args.length; i++) {
-      if (knownAgents.has(args[i])) {
-        agent = args[i];
-      } else if (args[i] === '-m' || args[i] === '--model') {
+  // `sky <agent>` or `sky <agent> -m <model>` — chat with specific agent
+  const knownAgents = new Set(['fog', 'rain', 'frost', 'snow', 'dew', 'fair']);
+  if (knownAgents.has(args[0])) {
+    let model: string | undefined;
+    for (let i = 1; i < args.length; i++) {
+      if ((args[i] === '-m' || args[i] === '--model') && i + 1 < args.length) {
         model = args[++i];
       }
     }
+    await interactiveChat(args[0], model);
+    return;
+  }
 
-    await interactiveChat(agent, model);
+  // `sky <message>` — anything not a known subcommand → fast chat
+  const knownCommands = ['chat', 'task', 'web', 'config', 'init', 'version', 'mcp', 'help'];
+  if (!knownCommands.includes(args[0]) && !args[0].startsWith('-')) {
+    await interactiveChat('fog');
     return;
   }
 
