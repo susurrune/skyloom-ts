@@ -19,7 +19,7 @@
 | Tools | `src/tools/` | builtin, computer, delegate | ~700 |
 | Web | `src/web/` | server(水墨气象台), tts | ~720 |
 | Skills | `config/skills/` | 17 个 SKILL.md | — |
-| Tests | `tests/` | 13 套件 · 129 用例（catalog/memory/task/agent_helpers/config） | — |
+| Tests | `tests/` | 15 套件 · 142 用例（catalog/memory/task/agent_helpers/config） | — |
 
 ### 0.2 已经做得好的（保留 & 强化）
 
@@ -112,7 +112,7 @@
 - [ ] `core/agent/delegate.ts` — 跨 Agent 委派与汇总
 - [ ] `core/agent.ts` — 仅保留 `BaseAgent` 编排与公共 API（目标 < 500 行）
 
-> ⚠️ **热路径前置条件**：`loop/tools/guard/delegate` 直接动 LLM 推理循环，拆分前需先补 **mock-LLM 特征化测试**（Phase 6 中的 `agent` 套件），并在有 API key 的环境跑一遍集成验证，否则回归不可观测。纯单元（task/helpers）已先行抽出并测试。
+> ✅ **热路径测试网已就位**：[`tests/agent.test.ts`](../tests/agent.test.ts) 用**脚本化 mock LLM** 特征化了核心循环 —— 简单对话、阻塞 `chat()`、推理流、**工具调用回合**、**防循环 guard 终止**（模型重复同一工具 60 次仍能有界终止）。`loop/tools/guard/delegate` 的拆分现在可以安全进行（每步跑这套网 + 真实 API 抽查）。纯单元（task/helpers）已先抽出。
 
 ### Phase 4 — Session & 自动上下文管理｜~1.5 天
 
@@ -130,7 +130,7 @@
 
 ### Phase 6 — 测试与质量门禁｜~1.5 天
 
-- [ ] **P6.1** 把覆盖率提到核心全覆盖：仍需 `agent`(mock LLM)、`llm`(mock)、`factory`、`pipelines`、`security` 套件（已建 `catalog`✅ `memory`✅ `task`✅ `agent_helpers`✅，共 12 套件 123 用例）。目标 ≥ 140 用例。`memory`/`task`/`agent_helpers` 已对三层记忆裁剪、任务状态机、事实解析做了特征化，为 `agent.ts` 拆分提供安全网。
+- [ ] **P6.1** 把覆盖率提到核心全覆盖：仍需 `llm`(mock)、`factory`、`pipelines`、`security` 套件（已建 `catalog`✅ `memory`✅ `task`✅ `agent_helpers`✅ `config`✅ `tui`✅ **`agent`✅(mock LLM)**，共 15 套件 142 用例）。`agent` 套件特征化了 chat/stream/工具回合/防循环 guard，为 `agent.ts` 拆分提供安全网。
 - [ ] **P6.2** CI 加门禁：`type-check` + `lint` + `test` + 覆盖率阈值。
 - [ ] **P6.3** 修正所有 `README`/文档与代码的数字一致性（测试数自动从 `vitest` 输出取）。
 
