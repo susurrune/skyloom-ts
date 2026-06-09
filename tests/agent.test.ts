@@ -132,3 +132,28 @@ describe("agent · context window (catalog-aware compaction)", () => {
     expect((agent as any).shouldAutoCompact()).toBe(false);
   });
 });
+
+describe("agent · interrupt (Ctrl-C)", () => {
+  it("stops between rounds on abort and preserves partial output", async () => {
+    const controller = new AbortController();
+    // Round 1 streams some content + a tool call; the tool aborts the signal.
+    // Round 2 must never run.
+    const turns: Turn[] = [
+      { content: "部分内容已生成…", toolCalls: [{ name: "spin", args: {} }] },
+      { content: "不应出现的第二轮" },
+    ];
+    const reg = new ToolRegistry();
+    reg.register({ name: "spin", description: "spin", handler: async () => { controller.abort(); return "spun"; } });
+    const config = { agents: { fog: {} }, llm: {}, memory: { shortTermLimit: 200, dbPath: "/tmp/sky-test" } };
+    const agent = new FogAgent(config as any, new MockLLM(turns) as any, new MessageBus(), reg, new SkillRegistry());
+
+    const evs = await collect(agent.chatStream("go", controller.signal));
+    const text = evs.filter((e) => e.type === "content").map((e) => e.text).join("");
+
+    expect(evs.some((e) => e.type === "interrupted")).toBe(true);
+    expect(text).toContain("部分内容已生成");      // partial output kept
+    expect(text).not.toContain("第二轮");          // round 2 never streamed
+    // partial assistant content is in memory
+    expect(agent.memory.getMessages().some((m) => m.role === "assistant" && String(m.content).includes("部分内容"))).toBe(true);
+  });
+});

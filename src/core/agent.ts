@@ -708,12 +708,12 @@ export class BaseAgent {
     }
   }
 
-  async *chatStream(message: string): AsyncGenerator<Record<string, any>> {
+  async *chatStream(message: string, signal?: AbortSignal): AsyncGenerator<Record<string, any>> {
     const activatedNow = this.autoActivateSkills(message);
     const self = this;
 
     try {
-      for await (const ev of self.chatStreamImpl(message, activatedNow.length > 0 ? activatedNow : undefined)) {
+      for await (const ev of self.chatStreamImpl(message, activatedNow.length > 0 ? activatedNow : undefined, signal)) {
         yield ev;
       }
     } catch (err) {
@@ -727,7 +727,8 @@ export class BaseAgent {
 
   protected async *chatStreamImpl(
     message: string,
-    autoActivated?: string[]
+    autoActivated?: string[],
+    signal?: AbortSignal
   ): AsyncGenerator<Record<string, any>> {
     await this.setState(AgentState.THINKING);
     this.memory.addMessage('user', message);
@@ -779,6 +780,19 @@ export class BaseAgent {
       let roundCount = 0;
 
       while (true) {
+        // User interrupt between rounds (Ctrl-C): stop before another LLM call.
+        if (signal?.aborted) {
+          if (!assistantStored && fullContent.trim()) {
+            this.memory.addMessage('assistant', fullContent);
+            assistantStored = true;
+          } else if (!assistantStored) {
+            this.popLastUserMessage();
+          }
+          await this.setState(AgentState.IDLE);
+          yield { type: 'interrupted' };
+          yield { type: 'done' };
+          return;
+        }
         if (roundCount >= roundLimit) {
           if (roundLimit >= this._maxToolRoundsHardCap) break;
           const extendBy = Math.min(15, this._maxToolRoundsHardCap - roundLimit);
@@ -802,7 +816,8 @@ export class BaseAgent {
           this.name,
           toolNames.length > 0 ? toolNames : undefined,
           toolNames.length > 0 ? this.toolRegistry : undefined,
-          Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined
+          Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined,
+          signal
         )) {
           if (event.type === 'content') {
             fullContent += event.text;

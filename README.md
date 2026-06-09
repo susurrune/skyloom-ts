@@ -137,7 +137,7 @@ src/
 config/
 ├── skills/     17 个内置 SKILL.md
 ├── default.yaml  providers.yaml  models.yaml
-tests/           15 套件 · 145 Vitest 用例
+tests/           15 套件 · 146 Vitest 用例
 docs/            OPTIMIZATION_PLAN.md  AESTHETIC_DESIGN.md
 ```
 
@@ -156,4 +156,4 @@ Skyloom 正朝「顶级开源 Agent 框架」演进，对标 [opencode](https://
 
 ---
 
-**[MIT License](LICENSE)** · **v1.13.4** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)
+**[MIT License](LICENSE)** · **v1.13.5** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)

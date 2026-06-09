@@ -802,7 +802,7 @@ export class LLMClient {
    * emitted once complete. Usage comes from the final `stream_options` chunk.
    */
   private async *callOpenAIStream(
-    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, signal?: AbortSignal
   ): AsyncGenerator<StreamEvent> {
     const apiKey = this.getApiKey(m);
     const baseUrl = this.getBaseUrl(m);
@@ -814,7 +814,7 @@ export class LLMClient {
       const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
       if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters || []) } }));
     }
-    const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body) });
+    const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body), signal });
     if (!resp.ok || !resp.body) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
 
     const reader = (resp.body as any).getReader();
@@ -861,7 +861,7 @@ export class LLMClient {
 
   async *streamWithTools(
     messages: Record<string, unknown>[], agentName?: string, tools?: string[],
-    _toolRegistry?: ToolRegistry, overrides?: Record<string, unknown>
+    _toolRegistry?: ToolRegistry, overrides?: Record<string, unknown>, signal?: AbortSignal
   ): AsyncGenerator<StreamEvent> {
     this.checkBudget();
     const ov = overrides || {};
@@ -884,12 +884,14 @@ export class LLMClient {
     let started = false;
     let usage: UsageStats = { promptTokens: 0, completionTokens: 0 };
     try {
-      for await (const ev of this.callOpenAIStream(model, messages, tools, temperature, maxTokens)) {
+      for await (const ev of this.callOpenAIStream(model, messages, tools, temperature, maxTokens, signal)) {
         if (ev.type === "content" || ev.type === "tool_call") started = true;
         if (ev.type === "done" && ev.usage) usage = ev.usage;
         yield ev;
       }
     } catch (e: any) {
+      // User interrupt (Ctrl-C): stop cleanly — keep whatever streamed, no error, no fallback.
+      if (signal?.aborted || e?.name === "AbortError") { yield { type: "done", usage }; return; }
       if (started) { yield { type: "error", text: String(e?.message || e) }; yield { type: "done", usage }; return; }
       this.log?.warn("stream_failed_fallback", { model, error: String(e?.message || e) });
       yield* blockingFallback();
