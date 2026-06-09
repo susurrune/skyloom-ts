@@ -29,6 +29,7 @@ import {
   SIG_LOOP_HARDSTOP,
 } from './agent_helpers';
 import { selectRelevantTools } from './tool_router';
+import { getModelInfo } from './catalog';
 
 const log = getLogger('agent');
 
@@ -1069,20 +1070,34 @@ export class BaseAgent {
     return `compressed ${toSummarize.length} messages (${summary.length} char digest)`;
   }
 
+  /** Resolve the model id this agent runs on (mirrors LLMClient.getModel). */
+  protected resolveModelId(): string {
+    const c: any = this.config;
+    return c.agents?.[this.name]?.model || c.default_model || c.llm?.default_model || c.llm?.defaultModel || 'gpt-4o';
+  }
+
+  /** The active model's real context window (tokens), from the catalog. */
+  protected contextWindow(): number {
+    const info = getModelInfo(this.resolveModelId());
+    return info?.context && info.context > 0 ? info.context : 128000;
+  }
+
   contextUsage(): Record<string, any> {
     const usage = this.memory.getContextWindowUsage();
+    const max = this.contextWindow();
     return {
       estimatedTokens: usage.estimatedTokens,
-      maxTokens: 128000,
-      pct: Math.min(100, Math.round((usage.estimatedTokens / 128000) * 100)),
+      maxTokens: max,
+      pct: Math.min(100, Math.round((usage.estimatedTokens / max) * 100)),
       messageCount: usage.messageCount,
-      model: (this.config as any).llm?.defaultModel || 'unknown',
+      model: this.resolveModelId(),
     };
   }
 
   protected shouldAutoCompact(): boolean {
     const usage = this.memory.getContextWindowUsage();
-    return (usage.estimatedTokens / 128000) > 0.92;
+    // Compact before hitting the real window — leave ~20% headroom for the reply.
+    return usage.estimatedTokens > this.contextWindow() * 0.8;
   }
 
   protected activeToolNames(): string[] {

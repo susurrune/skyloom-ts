@@ -109,3 +109,26 @@ describe("agent · chat loop (mock LLM)", () => {
     expect(llm.calls).toBeLessThan(50); // bounded by the round cap / guard, not 60+
   }, 15000);
 });
+
+describe("agent · context window (catalog-aware compaction)", () => {
+  it("contextUsage uses the active model's real window from the catalog", () => {
+    const agent = makeAgent([{ content: "x" }]);
+    (agent as any).config.agents.fog.model = "mixtral-8x7b"; // 32768
+    expect(agent.contextUsage().maxTokens).toBe(32768);
+    expect(agent.contextUsage().model).toBe("mixtral-8x7b");
+    (agent as any).config.agents.fog.model = "gemini-2.5-pro"; // 1048576
+    expect(agent.contextUsage().maxTokens).toBe(1048576);
+  });
+
+  it("auto-compaction triggers for a small window but not a large one (same history)", () => {
+    const agent = makeAgent([{ content: "x" }]);
+    const big = "字".repeat(800); // CJK ~2 tokens/char
+    for (let i = 0; i < 20; i++) agent.memory.addMessage("user", big); // ~32k tokens
+
+    (agent as any).config.agents.fog.model = "mixtral-8x7b"; // 32768 window -> over budget
+    expect((agent as any).shouldAutoCompact()).toBe(true);
+
+    (agent as any).config.agents.fog.model = "gemini-2.5-pro"; // 1M window -> fine
+    expect((agent as any).shouldAutoCompact()).toBe(false);
+  });
+});

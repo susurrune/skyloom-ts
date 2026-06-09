@@ -19,7 +19,7 @@
 | Tools | `src/tools/` | builtin, computer, delegate | ~700 |
 | Web | `src/web/` | server(水墨气象台), tts | ~720 |
 | Skills | `config/skills/` | 17 个 SKILL.md | — |
-| Tests | `tests/` | 15 套件 · 142 用例（catalog/memory/task/agent_helpers/config） | — |
+| Tests | `tests/` | 15 套件 · 144 用例（catalog/memory/task/agent_helpers/config） | — |
 
 ### 0.2 已经做得好的（保留 & 强化）
 
@@ -119,7 +119,7 @@
 对标 opencode `session.md`：
 
 - [ ] **P4.1 Session 实体**：显式 `Session { id, location, messages, model, agent }`，CLI/Web 共用，可列举/恢复（已有 `listSessions` 雏形，补 resume）。
-- [ ] **P4.2 自动压缩**：每轮 provider turn 前用 catalog 的 `limit.context` 估算，超预算自动 compaction（保留完整 transcript + 结构化摘要 checkpoint）。手动 `/compact` 保留。
+- [x] **P4.2 自动压缩（catalog 感知触发）**：`shouldAutoCompact()`/`contextUsage()` 不再硬编码 128K —— 改为按当前模型在 catalog 里的真实 `context` 窗口判断（留 20% 余量给回复）。修复了小窗口模型（deepseek-reasoner 64K、mixtral 32K）长聊时**先于压缩就溢出**的隐患；状态栏 % 与模型名也正确了。压缩本身（摘要 + 保留近 N 条 + 指令保真）已存在并已接线。后续：结构化 checkpoint + 溢出后重试（对标 opencode）。
 - [ ] **P4.3 上下文快照**：环境信息、日期、工作区、激活技能合成一份"系统上下文"，模型可见但与历史分离（轻量版 Context Epoch）。
 
 ### Phase 5 — 工具与插件健壮性｜~1 天
