@@ -324,6 +324,7 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
 
   // eslint-disable-next-line prefer-const
   let currentAgent = agent; // mutable for agent switching
+  let lastSessions: any[] = []; // index→session map for /resume <n>
   welcome(agent);
 
   process.stdout.write(chalk.dim("  · 输入 / 看命令（Tab 补全）· ↑↓ 翻历史 · Ctrl-C 退出\n\n"));
@@ -363,7 +364,42 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
     if (cmdL === "/memory") { process.stdout.write(chalk.dim("  Short-term: " + currentAgent.memory.shortTerm.length + " msgs  ·  Working: " + Object.keys(currentAgent.memory.working).length + " keys\n")); continue; }
     if (cmdL === "/memory clear") { await currentAgent.memory.clearShortTerm(); process.stdout.write(chalk.dim("  Memory cleared\n")); continue; }
     if (cmdL === "/workspace") { process.stdout.write(chalk.dim("  " + (ctx.workspacePath || "default") + "\n")); continue; }
-    if (cmdL === "/sessions") { const ss = await currentAgent.memory.listSessions(); process.stdout.write(chalk.bold("\n  Sessions:\n")); for (const s of ss.slice(0, 10)) process.stdout.write(chalk.dim("  " + s.id?.slice(0, 10) + "... " + s.preview + " (" + s.messageCount + " msgs)\n")); continue; }
+    if (cmdL === "/sessions") {
+      lastSessions = await currentAgent.memory.listSessions();
+      const active = currentAgent.memory.getActiveSession();
+      const t = agentTheme(currentAgent.name);
+      process.stdout.write("\n  " + chalk.bold.hex(t.hex)(`${t.symbol} ${t.kanji} 会话`) + chalk.dim(`  (${lastSessions.length})\n`));
+      if (lastSessions.length === 0) process.stdout.write(chalk.dim("  （暂无历史会话）\n"));
+      lastSessions.slice(0, 20).forEach((s, i) => {
+        const mark = s.id === active ? chalk.hex(t.hex)("●") : chalk.dim("·");
+        const preview = (s.preview || "(空)").replace(/\s+/g, " ").slice(0, 42);
+        process.stdout.write(`  ${mark} ${chalk.dim(String(i + 1).padStart(2))} ${preview} ${chalk.dim(`· ${s.messageCount}条 · ${s.id?.slice(0, 8)}`)}\n`);
+      });
+      process.stdout.write(chalk.dim("  /resume <序号或id> 恢复 · /new 新会话\n\n"));
+      continue;
+    }
+    if (cmdL === "/new") {
+      await currentAgent.memory.clearShortTerm();
+      const id = await currentAgent.memory.createSession();
+      process.stdout.write("\n  " + chalk.green("✦ 新会话已开始") + chalk.dim(`  · ${String(id).slice(0, 8)}\n\n`));
+      continue;
+    }
+    if (cmdL === "/resume" || cmdL.startsWith("/resume ")) {
+      const arg = inp.slice(7).trim();
+      if (!lastSessions.length) lastSessions = await currentAgent.memory.listSessions();
+      let target: any = null;
+      if (!arg) target = lastSessions[0]; // most recent
+      else if (/^\d+$/.test(arg)) target = lastSessions[parseInt(arg) - 1];
+      else target = lastSessions.find((s) => String(s.id).startsWith(arg));
+      if (!target) { process.stdout.write(chalk.yellow("\n  未找到该会话。先 /sessions 看列表。\n\n")); continue; }
+      const ok = await currentAgent.memory.loadSession(target.id);
+      if (!ok) { process.stdout.write(chalk.yellow("\n  恢复失败。\n\n")); continue; }
+      const n = currentAgent.memory.shortTerm.filter((m: any) => m.role !== "system").length;
+      const t = agentTheme(currentAgent.name);
+      process.stdout.write("\n  " + chalk.bold.hex(t.hex)("↺ 已恢复会话") + chalk.dim(`  · ${n} 条消息 · ${String(target.id).slice(0, 8)}\n`));
+      process.stdout.write(chalk.dim(`  「${(target.preview || "").replace(/\s+/g, " ").slice(0, 50)}」\n\n`));
+      continue;
+    }
     if (cmdL === "/mcp") { process.stdout.write(chalk.dim("  " + (ctx.mcpStatus?.join(", ") || "none") + "\n")); continue; }
     if (cmdL.startsWith("/apikey set ")) { const p = inp.split(/\s+/); if (p.length >= 4) { saveApiKey(p[2], p[3]); process.stdout.write(chalk.green("  ✓ Saved " + p[2] + " API key\n")); } else { process.stdout.write(chalk.yellow("  Usage: /apikey set <provider> <key>\n")); } continue; }
     if (cmdL === "/apikey") { process.stdout.write(chalk.bold("\n  API Keys:\n")); for (const p of ["openai","deepseek","anthropic","groq","openrouter"]) { process.stdout.write(chalk.dim("  " + p.padEnd(14) + (!!process.env[p.toUpperCase() + "_API_KEY"] ? chalk.green("env") : chalk.dim("—")) + "\n")); } process.stdout.write("\n"); continue; }

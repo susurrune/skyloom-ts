@@ -39,6 +39,8 @@ export const SLASH_COMMANDS: [string, string][] = [
   ["/status", "状态总览"],
   ["/memory", "记忆状态"],
   ["/sessions", "会话列表"],
+  ["/resume ", "恢复会话（序号/id）"],
+  ["/new", "开始新会话"],
   ["/workspace", "工作空间"],
   ["/compact", "压缩上下文"],
   ["/clear", "清屏"],
