@@ -137,7 +137,7 @@ src/
 config/
 ├── skills/     17 个内置 SKILL.md
 ├── default.yaml  providers.yaml  models.yaml
-tests/           15 套件 · 146 Vitest 用例
+tests/           16 套件 · 154 Vitest 用例
 docs/            OPTIMIZATION_PLAN.md  AESTHETIC_DESIGN.md
 ```
 

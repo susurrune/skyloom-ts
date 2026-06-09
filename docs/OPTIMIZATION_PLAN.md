@@ -19,7 +19,7 @@
 | Tools | `src/tools/` | builtin, computer, delegate | ~700 |
 | Web | `src/web/` | server(水墨气象台), tts | ~720 |
 | Skills | `config/skills/` | 17 个 SKILL.md | — |
-| Tests | `tests/` | 15 套件 · 146 用例（catalog/memory/task/agent_helpers/config） | — |
+| Tests | `tests/` | 16 套件 · 154 用例（catalog/memory/task/agent_helpers/config） | — |
 
 ### 0.2 已经做得好的（保留 & 强化）
 
@@ -100,7 +100,7 @@
 - [x] **P2.2 Web 流式**：`/api/chat` 改 SSE（`text/event-stream`），前端 `fetch` + `ReadableStream` 真流式替换假打字机，工具调用呈现为"气象事件"系统消息。已 curl + 真实 API 验证。
 - [x] **P2.3 中断**：`AbortSignal` 从 CLI 贯穿 `chatStream → streamWithTools → callOpenAIStream → fetch`。Ctrl-C 中断当前 turn 并**保留已产出内容**（轮间检测 abort → `interrupted` 事件 + 落库部分内容），二次 Ctrl-C 强退。实测 DeepSeek：abort 后 ~26ms 内停流（不再跑满整段生成）。
 
-### Phase 3 — `agent.ts` 分层（可维护性）｜~1.5 天 🔵 进行中（1549 → 1437 行）
+### Phase 3 — `agent.ts` 分层（可维护性）｜~1.5 天 🔵 进行中（1549 → 1396 行）
 
 把巨石拆成职责单一的模块（保持对外 API 不变，re-export 兜底）：
 
@@ -108,7 +108,7 @@
 - [x] `agent_helpers.ts` += `parseExtractedFacts`（纯解析器，移出 BaseAgent）。
 - [ ] `core/agent/loop.ts` — LLM 推理循环（`llmLoop` / `chatStreamImpl`，~275 行热路径）
 - [ ] `core/agent/tools.ts` — 工具选择/执行/结果记录
-- [ ] `core/agent/guard.ts` — 防循环启发式（签名窗口、search storm、hardstop）
+- [x] `core/agent/guard.ts` — 防循环启发式抽成 `LoopGuard` 类（持有每轮状态，`observe()` 返回 hints/stop 决策，无副作用）。忠实迁移行为；agent 守卫终止测试仍通过。新增 [`tests/guard.test.ts`](../tests/guard.test.ts) 单测各分支（叙述循环/签名循环/失败堆积/搜索风暴）——这些此前**零覆盖**。期间发现两处**死安全网**（all-failed `>=8` 与 search-storm `>=12` 因缓冲区上限 6/8 永不触发），已记为后续修复项。
 - [ ] `core/agent/delegate.ts` — 跨 Agent 委派与汇总
 - [ ] `core/agent.ts` — 仅保留 `BaseAgent` 编排与公共 API（目标 < 500 行）
 

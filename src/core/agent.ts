@@ -14,22 +14,17 @@ import { Skill, SkillRegistry } from './skill';
 import { type ToolDefinition, ToolRegistry } from './tool';
 import {
   parseToolArgs,
-  looksLikeFailedToolResult,
   extractFilePathsFromMessages,
   enrichResponseWithArtifacts,
-  toolCallSignature,
-  textSimilarity,
   formatArgsParseError,
   suggestToolNames,
   toolStatusLabel,
   synthesizeDelegationSummary,
   parseExtractedFacts,
-  SIG_WINDOW,
-  SIG_LOOP_HINT,
-  SIG_LOOP_HARDSTOP,
 } from './agent_helpers';
 import { selectRelevantTools } from './tool_router';
 import { getModelInfo } from './catalog';
+import { LoopGuard } from './agent/guard';
 
 const log = getLogger('agent');
 
@@ -749,12 +744,7 @@ export class BaseAgent {
       );
     }
 
-    const recentToolOutcomes: boolean[] = [];
-    let stuckHintInjected = false;
-    const recentResponseTexts: string[] = [];
-    let repetitionHintInjected = false;
-    const recentToolSigs: string[] = [];
-    let toolLoopHintInjected = false;
+    const guard = new LoopGuard();
 
     let toolNamesCache: string[] | null = null;
     let cacheKey: string | null = null;
@@ -914,82 +904,12 @@ export class BaseAgent {
           return;
         }
 
-        // ── Narration-loop detection ──
-        const normalizedRound = roundContent.trim();
-        if (normalizedRound && recentResponseTexts.length > 0) {
-          const highSim = recentResponseTexts.slice(-2).some(prev => textSimilarity(normalizedRound, prev) >= 0.7);
-          if (highSim && !repetitionHintInjected) {
-            this.memory.addMessage('system', '[Stop narrating] Your last response is highly similar to your previous one. Stop writing prose. Either: (1) emit ONLY the next tool call, or (2) output the final deliverable.');
-            repetitionHintInjected = true;
-          }
-        }
-        recentResponseTexts.push(normalizedRound);
-        if (recentResponseTexts.length > 3) recentResponseTexts.shift();
-
-        // ── Tool-signature loop detection ──
-        for (const tc of toolCallsReceived) {
-          const tName = tc.function.name;
-          if (['task_done', 'list_skills', 'use_skill'].includes(tName)) continue;
-          const rawArgs = tc.function.arguments;
-          const tArgs = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
-          const sig = toolCallSignature(tName, tArgs);
-          if (sig) recentToolSigs.push(sig);
-        }
-        if (recentToolSigs.length > SIG_WINDOW) {
-          recentToolSigs.splice(0, recentToolSigs.length - SIG_WINDOW);
-        }
-        if (recentToolSigs.length > 0) {
-          const counts = new Map<string, number>();
-          for (const s of recentToolSigs) counts.set(s, (counts.get(s) || 0) + 1);
-          let topSig = '';
-          let topCount = 0;
-          for (const [s, c] of counts) { if (c > topCount) { topSig = s; topCount = c; } }
-          if (topCount >= SIG_LOOP_HINT && !toolLoopHintInjected) {
-            this.memory.addMessage('system', `[Tool loop] You have called \`${topSig}\` ${topCount}x in the last ${recentToolSigs.length} tool calls — you are iterating without converging. STOP repeating it.`);
-            toolLoopHintInjected = true;
-          }
-          if (topCount >= SIG_LOOP_HARDSTOP) {
-            this.memory.addMessage('assistant', `I have repeated \`${topSig}\` ${topCount} times without converging. Stopping.`);
-            yield { type: 'content', text: `\n\n[stuck] tool \`${topSig}\` repeated ${topCount}x — stopping.` };
-            await this.setState(AgentState.IDLE);
-            yield { type: 'done' };
-            return;
-          }
-        }
-
-        // ── Stuck-loop detection ──
-        for (const r of execResults) {
-          if (!r || r.toolName === 'task_done') continue;
-          const failed = !r.success || (typeof r.result === 'string' && looksLikeFailedToolResult(r.result));
-          recentToolOutcomes.push(!failed);
-          if (recentToolOutcomes.length > 6) recentToolOutcomes.shift();
-        }
-
-        if (!stuckHintInjected && recentToolOutcomes.length >= 5 &&
-            recentToolOutcomes.filter(Boolean).length <= 1) {
-          this.memory.addMessage('system', '[Recovery hint] Your last several tool calls have mostly failed. Synthesize a partial answer from what worked or ask the user for guidance.');
-          stuckHintInjected = true;
-        }
-
-        if (recentToolOutcomes.length >= 8 && recentToolOutcomes.every(x => !x)) {
-          this.memory.addMessage('assistant', 'Every recent tool call failed. Please give me more context.');
-          yield { type: 'content', text: '\n\n[stuck] every recent tool call failed — stopping.\n' };
-          await this.setState(AgentState.IDLE);
-          yield { type: 'done' };
-          return;
-        }
-
-        // ── Search-storm detection ──
-        const searchStormCount = recentToolSigs.filter(s =>
-          s.startsWith('web_search:') || ['fetch_page', 'http_get'].includes(s)
-        ).length;
-        if (searchStormCount >= 8 && !toolLoopHintInjected) {
-          this.memory.addMessage('system', `[Search storm] ${searchStormCount} search calls. STOP searching and synthesize.`);
-          toolLoopHintInjected = true;
-        }
-        if (searchStormCount >= 12) {
-          this.memory.addMessage('assistant', 'Too many search requests. Synthesizing best answer.');
-          yield { type: 'content', text: `\n\n[stuck] excessive web searching (${searchStormCount} calls) — stopping.\n` };
+        // ── Anti-loop guard (narration / tool-signature / stuck / search-storm) ──
+        const decision = guard.observe(roundContent, toolCallsReceived, execResults);
+        for (const hint of decision.hints) this.memory.addMessage('system', hint);
+        if (decision.stop) {
+          this.memory.addMessage('assistant', decision.stop.note);
+          yield { type: 'content', text: decision.stop.contentLine };
           await this.setState(AgentState.IDLE);
           yield { type: 'done' };
           return;
