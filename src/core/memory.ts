@@ -78,6 +78,7 @@ export class Memory {
   private loaded = false;
   private pendingPersists: Set<Promise<void>> = new Set();
   private activeSession: string | null = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   // short_term is mutated from both main chat loop and handlers
   // All mutations go through a short critical section
@@ -233,6 +234,18 @@ export class Memory {
   }
 
   /**
+   * Debounced save to disk. sql.js is in-memory, so without this the database
+   * file is never written and sessions / long-term memory would not survive a
+   * restart. Coalesces bursts of writes; the timer is unref'd so it never keeps
+   * the process alive (close() does the final synchronous save).
+   */
+  private scheduleSave(): void {
+    if (!this.db || this.saveTimer) return;
+    this.saveTimer = setTimeout(() => { this.saveTimer = null; this.persistDb(); }, 300);
+    if (typeof (this.saveTimer as any).unref === 'function') (this.saveTimer as any).unref();
+  }
+
+  /**
    * Execute a SELECT query and return array of row objects.
    */
   private dbAll(sql: string, params?: any[]): any[] {
@@ -279,6 +292,7 @@ export class Memory {
       // Sql.js rejects `undefined` in bind arrays; normalize to `null`
       const safe = params ? params.map((v) => v === undefined ? null : v) : undefined;
       this.db.run(sql, safe);
+      this.scheduleSave(); // every write goes through here — persist (debounced)
     } catch (err) {
       logger.warn('db_run_failed', { sql: sql.slice(0, 80), error: String(err) });
     }
@@ -477,7 +491,9 @@ export class Memory {
    */
   async close(): Promise<void> {
     if (this.db) {
+      if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; }
       await this.flushPending();
+      this.persistDb(); // final synchronous save to disk
       this.db.close();
     }
   }

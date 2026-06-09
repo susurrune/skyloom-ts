@@ -132,6 +132,29 @@ describe("Memory · long-term (SQLite)", () => {
     }
   });
 
+  it("persists sessions + messages to disk and reloads across instances (regression)", async () => {
+    // Previously persistDb() was never called, so nothing survived a restart and
+    // session resume was impossible. close() must save; a fresh instance must reload.
+    const cfg = tmpConfig(); // shared dbPath for both instances
+    const a = new Memory(cfg, "fog");
+    await a.initDb();
+    const sid = await a.createSession("s1");
+    a.addMessage("user", "the sky is blue");
+    a.addMessage("assistant", "noted: sky is blue");
+    await a.remember("fact1", "value1", "auto");
+    await a.close(); // must flush to disk
+
+    const b = new Memory(cfg, "fog");
+    await b.initDb();
+    const sessions = await b.listSessions();
+    expect(sessions.some((s) => s.id === sid)).toBe(true);
+    expect(await b.loadSession(sid)).toBe(true);
+    const msgs = b.getMessages().filter((m) => m.role !== "system");
+    expect(msgs.some((m) => String(m.content).includes("sky is blue"))).toBe(true);
+    expect((await b.recall("fact1"))[0]?.value).toBe("value1"); // long-term memory survived too
+    await b.close();
+  });
+
   it("getMemoryStats returns a populated object", async () => {
     const mem = new Memory(tmpConfig(), "fog");
     await mem.initDb();
