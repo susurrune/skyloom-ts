@@ -19,7 +19,7 @@
 | Tools | `src/tools/` | builtin, computer, delegate | ~700 |
 | Web | `src/web/` | server(水墨气象台), tts | ~720 |
 | Skills | `config/skills/` | 17 个 SKILL.md | — |
-| Tests | `tests/` | 15 套件 · 146 用例（catalog/memory/task/agent_helpers/config） | — |
+| Tests | `tests/` | 16 套件 · 154 用例（catalog/memory/task/agent_helpers/config） | — |
 
 ### 0.2 已经做得好的（保留 & 强化）
 
@@ -108,7 +108,7 @@
 - [x] `agent_helpers.ts` += `parseExtractedFacts`（纯解析器，移出 BaseAgent）。
 - [ ] `core/agent/loop.ts` — LLM 推理循环（`llmLoop` / `chatStreamImpl`，~275 行热路径）
 - [ ] `core/agent/tools.ts` — 工具选择/执行/结果记录
-- [ ] `core/agent/guard.ts` — 防循环启发式（签名窗口、search storm、hardstop）
+- [x] `core/agent/guard.ts` — 防循环启发式抽成 `LoopGuard` 类（持有每轮状态，`observe()` 返回 hints/stop 决策，无副作用）。忠实迁移行为；agent 守卫终止测试仍通过。新增 [`tests/guard.test.ts`](../tests/guard.test.ts) 单测各分支（叙述循环/签名循环/失败堆积/搜索风暴）——这些此前**零覆盖**。期间发现两处**死安全网**（all-failed `>=8` 与 search-storm `>=12` 因缓冲区上限 6/8 永不触发），已记为后续修复项。
 - [ ] `core/agent/delegate.ts` — 跨 Agent 委派与汇总
 - [ ] `core/agent.ts` — 仅保留 `BaseAgent` 编排与公共 API（目标 < 500 行）
 
