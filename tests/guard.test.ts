@@ -47,24 +47,23 @@ describe("LoopGuard", () => {
     expect(hints.some((h) => h.includes("[Recovery hint]"))).toBe(true);
   });
 
-  it("keeps hinting (does NOT hard-stop) on many distinct failing tools — known cap", () => {
-    // The outcomes buffer caps at 6, so the `>=8 all failed` hard-stop is
-    // currently unreachable (a latent dead safety-net in the original, faithfully
-    // preserved by this extraction; tracked as a follow-up). Document the reality.
+  it("hard-stops when the last 8 tool calls all failed", () => {
     const g = new LoopGuard();
     let last: any;
+    // distinct tool names so the signature-loop guard doesn't fire first
     for (let i = 0; i < 8; i++) last = g.observe("", [toolCall("t" + i, { i })], [fail("t" + i)]);
-    expect(last.stop).toBeUndefined();
+    expect(last.stop).toBeDefined();
+    expect(last.stop.contentLine).toContain("every recent tool call failed");
   });
 
-  it("repeated identical search calls trip the signature-loop hard-stop", () => {
-    // The dedicated search-storm hard-stop (>=12) is bounded out by SIG_WINDOW(8),
-    // but repeated identical searches still get caught by the signature-loop guard.
+  it("hard-stops on a search storm (>=12 distinct search calls)", () => {
     const g = new LoopGuard();
     let last: any;
-    for (let i = 0; i < 8; i++) last = g.observe("", [toolCall("web_search", { q: "same" })], [ok("web_search")]);
+    // cycle distinct search tools so the signature-loop guard doesn't fire first
+    const tools = ["web_search", "fetch_page", "http_get"];
+    for (let i = 0; i < 12; i++) last = g.observe("", [toolCall(tools[i % 3], { q: "x" + i })], [ok(tools[i % 3])]);
     expect(last.stop).toBeDefined();
-    expect(last.stop.contentLine).toContain("repeated");
+    expect(last.stop.contentLine).toContain("excessive web searching");
   });
 
   it("ignores task_done in signature counting (never hard-stops on it)", () => {
