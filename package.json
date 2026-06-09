@@ -1,6 +1,6 @@
 {
   "name": "skyloom",
-  "version": "1.13.1",
+  "version": "1.13.2",
   "description": "天空织机 Skyloom — 6 weather-themed AI agents: Fog, Rain, Frost, Snow, Dew, Fair",
   "preferGlobal": true,
   "type": "commonjs",
@@ -33,6 +33,14 @@
   ],
   "author": "Skyloom Team",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/susurrune/skyloom-ts.git"
+  },
+  "homepage": "https://github.com/susurrune/skyloom-ts#readme",
+  "bugs": {
+    "url": "https://github.com/susurrune/skyloom-ts/issues"
+  },
   "dependencies": {
     "axios": "^1.7.7",
     "chalk": "^5.3.0",
