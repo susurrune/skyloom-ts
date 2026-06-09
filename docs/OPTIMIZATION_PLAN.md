@@ -100,7 +100,7 @@
 - [x] **P2.2 Web 流式**：`/api/chat` 改 SSE（`text/event-stream`），前端 `fetch` + `ReadableStream` 真流式替换假打字机，工具调用呈现为"气象事件"系统消息。已 curl + 真实 API 验证。
 - [x] **P2.3 中断**：`AbortSignal` 从 CLI 贯穿 `chatStream → streamWithTools → callOpenAIStream → fetch`。Ctrl-C 中断当前 turn 并**保留已产出内容**（轮间检测 abort → `interrupted` 事件 + 落库部分内容），二次 Ctrl-C 强退。实测 DeepSeek：abort 后 ~26ms 内停流（不再跑满整段生成）。
 
-### Phase 3 — `agent.ts` 分层（可维护性）｜~1.5 天 🔵 进行中（1549 → 1437 行）
+### Phase 3 — `agent.ts` 分层（可维护性）｜~1.5 天 🔵 进行中（1549 → 1396 行）
 
 把巨石拆成职责单一的模块（保持对外 API 不变，re-export 兜底）：
 
