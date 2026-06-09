@@ -153,8 +153,19 @@ async function streamResponse(agent: any, input: string): Promise<void> {
   const header = () => { if (!headerShown) { out.write("\n  " + chalk.bold.hex(theme.hex)(`${theme.symbol} ${theme.kanji}`) + chalk.hex(theme.hex)(` ${theme.name}`) + "\n\n"); headerShown = true; } };
   const endBlock = () => { if (renderer) { renderer.flush(); renderer = null; out.write("\n"); } };
 
+  // ── Ctrl-C interrupts this turn (keeps partial output); a 2nd Ctrl-C exits. ──
+  const controller = new AbortController();
+  let interrupted = false;
+  const onSigint = () => {
+    if (interrupted) { out.write(chalk.dim("\n  再会。\n")); process.exit(130); }
+    interrupted = true;
+    controller.abort();
+  };
+  process.on("SIGINT", onSigint);
+
   try {
-    for await (const ev of agent.chatStream(input)) {
+    for await (const ev of agent.chatStream(input, controller.signal)) {
+      if (ev.type === "interrupted") { interrupted = true; continue; }
       switch (ev.type) {
         case "reasoning":
           stopSpinner();
@@ -185,10 +196,15 @@ async function streamResponse(agent: any, input: string): Promise<void> {
           break;
       }
     }
+  } catch (e: any) {
+    // Abort surfaces here only if the network rejected before a clean stop.
+    if (!interrupted && e?.name !== "AbortError") throw e;
   } finally {
+    process.removeListener("SIGINT", onSigint);
     stopSpinner();
     endBlock();
   }
+  if (interrupted) out.write(chalk.dim("\n  ⊘ 已中断（保留以上内容）\n"));
   out.write("\n");
 }
 

@@ -19,7 +19,7 @@
 | Tools | `src/tools/` | builtin, computer, delegate | ~700 |
 | Web | `src/web/` | server(水墨气象台), tts | ~720 |
 | Skills | `config/skills/` | 17 个 SKILL.md | — |
-| Tests | `tests/` | 15 套件 · 145 用例（catalog/memory/task/agent_helpers/config） | — |
+| Tests | `tests/` | 15 套件 · 146 用例（catalog/memory/task/agent_helpers/config） | — |
 
 ### 0.2 已经做得好的（保留 & 强化）
 
@@ -98,7 +98,7 @@
 - [x] **P2.0 LLM 层真流式**（关键）：`streamWithTools` 原本只是包装阻塞 `complete()` 一次性吐出。新增 `callOpenAIStream` —— 对所有 OpenAI 兼容 provider 做真正的 SSE（`stream:true` + `stream_options.include_usage`），逐 token yield content/reasoning、按 index 累积 tool_calls、末帧取 usage 记成本。Anthropic 与流早期失败回落阻塞路径。**实测 DeepSeek 15–18 个增量**。
 - [x] **P2.1 CLI 流式**：`chat()` 改为消费 `agent.chatStream()`（新 `streamResponse()`），逐字渲染真实 token，`reasoning` 淡墨斜体、正文矿物色、工具调用以天气符号脉冲呈现。删除旧的阻塞 `render()`。
 - [x] **P2.2 Web 流式**：`/api/chat` 改 SSE（`text/event-stream`），前端 `fetch` + `ReadableStream` 真流式替换假打字机，工具调用呈现为"气象事件"系统消息。已 curl + 真实 API 验证。
-- [ ] **P2.3 中断**：Ctrl-C / ESC 中断当前 turn（需在 `llm.streamWithTools` 引入 `AbortSignal`）—— **延后**，依赖较深，单列一个 slice。
+- [x] **P2.3 中断**：`AbortSignal` 从 CLI 贯穿 `chatStream → streamWithTools → callOpenAIStream → fetch`。Ctrl-C 中断当前 turn 并**保留已产出内容**（轮间检测 abort → `interrupted` 事件 + 落库部分内容），二次 Ctrl-C 强退。实测 DeepSeek：abort 后 ~26ms 内停流（不再跑满整段生成）。
 
 ### Phase 3 — `agent.ts` 分层（可维护性）｜~1.5 天 🔵 进行中（1549 → 1437 行）
 
