@@ -46,11 +46,16 @@ export const USER_CONFIG_DIR = resolveUserConfigDir();
  * Find the config directory (bundled or user-provided)
  */
 function findConfigDir(): string {
-  // Try bundled config directory (relative to src or dist)
+  // Locate the bundled `config/` across layouts. Compiled code lives at
+  // <pkg>/dist/core/config.js, so the package's config/ is two levels up
+  // (dist/core -> dist -> <pkg> ... -> <pkg>/config is "../../config").
+  // Globally-installed packages have an arbitrary cwd, so cwd-relative paths
+  // must NOT be the only option (the cause of the empty-catalog bug).
   const possiblePaths = [
-    path.join(__dirname, "..", "..", "..", "config"),
+    path.join(__dirname, "..", "..", "config"),       // <pkg>/dist/core -> <pkg>/config (installed + built)
+    path.join(__dirname, "..", "..", "..", "config"), // legacy nested layout
     path.join(__dirname, "..", "config"),
-    path.join(process.cwd(), "config"),
+    path.join(process.cwd(), "config"),               // running from a checkout
   ];
 
   for (const configPath of possiblePaths) {
