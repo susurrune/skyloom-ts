@@ -101,6 +101,16 @@ async function loomStream(ui: LoomUI, agent: any, input: string): Promise<void> 
                 " " + chalk.dim(String(ev.tool_name)),
             );
           }
+          // live task checklist: re-render in place whenever the agent updates it
+          if (ev.tool_name === "todo_write" && ev.success) {
+            try {
+              const items = agent.memory.getWorking("todos") || [];
+              if (items.length) {
+                const { renderTodoList } = require("../tools/todo");
+                ui.text(renderTodoList(items), undefined, " ☰ ", "todo-live");
+              }
+            } catch { /* checklist rendering is best-effort */ }
+          }
           break;
         case "truncated":
           ui.endStream();
@@ -363,6 +373,21 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
           }
           ui.blank();
         } catch (e: any) { dim(`无法获取: ${e?.message || e}`); }
+        continue;
+      }
+      if (cmdL === "/tools") {
+        const stats = (agent as any).toolRegistry?.getStats?.() || [];
+        if (!stats.length) { dim("本会话当前灵还没有工具调用"); continue; }
+        const t = agentTheme(agent.name);
+        ui.blank();
+        say(" " + chalk.bold.hex(t.hex)(`${t.symbol} 工具调用`) + chalk.dim(` · ${agent.name}`));
+        for (const s of stats.slice(0, 12)) {
+          const fail = s.failures ? chalk.hex(ERR_HEX)(` ✗${s.failures}`) : "";
+          const cache = s.cacheHits ? chalk.dim(` ⊙${s.cacheHits}`) : "";
+          const breaker = s.breaker !== "closed" ? chalk.yellow(` [熔断:${s.breaker}]`) : "";
+          ui.line(` ${chalk.dim("·")} ${s.name.padEnd(16)} ${chalk.dim(`${s.calls} 次 · ${s.avgMs}ms`)}${fail}${cache}${breaker}`);
+        }
+        ui.blank();
         continue;
       }
       if (cmdL === "/verify") {

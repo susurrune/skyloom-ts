@@ -197,6 +197,14 @@ export function createSystemContext(): SystemContext {
         log.warn('model_tools_not_available', { agent: name, error: String(e) });
       }
 
+      // Register the task-checklist tool (todo_write)
+      try {
+        const { createTodoTool } = require('../tools/todo');
+        agentRegistry.register(createTodoTool(agent));
+      } catch (e) {
+        log.warn('todo_tool_not_available', { agent: name, error: String(e) });
+      }
+
       agents.set(name, agent);
     } catch (e) {
       log.warn('agent_creation_failed', { agent: name, error: String(e) });

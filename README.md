@@ -137,6 +137,9 @@ sky init             # 初始化
 | **文件检查点** | `/rewind [n]` | 每轮自动快照被改文件，一键回退 n 轮（不依赖 git；`run_bash` 副作用除外） |
 | **自定义命令** | `.sky/commands/*.md`（项目）/ `~/.skyloom/commands/`（用户） | frontmatter 可指定 `description`/`agent`，正文支持 `$ARGUMENTS` `$1…$9`，子目录命名空间 `git/commit.md` → `/git:commit`，改完即生效 |
 | **模型配置** | `/model [id\|unified <id>\|reset\|key <key>]` | 统一默认 + 每灵独立覆盖（模型与 API key 均可），即改即生效并持久化；agent 也能用 `set_my_model` 工具**自己换自己的模型**（「换成 deepseek-chat」直接说就行） |
+| **任务清单** | agent 自动调 `todo_write` | 3 步以上任务 agent 先列清单、逐项更新状态（✓ ◐ ·），存工作记忆不怕压缩，立轴/CLI 实时原位渲染 |
+| **工具可观测** | `/tools` | 每工具调用次数/失败/缓存命中/平均耗时/熔断状态 |
+| **上下文保护** | 自动 | 超大工具结果头尾保留中间截断（默认 12k 字符，`llm.tool_result_limit` 可调）并提示精确重取；`read_file` 支持 `offset/limit` 分页 |
 
 ```yaml
 # ~/.skyloom/config.yaml 示例

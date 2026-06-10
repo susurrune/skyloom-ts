@@ -163,6 +163,33 @@ function coerceValue(value: unknown, targetType: string): [boolean, unknown] {
 export class ToolRegistry extends EventEmitter {
   private tools: Map<string, ToolDefinition> = new Map();
   private breakers: Map<string, CircuitBreaker> = new Map();
+  /** Per-tool runtime stats for the /tools observability command. */
+  private stats: Map<string, { calls: number; failures: number; totalMs: number; cacheHits: number }> = new Map();
+
+  private bumpStats(name: string, opts: { ms?: number; failed?: boolean; cacheHit?: boolean }): void {
+    const s = this.stats.get(name) || { calls: 0, failures: 0, totalMs: 0, cacheHits: 0 };
+    if (opts.cacheHit) s.cacheHits += 1;
+    else {
+      s.calls += 1;
+      if (opts.failed) s.failures += 1;
+      s.totalMs += opts.ms ?? 0;
+    }
+    this.stats.set(name, s);
+  }
+
+  /** Runtime stats per tool (only tools that were actually called), busiest first. */
+  getStats(): Array<{ name: string; calls: number; failures: number; avgMs: number; cacheHits: number; breaker: string }> {
+    return [...this.stats.entries()]
+      .map(([name, s]) => ({
+        name,
+        calls: s.calls,
+        failures: s.failures,
+        avgMs: s.calls > 0 ? Math.round(s.totalMs / s.calls) : 0,
+        cacheHits: s.cacheHits,
+        breaker: this.breakers.get(name)?.getState() ?? 'closed',
+      }))
+      .sort((a, b) => b.calls - a.calls);
+  }
 
   /**
    * Register a tool
@@ -278,6 +305,7 @@ export class ToolRegistry extends EventEmitter {
       const cached = resultStore.get(toolName, cacheKey);
       if (cached) {
         log.debug("Tool cache hit", { tool: toolName });
+        this.bumpStats(toolName, { cacheHit: true });
         return {
           success: true,
           result: cached,
@@ -339,6 +367,7 @@ export class ToolRegistry extends EventEmitter {
           retries: attempt,
         });
 
+        this.bumpStats(toolName, { ms: duration });
         return {
           success: true,
           result,
@@ -360,6 +389,7 @@ export class ToolRegistry extends EventEmitter {
     }
 
     breaker?.recordFailure();
+    this.bumpStats(toolName, { failed: true });
 
     log.error("Tool execution failed after retries", {
       tool: toolName,
