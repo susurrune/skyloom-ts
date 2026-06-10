@@ -54,6 +54,33 @@ export class Skill {
   bodyTruncated: boolean = false;
   metadata: Record<string, any> = {};
 
+  private _fullBodyCache: { mtimeMs: number; body: string } | null = null;
+
+  /**
+   * Progressive disclosure, Claude Code semantics: the registry keeps only
+   * the lightweight metadata (name/description + a lite body head); when the
+   * skill ACTIVATES, the full SKILL.md body is read from disk and injected
+   * into the system prompt. Cached by mtime, so live edits apply on the
+   * next activation/rebuild.
+   */
+  fullBody(maxChars: number = 16000): string {
+    if (!this.bodyTruncated || !this.sourcePath) return this.systemPrompt;
+    try {
+      const stat = fs.statSync(this.sourcePath);
+      if (this._fullBodyCache && this._fullBodyCache.mtimeMs === stat.mtimeMs) {
+        return this._fullBodyCache.body;
+      }
+      const text = fs.readFileSync(this.sourcePath, 'utf-8');
+      const parsed = parseFrontmatter(text);
+      let body = (parsed ? parsed.body : text).trim();
+      if (body.length > maxChars) body = body.slice(0, maxChars) + '\n…[正文超长已截断 — 其余部分见 ' + this.sourcePath + ']';
+      this._fullBodyCache = { mtimeMs: stat.mtimeMs, body };
+      return body;
+    } catch {
+      return this.systemPrompt; // fall back to the lite head
+    }
+  }
+
   constructor(config: Partial<SkillConfig>) {
     this.name = config.name || '';
     this.description = config.description || '';

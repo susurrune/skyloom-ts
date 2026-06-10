@@ -108,3 +108,56 @@ describe("Claude Code .mcp.json 兼容", () => {
     expect(loadProjectMcpJson(tmp)).toEqual([]); // 无 command/url 的条目跳过
   });
 });
+
+describe("渐进式披露（Claude Code 语义）", () => {
+  it("registry keeps a lite head; activation-time fullBody() loads the whole SKILL.md", () => {
+    const body = "# 完整指南\n" + "重要步骤说明。".repeat(600); // > 2000 chars
+    writeSkill(tmp, "big-skill", "name: big-skill\ndescription: 大技能", body);
+    const reg = new SkillRegistry();
+    reg.loadSkillFolders(tmp);
+    const skill = reg.get("big-skill")!;
+    expect(skill.bodyTruncated).toBe(true);
+    expect(skill.systemPrompt.length).toBeLessThan(2000); // 常驻索引是轻量的
+    const full = skill.fullBody();
+    expect(full.length).toBeGreaterThan(4000); // 激活时拿到全文
+    expect(full).toContain("# 完整指南");
+    expect(full).not.toContain("---"); // frontmatter 已剥离
+  });
+
+  it("fullBody picks up live edits via mtime cache invalidation", () => {
+    const body = "v1 ".repeat(1000);
+    writeSkill(tmp, "live", "name: live\ndescription: d", body);
+    const reg = new SkillRegistry();
+    reg.loadSkillFolders(tmp);
+    const skill = reg.get("live")!;
+    expect(skill.fullBody()).toContain("v1");
+    const f = path.join(tmp, "live", "SKILL.md");
+    fs.writeFileSync(f, `---\nname: live\ndescription: d\n---\n${"v2 ".repeat(1000)}`);
+    fs.utimesSync(f, new Date(), new Date(Date.now() + 5000)); // 确保 mtime 变化
+    expect(skill.fullBody()).toContain("v2");
+  });
+});
+
+describe("MCP 管理与命名对齐", () => {
+  it("saveProjectMcpServer writes Claude Code schema, round-trips via loadProjectMcpJson", async () => {
+    const { saveProjectMcpServer, removeProjectMcpServer } = await import("../src/core/mcp");
+    saveProjectMcpServer({ name: "db", command: "npx", args: ["-y", "@x/dbhub"], env: { URL: "${DB_URL}" } }, tmp);
+    saveProjectMcpServer({ name: "gh", url: "https://api.example.com/mcp/" }, tmp);
+    const raw = JSON.parse(fs.readFileSync(path.join(tmp, ".mcp.json"), "utf-8"));
+    expect(raw.mcpServers.db.command).toBe("npx");
+    expect(raw.mcpServers.db.env.URL).toBe("${DB_URL}"); // 原样落盘，运行时才展开
+    expect(raw.mcpServers.gh.type).toBe("http");
+    process.env.DB_URL = "postgres://live";
+    const loaded = loadProjectMcpJson(tmp);
+    expect(loaded.find(s => s.name === "db")!.env!.URL).toBe("postgres://live");
+    delete process.env.DB_URL;
+    expect(removeProjectMcpServer("db", tmp)).toBe(true);
+    expect(loadProjectMcpJson(tmp).map(s => s.name)).toEqual(["gh"]);
+  });
+
+  it("MCP tool names use the Claude Code mcp__server__tool convention", () => {
+    const src = fs.readFileSync(path.join(__dirname, "..", "src", "core", "mcp.ts"), "utf-8");
+    expect(src).toContain("mcp__${serverName}__${name}");
+    expect(src).not.toContain("mcp_${serverName}_${name}");
+  });
+});

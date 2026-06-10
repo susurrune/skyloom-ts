@@ -458,14 +458,15 @@ export class BaseAgent {
         const s = byName.get(name);
         if (!s) continue;
         const parts: string[] = [];
-        if (s.systemPrompt) parts.push(s.systemPrompt);
-        if (s.bodyTruncated && s.sourcePath) {
-          parts.push(lang === 'en'
-            ? `[Lazy-loaded skill: full guide at \`${s.sourcePath}\`]`
-            : `[此技能为懒加载：完整指南位于 \`${s.sourcePath}\`]`);
-        }
+        // Claude Code progressive disclosure: active skills get their FULL
+        // SKILL.md body (read on demand, mtime-cached) — only the metadata
+        // index lives in context before activation.
+        const body = typeof (s as any).fullBody === 'function' ? (s as any).fullBody() : s.systemPrompt;
+        if (body) parts.push(body);
         if (s.resourceDir) {
-          parts.push(lang === 'en' ? `Resource directory: ${s.resourceDir}` : `资源目录: ${s.resourceDir}`);
+          parts.push(lang === 'en'
+            ? `Skill resources: \`${s.resourceDir}\` (read reference files / run scripts from here)`
+            : `技能资源目录: \`${s.resourceDir}\`（参考文件与脚本从此读取/执行）`);
         }
         skillPrompts.push(parts.join('\n\n'));
       }
