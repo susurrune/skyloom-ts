@@ -196,3 +196,53 @@ describe("LoomUI frame composition", () => {
     for (const row of ui.paint()) expect(visualWidth(row)).toBe(72);
   });
 });
+
+describe("palette ↑↓ navigation + Enter execution", () => {
+  function key(ui: any, name: string, opts: Record<string, any> = {}) {
+    ui.onKey(opts.str ?? "", { name, ...opts });
+  }
+  function type(ui: any, text: string) {
+    for (const ch of text) ui.onKey(ch, { name: ch });
+  }
+
+  it("Enter runs the ↑↓-highlighted command", async () => {
+    const ui = makeUI() as any;
+    const p = ui.readInput();
+    type(ui, "/");
+    key(ui, "down"); // /fog → /rain
+    key(ui, "down"); // /rain → /frost
+    key(ui, "return");
+    expect(await p).toBe("/frost");
+  });
+
+  it("selection can scroll past the visible window", () => {
+    const ui = makeUI() as any;
+    type(ui, "/");
+    const total = ui.paletteMatches().length;
+    for (let i = 0; i < total + 5; i++) key(ui, "down");
+    expect(ui.paletteIdx).toBe(total - 1); // clamped to last, beyond first 8
+    expect(total).toBeGreaterThan(8);
+    for (const row of ui.paint()) expect(visualWidth(row)).toBe(80);
+  });
+
+  it("argument-taking commands fill the input instead of submitting", () => {
+    const ui = makeUI() as any;
+    let resolved: string | null = null;
+    ui.readInput().then((s: string) => { resolved = s; });
+    type(ui, "/task");
+    key(ui, "return");
+    expect(ui.inputGlyphs.join("")).toBe("/task ");
+    expect(resolved).toBeNull(); // not submitted — waiting for arguments
+  });
+
+  it("typing resets the selection; Esc closes the palette", () => {
+    const ui = makeUI() as any;
+    type(ui, "/");
+    key(ui, "down");
+    expect(ui.paletteIdx).toBe(1);
+    type(ui, "c"); // filter change
+    expect(ui.paletteIdx).toBe(0);
+    key(ui, "escape");
+    expect(ui.inputGlyphs.length).toBe(0);
+  });
+});

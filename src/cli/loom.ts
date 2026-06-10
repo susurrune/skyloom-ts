@@ -572,7 +572,27 @@ export class LoomUI {
 
     if (name === "return") {
       if (this.busy) return; // a reply is being woven; ignore submit
-      const text = this.inputGlyphs.join("").trim();
+      let text = this.inputGlyphs.join("").trim();
+
+      // Palette open: Enter runs the ↑↓-highlighted command (Claude Code
+      // style). Commands that take arguments fill the input instead so the
+      // user can type them.
+      const matches = this.paletteMatches();
+      if (matches.length > 0 && text.startsWith("/")) {
+        const [cmd] = matches[Math.max(0, Math.min(this.paletteIdx, matches.length - 1))];
+        if (cmd.endsWith(" ")) {
+          // argument-taking command: fill the input and wait for arguments
+          // (the palette closes once the line contains a space; a second
+          // Enter then submits as typed)
+          this.inputGlyphs = [...cmd];
+          this.cursor = this.inputGlyphs.length;
+          this.paletteIdx = 0;
+          this.paint();
+          return;
+        }
+        text = cmd.trimEnd();
+      }
+
       this.inputGlyphs = []; this.cursor = 0; this.histIdx = -1; this.paletteIdx = 0;
       if (text) { this.history.unshift(text); if (this.history.length > 200) this.history.pop(); }
       const r = this.pendingResolve;
@@ -611,9 +631,15 @@ export class LoomUI {
       }
       this.paint(); return;
     }
-    if (name === "escape") { this.paletteIdx = 0; this.scrollOff = 0; this.paint(); return; }
+    if (name === "escape") {
+      // Esc closes the palette by clearing the slash input; otherwise it
+      // just resets selection / jumps back to the tail.
+      if (paletteOpen) { this.inputGlyphs = []; this.cursor = 0; }
+      this.paletteIdx = 0; this.scrollOff = 0; this.paint(); return;
+    }
     if (name === "backspace") {
       if (this.cursor > 0) { this.inputGlyphs.splice(this.cursor - 1, 1); this.cursor--; }
+      this.paletteIdx = 0; // filter changed — selection restarts at the top
       this.paint(); return;
     }
     if (name === "delete") { if (this.cursor < this.inputGlyphs.length) this.inputGlyphs.splice(this.cursor, 1); this.paint(); return; }
@@ -637,6 +663,7 @@ export class LoomUI {
         this.inputGlyphs.splice(this.cursor, 0, ...glyphs);
         this.cursor += glyphs.length;
         this.histIdx = -1;
+        this.paletteIdx = 0; // filter changed — selection restarts at the top
         this.paint();
       }
     }
@@ -878,9 +905,12 @@ export class LoomUI {
 
     // ── bottom border with hints ──
     {
+      const paletteUp = this.paletteMatches().length > 0 && this.inputGlyphs[0] === "/";
       const hint = this.busy
         ? " Ctrl-C 中断本轮 "
-        : " /help 命令 · Tab 补全 · PgUp 回看 · Ctrl-C 退出 ";
+        : paletteUp
+          ? " ↑↓ 选命令 · Enter 执行 · Tab 补全 · Esc 收起 "
+          : " / 命令 · PgUp 回看 · Shift+Tab 切模式 · Ctrl-C 退出 ";
       // └─ hint ───…┘  →  2 + w(hint) + fill + 1 = cols
       const fill = innerW - visualWidth(hint) - 1;
       frame.push(B("└─") + chalk.dim(hint) + B("─".repeat(Math.max(0, fill)) + "┘"));
@@ -889,15 +919,19 @@ export class LoomUI {
     // ── slash palette: overlay onto the rows just above the divider ──
     const matches = this.paletteMatches();
     if (matches.length > 0 && this.inputGlyphs[0] === "/" && !this.modal) {
-      const show = matches.slice(0, Math.min(8, bodyH - 1));
-      this.paletteIdx = Math.min(this.paletteIdx, show.length - 1);
+      const maxShow = Math.min(8, bodyH - 1);
+      this.paletteIdx = Math.max(0, Math.min(this.paletteIdx, matches.length - 1));
+      // scroll window that keeps the ↑↓ selection visible
+      const start = Math.max(0, Math.min(this.paletteIdx - maxShow + 1, matches.length - maxShow));
+      const show = matches.slice(start, start + maxShow);
       const baseRow = 1 + SKY_H + bodyH - show.length; // first overlay row index in frame
       show.forEach(([cmd, desc], i) => {
-        const sel = i === this.paletteIdx;
+        const sel = start + i === this.paletteIdx;
         const agentCmd = ["/fog", "/rain", "/frost", "/snow", "/dew", "/fair"].includes(cmd.trim());
         const color = agentCmd ? chalk.hex(agentTheme(cmd.trim().slice(1)).hex) : chalk.hex(PALETTE.inkLight);
         const mark = sel ? chalk.hex(t.hex)(" ▸ ") : "   ";
-        const lineStr = mark + (sel ? chalk.bold(color(cmd.padEnd(11))) : color(cmd.padEnd(11))) + chalk.dim(cutVisual(desc, this.viewW() - 18));
+        const counter = sel && matches.length > maxShow ? chalk.dim(` ${this.paletteIdx + 1}/${matches.length}`) : "";
+        const lineStr = mark + (sel ? chalk.bold(color(cmd.padEnd(11))) : color(cmd.padEnd(11))) + chalk.dim(cutVisual(desc, this.viewW() - 22)) + counter;
         const row = baseRow + i;
         frame[row] = B("│") + padAnsi(this.railLines(bodyH)[row - 1 - SKY_H] ?? "", RAIL_W) + B("│") + " " + padAnsi(lineStr, this.viewW()) + B("│");
       });
