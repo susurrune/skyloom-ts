@@ -107,25 +107,24 @@ export class LoopGuard {
       if (!r || r.toolName === 'task_done') continue;
       const failed = !r.success || (typeof r.result === 'string' && looksLikeFailedToolResult(r.result));
       this.recentToolOutcomes.push(!failed);
-      // Keep 8 so the "all recent calls failed" (>=8) hard-stop below is reachable.
-      if (this.recentToolOutcomes.length > 8) this.recentToolOutcomes.shift();
+      if (this.recentToolOutcomes.length > 20) this.recentToolOutcomes.shift();
     }
-    if (!this.stuckHintInjected && this.recentToolOutcomes.length >= 5 &&
+    if (!this.stuckHintInjected && this.recentToolOutcomes.length >= 8 &&
         this.recentToolOutcomes.filter(Boolean).length <= 1) {
       hints.push('[Recovery hint] Your last several tool calls have mostly failed. Synthesize a partial answer from what worked or ask the user for guidance.');
       this.stuckHintInjected = true;
     }
-    if (this.recentToolOutcomes.length >= 8 && this.recentToolOutcomes.every(x => !x)) {
+    if (this.recentToolOutcomes.length >= 15 && this.recentToolOutcomes.every(x => !x)) {
       return { hints, stop: { note: 'Every recent tool call failed. Please give me more context.', contentLine: '\n\n[stuck] every recent tool call failed — stopping.\n' } };
     }
 
     // 4. Search-storm: cumulative search/fetch calls this turn (not bounded by
     // SIG_WINDOW, so the >=12 hard-stop is actually reachable).
-    if (this.searchCount >= 8 && !this.toolLoopHintInjected) {
+    if (this.searchCount >= 15 && !this.toolLoopHintInjected) {
       hints.push(`[Search storm] ${this.searchCount} search calls. STOP searching and synthesize.`);
       this.toolLoopHintInjected = true;
     }
-    if (this.searchCount >= 12) {
+    if (this.searchCount >= 30) {
       return { hints, stop: { note: 'Too many search requests. Synthesizing best answer.', contentLine: `\n\n[stuck] excessive web searching (${this.searchCount} calls) — stopping.\n` } };
     }
 

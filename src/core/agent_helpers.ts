@@ -72,9 +72,10 @@ const RE_TRAILING_COMMA = /,\s*([}\]])/g;
 const RE_UNQUOTED_STRING = /(:\s*)([a-zA-Z_.][a-zA-Z0-9_ ./\\@.\-+#~$]*?)(\s*[,}\]])/g;
 
 // ── Tool-signature loop detector tuning ──
-export const SIG_WINDOW = 8;
-export const SIG_LOOP_HINT = 4;
-export const SIG_LOOP_HARDSTOP = 6;
+// Raised from 8/4/6 — editing workflows need more room
+export const SIG_WINDOW = 16;
+export const SIG_LOOP_HINT = 10;
+export const SIG_LOOP_HARDSTOP = 24;
 
 // ── Tool-failure markers ──
 const TOOL_FAILURE_MARKERS = [
