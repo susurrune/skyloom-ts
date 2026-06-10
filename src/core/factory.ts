@@ -76,6 +76,13 @@ export class SystemContext {
 export function createSystemContext(): SystemContext {
   const config = loadConfig();
 
+  // session_start hooks — user-configured shell commands (see core/hooks)
+  try {
+    const { loadHooks, runSessionStartHooks } = require('./hooks');
+    const hooks = loadHooks(config);
+    if (hooks.sessionStart.length > 0) runSessionStartHooks(hooks);
+  } catch { /* hooks must never block startup */ }
+
   let workspacePath = '';
   try {
     const { resolveWorkspacePath, initWorkspace } = require('./workspace');

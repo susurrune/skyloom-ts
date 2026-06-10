@@ -123,6 +123,32 @@ sky init             # 初始化
 | ∘ **露** Dew | 赭石 `#8b6914` | 可靠守护 | sys_operator, ci_cd_manager |
 | ☼ **晴** Fair | 朱砂 `#b3342d` | 情感陪伴 | emotional_companion, self_evolve |
 
+## 工作流（Claude Code 级）
+
+| 功能 | 用法 | 说明 |
+|------|------|------|
+| **项目记忆 SKY.md** | `/init` 生成 · `#内容` 快速追加 | 三层加载：`~/.skyloom/SKY.md`（用户级）→ `./SKY.md`（项目级，兼容 `CLAUDE.md`/`AGENTS.md`）→ `./SKY.local.md`，自动注入所有 agent 的系统提示 |
+| **计划模式** | `Shift+Tab` 或 `/plan` | 只读工具集 + 先出编号方案，批准后切回执行；`/auto` 免审批模式 |
+| **验证闭环** | config `verify.commands` 或 SKY.md `## Verify` 代码块 | 任务写文件后自动跑测试/lint，失败回灌自动修复（默认 2 轮）；`/verify` 手动触发 |
+| **Headless** | `sky -p "问题" [--agent fog] [--json\|--stream-json]` | 管道/CI/外部编排接入；`cat err.log \| sky -p "归类错误"` |
+| **输入宏** | `@文件` `!命令` `#记忆` | 文件注入上下文 / shell 输出入上下文（不耗 LLM）/ 一句话存进 SKY.md |
+| **Hooks** | config `hooks.pre_tool/post_tool/session_start` | 强制执行的 shell 钩子，`pre_tool` 非零退出可拦截工具调用 |
+| **上下文明细** | `/context` | 按角色分解 token 占用 + 系统提示/工具/技能开销 |
+
+```yaml
+# ~/.skyloom/config.yaml 示例
+verify:
+  commands: ["npm run -s type-check", "npm test -s"]
+  max_fix_rounds: 2
+hooks:
+  post_tool:
+    - matcher: "write_file|edit_file"
+      command: "npx prettier --write \"$SKY_FILE\""
+  pre_tool:
+    - matcher: "run_bash"
+      command: "./scripts/guard.sh"   # 非零退出 = 拦截
+```
+
 ## 核心能力
 
 | 模块 | 说明 |

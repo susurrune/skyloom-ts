@@ -11,6 +11,10 @@
 import chalk from "chalk";
 import { agentTheme, PALETTE } from "../core/theme";
 import { orchestrateTask } from "../core/factory";
+import { appendQuickMemory, INIT_PROMPT } from "../core/skymd";
+import { resolveVerifyConfig, runVerify } from "../core/verify";
+import { InteractiveMode, ModeController } from "./mode";
+import { expandFileRefs, isBangCommand, bangCommand, runBang, isHashMemory, hashNote } from "./input_macros";
 import { LoomUI, OrchTask, circled, cutVisual } from "./loom";
 
 const OK_HEX = "#3a7a6e"; // 石绿 — success
@@ -232,7 +236,7 @@ function welcome(ui: LoomUI, version: string) {
   ui.blank();
   ui.line(" " + chalk.hex(t.hex).italic(t.poem));
   ui.blank();
-  ui.line(chalk.dim(" 输入 / 看命令 · /task <目标> 多灵织造 · 左栏为六灵动态"));
+  ui.line(chalk.dim(" / 命令 · /task 多灵织造 · Shift+Tab 切模式 · @文件 !命令 #记忆"));
   ui.blank();
 }
 
@@ -264,10 +268,29 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
     } catch { return ""; }
   };
 
+  // ── Interactive modes (Shift+Tab cycles default → plan → auto) ──
+  const mode = new ModeController();
+  const applyMode = () => {
+    const m = mode.current;
+    agent.planMode = m === InteractiveMode.PLAN;
+    ui.modeBadge =
+      m === InteractiveMode.PLAN ? chalk.hex("#8a8a82").bold("◇ 计划 · 只读出方案") :
+      m === InteractiveMode.AUTO ? chalk.hex("#b3342d").bold("⚡ 自动 · 免审批") : "";
+    if (m !== InteractiveMode.DEFAULT) {
+      ui.flash(m === InteractiveMode.PLAN ? "计划模式：只读调研 → 出方案 → 批准后切回执行" : "自动模式：危险工具免审批，注意风险");
+    }
+  };
+  ui.onModeCycle = () => { mode.cycle(); applyMode(); };
+
   // Tool approval becomes a loom-native modal instead of a raw readline prompt.
+  // AUTO mode approves automatically (with a visible trace line).
   try {
     const { getSecurity } = require("../core/security");
     getSecurity().setApprovalCallback(async (tool: string, args: Record<string, any>, level: number) => {
+      if (mode.current === InteractiveMode.AUTO) {
+        ui.line(chalk.dim(` ⚡ 自动批准 ${tool} (危险等级 ${level})`));
+        return true;
+      }
       const summary = `${tool} (危险等级 ${level}) ${JSON.stringify(args).slice(0, 48)}`;
       return ui.confirm(summary);
     });
@@ -294,7 +317,9 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
           const a = ctx.agentMap.get(n);
           if (a) {
             await a.init();
+            agent.planMode = false;
             agent = a;
+            applyMode(); // plan mode follows the session, not the agent instance
             ui.agentName = n;
             const t = agentTheme(n);
             ui.blank();
@@ -309,7 +334,48 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       if (switched) continue;
 
       if (cmdL === "/clear") { ui.clearViewport(); continue; }
-      if (cmdL === "/" || cmdL === "/help") { dim("输入 / 后键入字母筛选命令，Tab 补全，↑↓ 选择。"); continue; }
+      if (cmdL === "/" || cmdL === "/help") { dim("输入 / 后键入字母筛选命令，Tab 补全，↑↓ 选择，Shift+Tab 切模式。"); continue; }
+      if (cmdL === "/plan" || cmdL === "/auto" || cmdL === "/default") {
+        mode.set(cmdL === "/plan" ? InteractiveMode.PLAN : cmdL === "/auto" ? InteractiveMode.AUTO : InteractiveMode.DEFAULT);
+        applyMode();
+        dim(`模式 → ${mode.current}${mode.current === "default" ? "" : " · Shift+Tab 或 /default 切回"}`);
+        continue;
+      }
+      if (cmdL === "/context") {
+        try {
+          const d = agent.contextDetail();
+          ui.blank();
+          say(" " + chalk.bold(`上下文 ${d.estimatedTokens}/${d.maxTokens} tokens (${d.pct}%)`) + chalk.dim(` · ${d.model}`));
+          dim(`系统提示 ≈${d.systemPromptTokens} tokens · 工具 ${d.toolCount} 个 · 技能 ${d.activeSkills.length ? d.activeSkills.join(",") : "无"}`);
+          for (const [role, v] of Object.entries(d.byRole as Record<string, { tokens: number; count: number }>)) {
+            const bar = "▰".repeat(Math.max(1, Math.min(20, Math.round((v.tokens / Math.max(1, d.estimatedTokens)) * 20))));
+            dim(`${role.padEnd(9)} ${String(v.tokens).padStart(6)} tk · ${v.count} 条 ${bar}`);
+          }
+          ui.blank();
+        } catch (e: any) { dim(`无法获取: ${e?.message || e}`); }
+        continue;
+      }
+      if (cmdL === "/verify") {
+        const vc = resolveVerifyConfig((ctx as any).config);
+        if (!vc.commands.length) { dim("未配置验证命令 — 在 config.yaml 的 verify.commands 或 SKY.md 的 ## Verify 小节声明"); continue; }
+        ui.busy = true; ui.busyLabel = "验证";
+        ui.blank();
+        say(" " + chalk.bold("⚙ verify") + chalk.dim(` · ${vc.commands.length} 条命令`));
+        const vr = runVerify(vc);
+        ui.busy = false; ui.busyLabel = "";
+        for (const ln of vr.report.split("\n").slice(0, 30)) ui.line(" " + (ln.startsWith("✓") ? chalk.hex(OK_HEX)(ln) : ln.startsWith("✗") ? chalk.hex(ERR_HEX)(ln) : chalk.dim(cutVisual(ln, 200))));
+        if (!vr.ok) dim(`验证失败 — 直接说「修复 verify 失败」让 ${agent.name} 处理`);
+        ui.blank();
+        continue;
+      }
+      if (cmdL === "/init") {
+        dim("开始扫描项目，生成 SKY.md 项目记忆 …");
+        ui.blank();
+        ui.text(INIT_PROMPT.split("\n")[0], (s) => chalk.hex(PALETTE.inkLight)(s), chalk.hex(PALETTE.inkLight)("❯ "));
+        await loomStream(ui, agent, INIT_PROMPT);
+        agent.reloadProjectMemory();
+        continue;
+      }
       if (cmdL === "/version") { dim(`Skyloom v${deps.version}`); continue; }
       if (cmdL === "/status") { dim(`${agent.displayName} (${agent.name}) · ${agent.state} · 记忆 ${agent.memory.shortTerm.length} 条`); continue; }
       if (cmdL === "/cost") { dim(`总费用 ${fmtCost(ctx.llm.getTotalCost())}`); continue; }
@@ -382,10 +448,33 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       }
       if (inp.startsWith("/")) { dim(`未知命令 ${inp.split(" ")[0]} · 输入 / 看全部命令`); continue; }
 
+      // ── input macros: # quick memory · ! shell · @file attach ──
+      if (isHashMemory(inp)) {
+        try {
+          const file = appendQuickMemory(hashNote(inp));
+          agent.reloadProjectMemory();
+          say(" " + chalk.hex(OK_HEX)("✦ 已记入 ") + chalk.dim(file));
+        } catch (e: any) { dim(`记忆写入失败: ${e?.message || e}`); }
+        continue;
+      }
+      if (isBangCommand(inp)) {
+        const cmd = bangCommand(inp);
+        ui.blank();
+        say(" " + chalk.hex(PALETTE.inkLight)(`$ ${cmd}`));
+        const r = runBang(cmd);
+        ui.text(r.output, (s) => (r.ok ? chalk.dim(s) : chalk.hex(ERR_HEX)(s)), "  ");
+        // The output joins the conversation context without an LLM turn.
+        agent.memory.addMessage("system", `[用户执行 shell] $ ${cmd}\n${r.output.slice(0, 4000)}`);
+        ui.blank();
+        continue;
+      }
+      const expanded = expandFileRefs(inp);
+      if (expanded.attached.length) dim(`已附加 ${expanded.attached.map((f) => "@" + f).join(" ")}`);
+
       // ── a normal chat turn ──
       ui.blank();
       ui.text(inp, (s) => chalk.hex(PALETTE.inkLight)(s), chalk.hex(PALETTE.inkLight)("❯ "));
-      await loomStream(ui, agent, inp);
+      await loomStream(ui, agent, expanded.text);
     }
   } finally {
     ui.destroy();

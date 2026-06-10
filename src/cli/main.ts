@@ -361,7 +361,7 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
   process.stdout.write(chalk.dim("  · 输入 / 看命令（Tab 补全）· ↑↓ 翻历史 · Ctrl-C 退出\n\n"));
 
   while (true) {
-    const inp = await readLine(currentAgent.name);
+    let inp = await readLine(currentAgent.name);
     if (!inp) continue;
 
     // Bare "/" → show the inline command palette
@@ -434,10 +434,69 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
     if (cmdL === "/mcp") { process.stdout.write(chalk.dim("  " + (ctx.mcpStatus?.join(", ") || "none") + "\n")); continue; }
     if (cmdL.startsWith("/apikey set ")) { const p = inp.split(/\s+/); if (p.length >= 4) { saveApiKey(p[2], p[3]); process.stdout.write(chalk.green("  ✓ Saved " + p[2] + " API key\n")); } else { process.stdout.write(chalk.yellow("  Usage: /apikey set <provider> <key>\n")); } continue; }
     if (cmdL === "/apikey") { process.stdout.write(chalk.bold("\n  API Keys:\n")); for (const p of ["openai","deepseek","anthropic","groq","openrouter"]) { process.stdout.write(chalk.dim("  " + p.padEnd(14) + (!!process.env[p.toUpperCase() + "_API_KEY"] ? chalk.green("env") : chalk.dim("—")) + "\n")); } process.stdout.write("\n"); continue; }
+    if (cmdL === "/plan" || cmdL === "/auto" || cmdL === "/default") {
+      MODE.set(cmdL === "/plan" ? InteractiveMode.PLAN : cmdL === "/auto" ? InteractiveMode.AUTO : InteractiveMode.DEFAULT);
+      currentAgent.planMode = MODE.current === InteractiveMode.PLAN;
+      process.stdout.write(chalk.dim(`  模式 → ${MODE.current} · ${MODE.describe()}\n`));
+      continue;
+    }
+    if (cmdL === "/context") {
+      try {
+        const d = currentAgent.contextDetail();
+        process.stdout.write(chalk.bold(`\n  上下文 ${d.estimatedTokens}/${d.maxTokens} tokens (${d.pct}%)`) + chalk.dim(` · ${d.model}\n`));
+        process.stdout.write(chalk.dim(`  系统提示 ≈${d.systemPromptTokens} tk · 工具 ${d.toolCount} 个\n`));
+        for (const [role, v] of Object.entries(d.byRole as Record<string, { tokens: number; count: number }>)) {
+          process.stdout.write(chalk.dim(`  ${role.padEnd(9)} ${String(v.tokens).padStart(6)} tk · ${v.count} 条\n`));
+        }
+        process.stdout.write("\n");
+      } catch (e: any) { process.stdout.write(chalk.dim(`  无法获取: ${e?.message || e}\n`)); }
+      continue;
+    }
+    if (cmdL === "/verify") {
+      const { resolveVerifyConfig, runVerify } = require("../core/verify");
+      const vc = resolveVerifyConfig((ctx as any).config);
+      if (!vc.commands.length) { process.stdout.write(chalk.dim("  未配置验证命令 — config.yaml verify.commands 或 SKY.md ## Verify\n")); continue; }
+      process.stdout.write(chalk.dim(`  ⚙ verify · ${vc.commands.length} 条命令\n`));
+      const vr = runVerify(vc);
+      process.stdout.write("  " + vr.report.split("\n").slice(0, 30).join("\n  ") + "\n");
+      continue;
+    }
+    if (cmdL === "/init") {
+      const { INIT_PROMPT } = require("../core/skymd");
+      process.stdout.write(chalk.dim("  开始扫描项目，生成 SKY.md …\n"));
+      try { await streamResponse(currentAgent, INIT_PROMPT); currentAgent.reloadProjectMemory(); }
+      catch (e: any) { process.stdout.write(chalk.red("  ✗ " + (e.message || e) + "\n")); }
+      continue;
+    }
     if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); continue; }
     if (cmdL === "/setup") { const r = await setupWizard(); if (r) process.stdout.write(chalk.green(`  ${r.provider} · ${r.model} — Ready!\n`)); continue; }
     if (cmdL.startsWith("/model")) { process.stdout.write(chalk.dim("  Run /setup to reconfigure models\n")); continue; }
     if (inp.startsWith("/")) { process.stdout.write("\n" + chalk.dim(`  未知命令 ${inp.split(" ")[0]}\n`) + renderPalette(cmdL.split(" ")[0]) + "\n"); continue; }
+
+    // ── input macros: # quick memory · ! shell · @file attach ──
+    {
+      const macros = require("./input_macros");
+      if (macros.isHashMemory(inp)) {
+        try {
+          const { appendQuickMemory } = require("../core/skymd");
+          const file = appendQuickMemory(macros.hashNote(inp));
+          currentAgent.reloadProjectMemory();
+          process.stdout.write(chalk.green("  ✦ 已记入 ") + chalk.dim(file + "\n"));
+        } catch (e: any) { process.stdout.write(chalk.dim(`  记忆写入失败: ${e?.message || e}\n`)); }
+        continue;
+      }
+      if (macros.isBangCommand(inp)) {
+        const cmd = macros.bangCommand(inp);
+        process.stdout.write(chalk.dim(`  $ ${cmd}\n`));
+        const r = macros.runBang(cmd);
+        process.stdout.write("  " + r.output.split("\n").slice(0, 40).join("\n  ") + "\n");
+        currentAgent.memory.addMessage("system", `[用户执行 shell] $ ${cmd}\n${r.output.slice(0, 4000)}`);
+        continue;
+      }
+      const expanded = macros.expandFileRefs(inp);
+      if (expanded.attached.length) process.stdout.write(chalk.dim(`  已附加 ${expanded.attached.map((f: string) => "@" + f).join(" ")}\n`));
+      inp = expanded.text;
+    }
 
     // ── Chat (real streaming) ──
     try {
@@ -451,6 +510,79 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
   process.stdout.write(chalk.dim("\n  Session ended\n"));
   await ctx.closeAll();
   process.exit(0);
+}
+
+/* ═══════════════════════════════════════
+   Headless mode — sky -p "..." (pipes, CI, external orchestrators)
+   ═══════════════════════════════════════ */
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  let data = "";
+  for await (const chunk of process.stdin) data += chunk;
+  return data.trim();
+}
+
+async function runHeadless(
+  prompt: string,
+  opts: { agent?: string; json?: boolean; streamJson?: boolean }
+): Promise<void> {
+  // Fresh session: a one-shot invocation must not inherit (or pollute) the
+  // interactive resume chain.
+  process.env.WA_NO_RESUME = "1";
+  const t0 = Date.now();
+  const ctx = createSystemContext();
+  const agentName = opts.agent || "fog";
+  const agent = ctx.agentMap.get(agentName);
+  if (!agent) { process.stderr.write(`Unknown agent: ${agentName}\n`); process.exit(1); }
+  await agent.init();
+
+  // No human to approve: dangerous tools are denied unless explicitly allowed.
+  try {
+    const { getSecurity } = require("../core/security");
+    getSecurity().setApprovalCallback(async () =>
+      process.env.SKYLOOM_ALLOW_DANGEROUS === "1");
+  } catch { /* optional */ }
+
+  const emit = (obj: Record<string, any>) => process.stdout.write(JSON.stringify(obj) + "\n");
+  let content = "";
+  let ok = true;
+  try {
+    for await (const ev of agent.chatStream(prompt)) {
+      if (opts.streamJson) { emit(ev); if (ev.type === "content") content += ev.text; continue; }
+      switch (ev.type) {
+        case "content":
+          content += ev.text;
+          if (!opts.json) process.stdout.write(String(ev.text));
+          break;
+        case "tool_status":
+          if (!opts.json) process.stderr.write(`[tool] ${ev.tool_name} ${ev.label || ""}\n`);
+          break;
+        case "truncated":
+          ok = false;
+          process.stderr.write(`[truncated] ${ev.reason}\n`);
+          break;
+      }
+    }
+  } catch (e: any) {
+    ok = false;
+    process.stderr.write(`Error: ${e?.message || e}\n`);
+  }
+
+  if (opts.json || opts.streamJson) {
+    emit({
+      type: "result",
+      success: ok,
+      agent: agentName,
+      model: (() => { try { return agent.contextUsage().model; } catch { return undefined; } })(),
+      content,
+      cost_usd: (() => { try { return ctx.llm.getTotalCost(); } catch { return 0; } })(),
+      duration_ms: Date.now() - t0,
+    });
+  } else if (content && !content.endsWith("\n")) {
+    process.stdout.write("\n");
+  }
+  await ctx.closeAll();
+  process.exit(ok ? 0 : 1);
 }
 
 /* ═══════════════════════════════════════
@@ -472,6 +604,25 @@ async function runTask(goal: string): Promise<void> {
 async function main() {
   const args = process.argv.slice(2);
   const classic = args.includes("--classic");
+
+  // ── headless: sky -p "prompt" [--agent fog] [--json | --stream-json] ──
+  const pIdx = args.findIndex((a) => a === "-p" || a === "--print");
+  if (pIdx >= 0) {
+    const flags = new Set(args);
+    const agentIdx = args.findIndex((a) => a === "--agent");
+    const agentName = agentIdx >= 0 ? args[agentIdx + 1] : undefined;
+    const inline = args[pIdx + 1] && !args[pIdx + 1].startsWith("-") ? args[pIdx + 1] : "";
+    const piped = await readStdin();
+    const prompt = [inline, piped].filter(Boolean).join("\n\n");
+    if (!prompt) { process.stderr.write('Usage: sky -p "prompt" [--agent fog] [--json|--stream-json]\n'); process.exit(1); }
+    await runHeadless(prompt, {
+      agent: agentName,
+      json: flags.has("--json"),
+      streamJson: flags.has("--stream-json"),
+    });
+    return;
+  }
+
   const rest = args.filter((a) => a !== "--classic");
   if (rest.length === 0) { await chat("fog", undefined, classic); return; }
   if ((AGENT_NAMES as readonly string[]).includes(rest[0])) {
