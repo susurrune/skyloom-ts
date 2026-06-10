@@ -490,9 +490,10 @@ export class LoomUI {
     if (b && b.text !== text) { b.text = text; b.version++; }
   }
 
-  /** Wrapped plain-text block. */
-  text(text: string, style?: (s: string) => string, head?: string) {
-    this.push({ kind: "text", text, style, head });
+  /** Wrapped plain-text block. With an id, later calls update it in place. */
+  text(text: string, style?: (s: string) => string, head?: string, id?: string) {
+    if (id && this.byId.has(id)) { this.update(id, text); return; }
+    this.push({ kind: "text", text, style, head, id });
   }
 
   /* ── streaming ── */

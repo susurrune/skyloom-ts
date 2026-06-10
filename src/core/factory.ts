@@ -128,11 +128,17 @@ export function createSystemContext(): SystemContext {
   // Configure MCP manager
   let mcpManager: any = null;
   try {
-    const { MCPManager, loadPersistedServers } = require('./mcp');
+    const { MCPManager, loadPersistedServers, loadProjectMcpJson } = require('./mcp');
     mcpManager = new MCPManager(baseToolRegistry);
     const persisted = loadPersistedServers();
     const mcpServers = (config as any).mcp?.servers || [];
-    const allServers = [...mcpServers, ...persisted];
+    const projectServers = loadProjectMcpJson(); // Claude Code 标准 .mcp.json
+    // dedupe by name — project .mcp.json wins over runtime-added over config
+    const byName = new Map<string, any>();
+    for (const s of [...mcpServers, ...persisted, ...projectServers]) {
+      if (s?.name) byName.set(s.name, s);
+    }
+    const allServers = [...byName.values()];
     if (allServers.length > 0) {
       mcpManager.configure(allServers);
     }
@@ -195,6 +201,14 @@ export function createSystemContext(): SystemContext {
         for (const t of createModelTools(name, config)) agentRegistry.register(t);
       } catch (e) {
         log.warn('model_tools_not_available', { agent: name, error: String(e) });
+      }
+
+      // Register the task-checklist tool (todo_write)
+      try {
+        const { createTodoTool } = require('../tools/todo');
+        agentRegistry.register(createTodoTool(agent));
+      } catch (e) {
+        log.warn('todo_tool_not_available', { agent: name, error: String(e) });
       }
 
       agents.set(name, agent);

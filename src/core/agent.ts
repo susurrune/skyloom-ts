@@ -34,6 +34,21 @@ const WRITE_TOOL_RE = /^(write_|edit_|delete_|create_)|^run_bash$|^git_commit$/;
 /** Tools with side effects, hidden from the model while in plan mode. */
 const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$/;
 
+/** Default context budget per recorded tool result (chars; ~3k tokens). */
+const TOOL_RESULT_LIMIT = 12000;
+
+/**
+ * Clamp an oversized tool result before it enters the context window:
+ * keep head + tail, tell the model what was cut and how to fetch precisely.
+ */
+export function clampToolResult(s: string, limit: number = TOOL_RESULT_LIMIT): string {
+  if (s.length <= limit) return s;
+  const head = s.slice(0, Math.floor(limit * 0.72));
+  const tail = s.slice(-Math.floor(limit * 0.18));
+  const cut = s.length - head.length - tail.length;
+  return `${head}\n…[工具结果过长，中间省略 ${cut} 字符 — 需要该部分时用更精确的参数重新调用（read_file 的 offset/limit、grep 定位、缩小查询范围）]\n${tail}`;
+}
+
 // Domain model lives in ./agent/task — re-exported here so importers of
 // '../core/agent' are unaffected by the Phase 3 split.
 import { AgentState, TaskState, Task, TaskResult } from './agent/task';
@@ -156,10 +171,10 @@ export class BaseAgent {
     const lang = (this.config as any).llm?.language || 'zh';
     if (lang === 'en') {
       return prompt +
-        `\n\n## Thinking Protocol\nBefore acting, briefly weigh: (1) **What** is the actual need? (2) **How** sure am I? If <80%, flag with [uncertain] and ask.\nIf stuck, admit it — propose a partial answer or ask the user. Never fabricate.\n\n## Behavior\n- Act, don't narrate. No "I will..." before tool calls.\n- Stay in scope. Do what's asked, then stop.\n- Batch independent tool calls in one response.\n- Verify writes: read back, report verified state.\n- Call list_skills when the task needs specialized capabilities.`;
+        `\n\n## Thinking Protocol\nBefore acting, briefly weigh: (1) **What** is the actual need? (2) **How** sure am I? If <80%, flag with [uncertain] and ask.\nIf stuck, admit it — propose a partial answer or ask the user. Never fabricate.\n\n## Behavior\n- Act, don't narrate. No "I will..." before tool calls.\n- Stay in scope. Do what's asked, then stop.\n- Batch independent tool calls in one response.\n- For tasks with 3+ steps, plan with todo_write first and update item status as you go.\n- Verify writes: read back, report verified state.\n- Call list_skills when the task needs specialized capabilities.`;
     }
     return prompt +
-      `\n\n## 思考协议\n行动前快速判断：(1) 用户真实需求是什么？(2) 我有多大把握？低于80%标注 [不确定] 并主动询问。\n卡住时承认，给出部分答案或请求用户指导。绝不编造。\n\n## 行为守则\n- 直接行动,不预告。不说「我将要...」,直接调用工具\n- 不擅自扩大范围。用户要什么做什么,核心完成即止\n- 独立的工具调用一次发出,并行执行\n- 写入后回读验证,汇报已验证状态而非仅尝试\n- 任务涉及专业能力时（PPT/Excel/PDF/网页设计/代码审查等），先调 list_skills 查看可用技能，再用 use_skill 激活`;
+      `\n\n## 思考协议\n行动前快速判断：(1) 用户真实需求是什么？(2) 我有多大把握？低于80%标注 [不确定] 并主动询问。\n卡住时承认，给出部分答案或请求用户指导。绝不编造。\n\n## 行为守则\n- 直接行动,不预告。不说「我将要...」,直接调用工具\n- 不擅自扩大范围。用户要什么做什么,核心完成即止\n- 独立的工具调用一次发出,并行执行\n- 3 步以上的任务先用 todo_write 列任务清单,开工/完成时逐项更新状态\n- 写入后回读验证,汇报已验证状态而非仅尝试\n- 任务涉及专业能力时（PPT/Excel/PDF/网页设计/代码审查等），先调 list_skills 查看可用技能，再用 use_skill 激活`;
   }
 
   protected injectProgrammingWisdom(prompt: string): string {
@@ -242,6 +257,13 @@ export class BaseAgent {
       description: 'List all available skills with their names and descriptions. Use this first to discover what skills you can activate.',
       parameters: [],
       handler: async () => {
+        // live change detection: re-scan user/project skill folders so a
+        // SKILL.md edit or drop-in applies without restarting the session
+        try {
+          const { registerDynamicSkills } = require('../skills/loader');
+          registerDynamicSkills(self.skillRegistry);
+          self.loadSkills();
+        } catch { /* live reload is best-effort */ }
         const skills = self.getAvailableSkills();
         if (!skills.length) return 'No skills available.';
         const maxName = Math.max(...skills.map(s => s.name.length), 1);
@@ -636,7 +658,9 @@ export class BaseAgent {
       }
     }
 
-    // Phase D: Record results to memory
+    // Phase D: Record results to memory (clamped — one runaway read_file or
+    // http_get must not flood the context window)
+    const resultLimit = Number((this.config as any)?.llm?.tool_result_limit) || undefined;
     for (const r of results) {
       if (!r) continue;
 
@@ -644,7 +668,7 @@ export class BaseAgent {
         if (suppressed) suppressed.add(r.toolName);
       }
 
-      this.memory.addMessage('tool', r.result, {
+      this.memory.addMessage('tool', clampToolResult(r.result, resultLimit), {
         name: r.toolName,
         toolCallId: r.tc.id,
         ephemeral,

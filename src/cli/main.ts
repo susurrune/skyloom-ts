@@ -189,6 +189,15 @@ async function streamResponse(agent: any, input: string): Promise<void> {
           break;
         case "tool_done":
           out.write("  " + (ev.success ? chalk.hex("#3a7a6e")("✓") : chalk.hex("#b3342d")("✗")) + " " + chalk.dim(String(ev.tool_name)) + "\n");
+          if (ev.tool_name === "todo_write" && ev.success) {
+            try {
+              const items = agent.memory.getWorking("todos") || [];
+              if (items.length) {
+                const { renderTodoList } = require("../tools/todo");
+                out.write(chalk.dim("  ☰ " + renderTodoList(items).split("\n").join("\n    ")) + "\n");
+              }
+            } catch { /* best-effort */ }
+          }
           mode = "none";
           break;
         case "truncated":
@@ -450,6 +459,17 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
         }
         process.stdout.write("\n");
       } catch (e: any) { process.stdout.write(chalk.dim(`  无法获取: ${e?.message || e}\n`)); }
+      continue;
+    }
+    if (cmdL === "/tools") {
+      const stats = (currentAgent as any).toolRegistry?.getStats?.() || [];
+      if (!stats.length) { process.stdout.write(chalk.dim("  本会话当前灵还没有工具调用\n")); continue; }
+      process.stdout.write(chalk.bold(`\n  工具调用 · ${currentAgent.name}\n`));
+      for (const s of stats.slice(0, 12)) {
+        const extra = `${s.failures ? ` ✗${s.failures}` : ""}${s.cacheHits ? ` ⊙${s.cacheHits}` : ""}${s.breaker !== "closed" ? ` [熔断:${s.breaker}]` : ""}`;
+        process.stdout.write(chalk.dim(`  ${s.name.padEnd(16)} ${s.calls} 次 · ${s.avgMs}ms${extra}\n`));
+      }
+      process.stdout.write("\n");
       continue;
     }
     if (cmdL === "/verify") {

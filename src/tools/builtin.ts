@@ -20,16 +20,26 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'read_file',
-    description: 'Read the contents of a file at the given path. Use this to inspect files, check file contents, or verify writes.',
+    description: 'Read the contents of a file. Large files are paged: pass offset (1-based start line) and limit (line count) to read further sections; use grep to locate the right offset first.',
     parameters: [
       { name: 'path', type: 'string', description: 'Absolute or relative path to the file', required: true },
+      { name: 'offset', type: 'number', description: '1-based line number to start from (default 1)', required: false },
+      { name: 'limit', type: 'number', description: 'Max lines to return (default 800)', required: false },
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
       if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
       try {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        return `Successfully read ${filePath} (${content.length} chars):\n${content}`;
+        const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+        const offset = Math.max(1, Number(params.offset) || 1);
+        const limit = Math.max(1, Math.min(Number(params.limit) || 800, 4000));
+        const slice = lines.slice(offset - 1, offset - 1 + limit);
+        const remaining = lines.length - (offset - 1 + slice.length);
+        const tail = remaining > 0
+          ? `\n…[还有 ${remaining} 行 — read_file(path, offset=${offset + slice.length}) 继续]`
+          : '';
+        const range = offset > 1 || remaining > 0 ? ` lines ${offset}-${offset + slice.length - 1}/${lines.length}` : '';
+        return `Successfully read ${filePath}${range}:\n${slice.join('\n')}${tail}`;
       } catch (e) {
         return `Error reading file: ${e}`;
       }
