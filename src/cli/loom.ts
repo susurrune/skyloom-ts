@@ -416,7 +416,6 @@ export class LoomUI {
   start() {
     if (!this.headless) {
       this.out.write("\x1b[?1049h\x1b[2J"); // alternate screen
-      this.out.write("\x1b[?1007h"); // alt-scroll: wheel → ↑↓ keys (no raw mouse events)
       if (this.inp && this.inp.isTTY) {
         readline.emitKeypressEvents(this.inp);
         this.inp.setRawMode(true);
@@ -439,7 +438,7 @@ export class LoomUI {
     if (this.resizeHandler) (process.stdout as any).removeListener?.("resize", this.resizeHandler);
     if (!this.headless) {
       if (this.inp && this.inp.isTTY) this.inp.setRawMode(false);
-      this.out.write("\x1b[?1049l\x1b[?1007l\x1b[?25h");
+      this.out.write("\x1b[?1049l\x1b[?25h");
     }
   }
 
@@ -556,8 +555,6 @@ export class LoomUI {
 
   private onKey(str: string, key: any) {
     if (this.destroyed) return;
-    // Ignore raw mouse events (DECSET 1007 translates wheel to arrow keys)
-    if (key?.name === 'mouse' || (str && str.startsWith('\x1b[<'))) return;
     if (this.modal) {
       const k = (str || "").toLowerCase();
       if (k === "y") { const m = this.modal; this.modal = null; m.resolve(true); }
