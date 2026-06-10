@@ -127,26 +127,40 @@ export class StreamRenderer {
   private startLine() { if (this.atLineStart) { this.out.write(this.gutter); this.atLineStart = false; } }
   private newline() { this.out.write("\n"); this.atLineStart = true; this.col = 0; }
 
+  /** Strip asterisk formatting: **text** → text, *text* → text, __text__ → text */
+  private cleanWord(s: string): string {
+    return s.replace(/\*\*(.+?)\*\*/g, (_, t) => t)
+            .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, (_, t) => t)
+            .replace(/__([^_]+)__/g, (_, t) => t)
+            .replace(/_([^_]+)_/g, (_, t) => t);
+  }
+
   private flushWord() {
     if (!this.word) return;
-    const w = visualWidth(this.word);
+    const cleaned = this.cleanWord(this.word);
+    if (!cleaned) { this.word = ""; return; }
+    const w = visualWidth(cleaned);
     if (this.col > 0 && this.col + w > this.maxCols) this.newline();
     this.startLine();
-    this.out.write(this.color(this.word));
+    this.out.write(this.color(cleaned));
     this.col += w;
     this.word = "";
   }
 
-  /** Feed a chunk of streamed text. */
+  /** Feed a chunk of streamed text. Filters out raw md formatting. */
   write(text: string) {
     for (const ch of text) {
-      if (ch === "\r") continue; // normalize CRLF / stray CR from providers
+      if (ch === "\r") continue;
       if (ch === "\n") { this.flushWord(); this.newline(); continue; }
       if (ch === " " || ch === "\t") {
         this.flushWord();
         if (this.col > 0 && this.col < this.maxCols) { this.startLine(); this.out.write(" "); this.col += 1; }
         continue;
       }
+      // Strip heading markers (# ## ###) at line start
+      if (ch === "#" && this.atLineStart) { continue; }
+      // Strip inline code backticks
+      if (ch === "`") { this.flushWord(); continue; }
       const cp = ch.codePointAt(0) || 0;
       if (charWidth(cp) === 2) {
         // CJK / wide: flush any pending latin word, then place this glyph
