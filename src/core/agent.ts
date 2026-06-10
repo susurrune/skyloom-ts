@@ -28,6 +28,12 @@ import { LoopGuard } from './agent/guard';
 
 const log = getLogger('agent');
 
+/** Tools whose success means the filesystem changed (triggers the verify loop). */
+const WRITE_TOOL_RE = /^(write_|edit_|delete_|create_)|^run_bash$|^git_commit$/;
+
+/** Tools with side effects, hidden from the model while in plan mode. */
+const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$/;
+
 // Domain model lives in ./agent/task — re-exported here so importers of
 // '../core/agent' are unaffected by the Phase 3 split.
 import { AgentState, TaskState, Task, TaskResult } from './agent/task';
@@ -65,6 +71,11 @@ export class BaseAgent {
   protected _pendingRequests: Map<string, { resolve: (value: string) => void; reject: (err: Error) => void }> = new Map();
   protected _bgTasks: Set<Promise<void>> = new Set();
   approvalCallback: ((toolName: string, args: Record<string, any>) => Promise<boolean>) | null = null;
+  /** Plan mode: read-only tool set + plan-first instructions on each turn. */
+  planMode: boolean = false;
+  /** Set when this turn executed a tool that mutates the filesystem (verify trigger). */
+  protected _turnWroteFiles: boolean = false;
+  private _hooks: import('./hooks').Hooks | null = null;
   protected _turnLock: Promise<void> = Promise.resolve();
   private _turnLockCounter: number = 0;
   private _turnLockResolve: (() => void) | null = null;
@@ -159,14 +170,32 @@ export class BaseAgent {
     return prompt + `\n\n## 工程能力\n顶级工程师:类型安全、真实的错误处理、按根因调试、按安全与性能审查。你可以阅读和修改 Skyloom 自身源码。`;
   }
 
+  /** Layered SKY.md / CLAUDE.md / AGENTS.md project memory (see core/skymd). */
+  protected injectProjectMemory(prompt: string): string {
+    try {
+      const { loadProjectMemory } = require('./skymd');
+      const mem = loadProjectMemory();
+      if (!mem.text) return prompt;
+      return prompt + `\n\n## 项目记忆 (SKY.md)\n用户与项目维护的约定，优先级高于你的通用习惯：\n\n${mem.text}`;
+    } catch {
+      return prompt;
+    }
+  }
+
   reinitLanguage(): void {
     this._baseSystemPrompt = '';
     this._baseSystemPrompt = this.resolveSystemPrompt();
     this._baseSystemPrompt = this.injectWorkspaceInfo(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectBehaviorRules(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectProgrammingWisdom(this._baseSystemPrompt);
+    this._baseSystemPrompt = this.injectProjectMemory(this._baseSystemPrompt);
     this._baseSystemPrompt += '\n\n' + this.currentTimeTag();
     this.rebuildSystemPrompt();
+  }
+
+  /** Re-read SKY.md layers into the system prompt (after `#` quick memory / edits). */
+  reloadProjectMemory(): void {
+    this.reinitLanguage();
   }
 
   async init(): Promise<void> {
@@ -186,6 +215,7 @@ export class BaseAgent {
     this._baseSystemPrompt = this.injectWorkspaceInfo(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectBehaviorRules(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectProgrammingWisdom(this._baseSystemPrompt);
+    this._baseSystemPrompt = this.injectProjectMemory(this._baseSystemPrompt);
     this._baseSystemPrompt += '\n\n' + this.currentTimeTag();
     this.rebuildSystemPrompt();
     this._tools = this.toolRegistry.getTools();
@@ -553,9 +583,28 @@ export class BaseAgent {
         if (onStatus) onStatus(p.label);
         await this.setState(AgentState.ACTING);
 
+        // pre_tool hooks are enforced policy: a non-zero exit blocks the call.
+        const hooks = this.getHooks();
+        if (hooks.preTool.length > 0) {
+          try {
+            const { runPreToolHooks } = require('./hooks');
+            const pre = runPreToolHooks(hooks, p.toolName, p.toolArgs || {}, this.name);
+            if (!pre.allowed) {
+              return { idx, result: { tc: p.tc, result: `[blocked by pre_tool hook] ${pre.reason}`, success: false, toolName: p.toolName } };
+            }
+          } catch { /* hook machinery must never break tool execution */ }
+        }
+
         try {
           const toolResult = await this.toolRegistry.execute(p.toolName, p.toolArgs || {});
           const resultStr = toolResult.result || toolResult.error || '(no output)';
+          if (toolResult.success && WRITE_TOOL_RE.test(p.toolName)) this._turnWroteFiles = true;
+          if (hooks.postTool.length > 0) {
+            try {
+              const { runPostToolHooks } = require('./hooks');
+              runPostToolHooks(hooks, p.toolName, p.toolArgs || {}, this.name);
+            } catch { /* best-effort */ }
+          }
           return { idx, result: { tc: p.tc, result: resultStr, success: toolResult.success, toolName: p.toolName } };
         } catch (e) {
           return { idx, result: { tc: p.tc, result: `Tool '${p.toolName}' execution failed: ${e}`, success: false, toolName: p.toolName } };
@@ -726,7 +775,12 @@ export class BaseAgent {
     signal?: AbortSignal
   ): AsyncGenerator<Record<string, any>> {
     await this.setState(AgentState.THINKING);
-    this.memory.addMessage('user', message);
+    // Plan mode: the tag travels with the message so the model plans instead
+    // of acting, and the read-only tool filter below removes the temptation.
+    const userMessage = this.planMode
+      ? `[计划模式] 只读调研，不要执行任何修改。请输出一份编号的执行计划（涉及哪些文件、每步做什么、风险点），等待用户批准后再实施。\n\n${message}`
+      : message;
+    this.memory.addMessage('user', userMessage);
     let assistantStored = false;
 
     if (this.shouldAutoCompact()) {
@@ -750,9 +804,16 @@ export class BaseAgent {
     let cacheKey: string | null = null;
 
     const resolveToolNames = (): string[] => {
-      const key = JSON.stringify([[...suppressedTools].sort(), [...this._activeSkills].sort()]);
+      const key = JSON.stringify([[...suppressedTools].sort(), [...this._activeSkills].sort(), this.planMode]);
       if (toolNamesCache !== null && cacheKey === key) return toolNamesCache;
       let candidates = this.activeToolNames().filter(t => !suppressedTools.has(t));
+      if (this.planMode) {
+        candidates = candidates.filter(n => {
+          if (SIDE_EFFECT_TOOL_RE.test(n)) return false;
+          const t = this.toolRegistry.get(n);
+          return !(t as any)?.dangerous;
+        });
+      }
       const must = new Set<string>();
       for (const s of this._skills) {
         if (this._activeSkills.has(s.name)) {
@@ -1029,6 +1090,25 @@ export class BaseAgent {
     };
   }
 
+  /** Per-role token breakdown for the /context command. */
+  contextDetail(): Record<string, any> {
+    const byRole: Record<string, { tokens: number; count: number }> = {};
+    for (const m of this.memory.shortTerm) {
+      const extra = (m as any).toolCalls ? JSON.stringify((m as any).toolCalls).length : 0;
+      const tokens = Math.ceil(((m.content || '').length + extra) / 4);
+      const slot = byRole[m.role] || (byRole[m.role] = { tokens: 0, count: 0 });
+      slot.tokens += tokens;
+      slot.count += 1;
+    }
+    return {
+      ...this.contextUsage(),
+      byRole,
+      systemPromptTokens: Math.ceil(this._baseSystemPrompt.length / 4),
+      toolCount: this.activeToolNames().length,
+      activeSkills: [...this._activeSkills],
+    };
+  }
+
   protected shouldAutoCompact(): boolean {
     const usage = this.memory.getContextWindowUsage();
     // Compact before hitting the real window — leave ~20% headroom for the reply.
@@ -1259,9 +1339,40 @@ export class BaseAgent {
 
     this.memory.addMessage('user', prompt);
     const preLen = this.memory.shortTerm.length;
+    this._turnWroteFiles = false;
 
     try {
-      const response = await this.llmLoop({ onStatus, ephemeral: true });
+      let response = await this.llmLoop({ onStatus, ephemeral: true });
+
+      // ── 验证闭环: if this task touched the filesystem and verify commands
+      // are configured (config.verify or SKY.md "## Verify"), run them and
+      // feed failures back for a bounded number of fix rounds. ──
+      try {
+        const { resolveVerifyConfig, runVerify } = require('./verify');
+        const vc = resolveVerifyConfig(this.config);
+        if (vc.commands.length > 0 && this._turnWroteFiles) {
+          for (let round = 0; round <= vc.maxFixRounds; round++) {
+            if (onStatus) onStatus(`verify: ${vc.commands.length} 条命令`);
+            const vr = runVerify(vc);
+            if (vr.ok) {
+              response.content += `\n\n[verify ✓ 全部通过]\n${vr.report}`;
+              break;
+            }
+            if (round === vc.maxFixRounds) {
+              response.content += `\n\n[verify ✗ 经 ${vc.maxFixRounds} 轮修复仍未通过]\n${vr.report.slice(0, 1500)}`;
+              break;
+            }
+            if (onStatus) onStatus(`verify 失败 — 修复第 ${round + 1}/${vc.maxFixRounds} 轮`);
+            log.warn('verify_failed_fixing', { agent: this.name, round: round + 1 });
+            this.memory.addMessage('user',
+              `[自动验证失败] 以下验证命令未通过。请定位根因并修复，确保它们全部通过：\n\n${vr.report}`);
+            response = await this.llmLoop({ onStatus, ephemeral: true });
+          }
+        }
+      } catch (e) {
+        log.warn('verify_loop_error', { error: String(e) });
+      }
+
       const filePaths = extractFilePathsFromMessages(this.memory.shortTerm.slice(preLen));
       const enriched = enrichResponseWithArtifacts(response.content, filePaths);
       this.memory.addMessage('assistant', enriched, { toolCalls: response.toolCalls, reasoningContent: response.reasoningContent });
@@ -1284,6 +1395,18 @@ export class BaseAgent {
 
   private _security: any = null;
   get security(): any { if (!this._security) { try { const { getSecurity } = require('./security'); this._security = getSecurity(); } catch { this._security = {}; } } return this._security; }
+
+  protected getHooks(): import('./hooks').Hooks {
+    if (!this._hooks) {
+      try {
+        const { loadHooks } = require('./hooks');
+        this._hooks = loadHooks(this.config);
+      } catch {
+        this._hooks = { sessionStart: [], preTool: [], postTool: [] };
+      }
+    }
+    return this._hooks!;
+  }
 
   protected async checkToolApproval(toolName: string, toolArgs: Record<string, any>): Promise<boolean> {
     try {

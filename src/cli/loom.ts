@@ -395,6 +395,10 @@ export class LoomUI {
   private modal: { text: string; resolve: (ok: boolean) => void } | null = null;
   private sigintAt = 0;
   onInterrupt: (() => void) | null = null;
+  /** Shift+Tab cycles interactive modes (default/plan/auto); wired by the chat loop. */
+  onModeCycle: (() => void) | null = null;
+  /** Styled mode badge shown in the status divider when idle ('' = default). */
+  modeBadge = "";
   private keypressHandler: ((str: string, key: any) => void) | null = null;
   private resizeHandler: (() => void) | null = null;
 
@@ -596,6 +600,7 @@ export class LoomUI {
       }
       this.paint(); return;
     }
+    if (name === "tab" && key?.shift) { this.onModeCycle?.(); this.paint(); return; }
     if (name === "tab") {
       if (paletteOpen) {
         const m = this.paletteMatches();
@@ -827,6 +832,7 @@ export class LoomUI {
         leftLabel = ` ${chalk.hex(t.hex)(t.symbol)} ${chalk.dim(this.busyLabel + " " + dots)} `;
       } else if (this.flashHint) leftLabel = " " + chalk.yellow(this.flashHint) + " ";
       else if (this.scrollOff > 0) leftLabel = " " + chalk.dim(`↑ 回看中 · Esc 回到末尾`) + " ";
+      else if (this.modeBadge) leftLabel = " " + this.modeBadge + " ";
       const right = this.statusRight();
       const rightLabel = right ? ` ${right} ` : "";
       const fill = innerW - visualWidth(leftLabel) - visualWidth(rightLabel);
