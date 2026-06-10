@@ -449,7 +449,11 @@ export class BaseAgent {
     let userBlock = '';
     try {
       const { formatProfileForPrompt, formatMemoriesForPrompt } = require('./profile');
-      userBlock = formatProfileForPrompt(lang) + formatMemoriesForPrompt(lang);
+      userBlock = formatProfileForPrompt(lang);
+      // 只有晴(Fair)需要情感记忆——其他灵各有专司，不应被情绪上下文干扰
+      if (this.name === 'fair') {
+        userBlock += formatMemoriesForPrompt(lang);
+      }
     } catch { /* ignore */ }
 
     if (lang === 'en') {
