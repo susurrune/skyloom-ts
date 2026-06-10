@@ -166,20 +166,23 @@ export class BaseAgent {
 
   /** Inject live time — only once per memory, never duplicates. */
   protected injectCurrentTime(): void {
-    const tag = `[${this.currentTimeTag()}]`;
-    // Find and replace the single time-tag slot, or create it before the first user message
     const st = this.memory.shortTerm;
+    // Find existing time tag and update it
     for (let i = st.length - 1; i >= 0; i--) {
       if (st[i].role === "system" && (st[i].content || "").startsWith("[Current time:")) {
-        st[i].content = tag; return;
+        st[i].content = this.currentTimeTag(); return;
       }
     }
-    // Insert exactly ONE time tag at the beginning of the conversation (after any permanent system prompt)
-    let idx = 0;
-    for (let i = 0; i < st.length; i++) {
-      if (st[i].role !== "system") { idx = i; break; }
+    // No time tag yet — append after the last permanent system prompt
+    // (the agent's role/behavior instructions), before any user message
+    for (let i = st.length - 1; i >= 0; i--) {
+      if (st[i].role === "system") {
+        st.splice(i + 1, 0, { role: "system", content: this.currentTimeTag() });
+        return;
+      }
     }
-    st.splice(idx, 0, { role: "system", content: tag });
+    // No system messages at all (e.g. in tests) — inject at position 0
+    st.splice(0, 0, { role: "system", content: this.currentTimeTag() });
   }
 
   protected injectBehaviorRules(prompt: string): string {
