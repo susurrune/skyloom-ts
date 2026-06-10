@@ -116,20 +116,30 @@ export function setUnifiedModel(runtimeConfig: any, modelId: string, dir?: strin
   return { ok: true, suggestions: [], provider };
 }
 
-/** Per-agent API key (独立 key；该 agent 的所有调用优先用它). */
+/** Per-agent API key (独立 key)。记录所属 provider — 换模型跨 provider 时不会误用。 */
 export function setAgentApiKey(runtimeConfig: any, agentName: string, key: string, dir?: string): void {
-  ensureAgentSlot(runtimeConfig, agentName).api_key = key;
+  const d = describeAgentLLM(runtimeConfig, agentName, dir);
+  const slot = ensureAgentSlot(runtimeConfig, agentName);
+  slot.api_key = key;
+  if (d.provider) slot.api_key_provider = d.provider;
   patchUserConfig(cfg => {
     if (!cfg.agents) cfg.agents = {};
     if (!cfg.agents[agentName]) cfg.agents[agentName] = {};
     cfg.agents[agentName].api_key = key;
+    if (d.provider) cfg.agents[agentName].api_key_provider = d.provider;
   }, dir);
 }
 
 export function clearAgentApiKey(runtimeConfig: any, agentName: string, dir?: string): void {
-  if (runtimeConfig.agents?.[agentName]) delete runtimeConfig.agents[agentName].api_key;
+  if (runtimeConfig.agents?.[agentName]) {
+    delete runtimeConfig.agents[agentName].api_key;
+    delete runtimeConfig.agents[agentName].api_key_provider;
+  }
   patchUserConfig(cfg => {
-    if (cfg.agents?.[agentName]) delete cfg.agents[agentName].api_key;
+    if (cfg.agents?.[agentName]) {
+      delete cfg.agents[agentName].api_key;
+      delete cfg.agents[agentName].api_key_provider;
+    }
   }, dir);
 }
 
@@ -144,7 +154,9 @@ export function describeAgentLLM(runtimeConfig: any, agentName: string, dir: str
   const provider = providerOfModel(model);
 
   let keySource: ModelDescription['keySource'] = 'missing';
-  if (agentCfg.api_key) keySource = 'agent';
+  const agentKeyApplies = agentCfg.api_key &&
+    (!agentCfg.api_key_provider || agentCfg.api_key_provider === provider);
+  if (agentKeyApplies) keySource = 'agent';
   else if (provider && process.env[`${provider.toUpperCase()}_API_KEY`]) keySource = 'env';
   else {
     try {

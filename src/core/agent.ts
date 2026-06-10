@@ -978,7 +978,19 @@ export class BaseAgent {
             const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
             const summary = (args?.summary as string) || '';
             const displayResult = summary ? `[Task completed: ${summary}]` : '[Task completed]';
-            this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
+            // Rewrite the tool message Phase D already recorded — appending a
+            // second one would put two tool results on the same tool_call_id,
+            // which OpenAI-compatible APIs reject when history is replayed.
+            let rewritten = false;
+            for (let i = this.memory.shortTerm.length - 1; i >= 0; i--) {
+              const m: any = this.memory.shortTerm[i];
+              if (m.role === 'tool' && m.toolCallId === r.tc.id) {
+                m.content = displayResult;
+                rewritten = true;
+                break;
+              }
+            }
+            if (!rewritten) this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
             yield { type: 'tool_done', label: `task_done: ${summary}` || 'task_done', success: true, tool_name: 'task_done', result: displayResult };
             continue;
           }

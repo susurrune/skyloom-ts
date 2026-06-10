@@ -735,17 +735,24 @@ async function main() {
   // ── headless: sky -p "prompt" [--agent fog] [--json | --stream-json] ──
   const pIdx = args.findIndex((a) => a === "-p" || a === "--print");
   if (pIdx >= 0) {
-    const flags = new Set(args);
-    const agentIdx = args.findIndex((a) => a === "--agent");
-    const agentName = agentIdx >= 0 ? args[agentIdx + 1] : undefined;
-    const inline = args[pIdx + 1] && !args[pIdx + 1].startsWith("-") ? args[pIdx + 1] : "";
+    // collect positionals properly: flags (and --agent's value) are not the
+    // prompt, and the prompt may appear after flags
+    let agentName: string | undefined;
+    const positionals: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === "-p" || a === "--print" || a === "--json" || a === "--stream-json" || a === "--classic") continue;
+      if (a === "--agent") { agentName = args[++i]; continue; }
+      positionals.push(a);
+    }
+    const inline = positionals.join(" ");
     const piped = await readStdin();
     const prompt = [inline, piped].filter(Boolean).join("\n\n");
     if (!prompt) { process.stderr.write('Usage: sky -p "prompt" [--agent fog] [--json|--stream-json]\n'); process.exit(1); }
     await runHeadless(prompt, {
       agent: agentName,
-      json: flags.has("--json"),
-      streamJson: flags.has("--stream-json"),
+      json: args.includes("--json"),
+      streamJson: args.includes("--stream-json"),
     });
     return;
   }

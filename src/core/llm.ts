@@ -755,14 +755,18 @@ export class LLMClient {
   }
 
   private getApiKey(model: string, agentName?: string): string {
-    // 0. Per-agent override (agents.<name>.api_key) beats everything
-    if (agentName) {
-      const agentKey = (this.config.agents as any)?.[agentName]?.api_key;
-      if (agentKey) return String(agentKey);
-    }
-
     let provider = "openai"; const [pr] = splitProvider(model); if (pr) provider = pr;
     else { const l = model.toLowerCase(); if (l.includes("claude")) provider = "anthropic"; else if (l.includes("deepseek")) provider = "deepseek"; else if (l.includes("groq")) provider = "groq"; else if (l.includes("openrouter")) provider = "openrouter"; else if (l.includes("gemini")) provider = "gemini"; }
+
+    // 0. Per-agent override (agents.<name>.api_key) beats everything — but
+    // only for the provider it was recorded for; a deepseek key must not be
+    // sent to openai after the agent switches models across providers.
+    if (agentName) {
+      const agentCfg = (this.config.agents as any)?.[agentName];
+      if (agentCfg?.api_key && (!agentCfg.api_key_provider || agentCfg.api_key_provider === provider)) {
+        return String(agentCfg.api_key);
+      }
+    }
     const envMap = getProviderEnvMap();
     const envVar = envMap.get(provider) || (provider.toUpperCase() + "_API_KEY");
 

@@ -38,7 +38,7 @@ export const SLASH_COMMANDS: [string, string][] = [
   ["/plan", "切换计划模式（只读出方案）"],
   ["/verify", "运行项目验证命令"],
   ["/context", "上下文占用明细"],
-  ["/rewind", "回退本轮文件改动"],
+  ["/rewind ", "回退文件改动（n 轮，默认 1）"],
   ["/tools", "工具调用统计"],
   ["/model", "查看/切换模型（独立/统一）"],
   ["/cost", "费用统计"],
