@@ -12,7 +12,7 @@ import { listProviders, modelsFor, providerLabel, validateModel } from "../core/
 import { agentTheme } from "../core/theme";
 import { classify } from "../core/router";
 import { InteractiveMode, ModeController } from "./mode";
-import { readLine, renderPalette, StreamRenderer } from "./tui";
+import { readLine, renderPalette, StreamRenderer, stripMarkdown } from "./tui";
 import { loomChat } from "./loom_chat";
 
 const MODE = new ModeController();
@@ -155,6 +155,11 @@ async function streamResponse(agent: any, input: string): Promise<void> {
   let renderer: StreamRenderer | null = null;
   const header = () => { if (!headerShown) { out.write("\n  " + chalk.bold.hex(theme.hex)(`${theme.symbol} ${theme.kanji}`) + chalk.hex(theme.hex)(` ${theme.name}`) + "\n\n"); headerShown = true; } };
   const endBlock = () => { if (renderer) { renderer.flush(); renderer = null; out.write("\n"); } };
+
+  // All content passes through this cleaner before display
+  const writeClean = (text: string) => {
+    if (renderer) renderer.write(text);
+  };
 
   // ── Ctrl-C interrupts this turn (keeps partial output); a 2nd Ctrl-C exits. ──
   const controller = new AbortController();

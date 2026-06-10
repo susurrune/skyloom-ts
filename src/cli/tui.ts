@@ -57,6 +57,53 @@ export const SLASH_COMMANDS: [string, string][] = [
 ];
 
 /* ════════════════════════════════════════
+   Markdown stripping — clean raw md for terminal display
+   ════════════════════════════════════════ */
+/** Strip common markdown formatting for clean terminal output. */
+export function stripMarkdown(s: string): string {
+  return s
+    .replace(/^#{1,4}\s+/gm, '')           // headings
+    .replace(/\*\*(.+?)\*\*/g, '$1')         // bold
+    .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '$1') // italic
+    .replace(/__([^_]+)__/g, '$1')           // alt bold
+    .replace(/_([^_]+)_/g, '$1')             // alt italic
+    .replace(/`([^`]+)`/g, '$1')             // inline code
+    .replace(/~~(.+?)~~/g, '$1')             // strikethrough
+    .replace(/^\s*[-*+]\s+/gm, '• ')         // bullets
+    .replace(/^\s*\d+[.)]\s+/gm, '  ')       // numbered lists
+    .replace(/^\|.*\|$/gm, (line) => {       // tables → spaced columns
+      return line.replace(/\|/g, '  ').replace(/-{2,}/g, '──');
+    })
+    .replace(/\n{3,}/g, '\n\n');             // collapse excess newlines
+}
+
+/** Page output through a simple pager (Enter to continue, q to quit) */
+export async function pageOutput(out: NodeJS.WriteStream, text: string): Promise<void> {
+  const lines = text.split('\n');
+  const h = (out.rows || 24) - 2;
+  if (lines.length <= h) { out.write(text + '\n'); return; }
+
+  const readline = require('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: out });
+
+  for (let i = 0; i < lines.length; i += h) {
+    const chunk = lines.slice(i, i + h).join('\n');
+    out.write(chunk + '\n');
+    if (i + h < lines.length) {
+      const remaining = lines.length - i - h;
+      out.write(`\x1b[7m  ── ${remaining} more lines · Enter=next · q=quit ── \x1b[0m\n`);
+      const key: string = await new Promise(r => {
+        process.stdin.setRawMode?.(true);
+        process.stdin.resume();
+        process.stdin.once('data', (d: Buffer) => { process.stdin.setRawMode?.(false); process.stdin.pause(); r(d.toString()); });
+      });
+      if (key === 'q' || key === '\x03') { rl.close(); return; }
+    }
+  }
+  rl.close();
+}
+
+/* ════════════════════════════════════════
    CJK-aware display width
    ════════════════════════════════════════ */
 /** Visual columns occupied by a single code point (CJK / fullwidth = 2). */
