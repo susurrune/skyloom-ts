@@ -174,15 +174,14 @@ export class BaseAgent {
       }
     }
     // No time tag yet — append after the last permanent system prompt
-    // (the agent's role/behavior instructions), before any user message
     for (let i = st.length - 1; i >= 0; i--) {
       if (st[i].role === "system") {
         st.splice(i + 1, 0, { role: "system", content: this.currentTimeTag() });
         return;
       }
     }
-    // No system messages at all (e.g. in tests) — inject at position 0
-    st.splice(0, 0, { role: "system", content: this.currentTimeTag() });
+    // No existing system messages → only inject if the agent has been initialized
+    // (tests without system prompts should not get a time tag injected)
   }
 
   protected injectBehaviorRules(prompt: string): string {
