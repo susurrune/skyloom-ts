@@ -416,6 +416,7 @@ export class LoomUI {
   start() {
     if (!this.headless) {
       this.out.write("\x1b[?1049h\x1b[2J"); // alternate screen
+      this.out.write("\x1b[?1000h\x1b[?1006h"); // enable SGR mouse tracking for wheel scroll
       if (this.inp && this.inp.isTTY) {
         readline.emitKeypressEvents(this.inp);
         this.inp.setRawMode(true);
@@ -439,6 +440,7 @@ export class LoomUI {
     if (!this.headless) {
       if (this.inp && this.inp.isTTY) this.inp.setRawMode(false);
       this.out.write("\x1b[?1049l\x1b[?25h");
+      this.out.write("\x1b[?1000l\x1b[?1006l"); // disable mouse tracking
     }
   }
 
@@ -555,6 +557,17 @@ export class LoomUI {
 
   private onKey(str: string, key: any) {
     if (this.destroyed) return;
+    // Mouse wheel: scroll the content viewport
+    if (key?.name === 'mouse' || (str && str.startsWith('\x1b[<'))) {
+      const m = str.match(/^\x1b\[<(\d+);(\d+);(\d+)([mM])/);
+      if (m) {
+        const code = parseInt(m[1], 10);
+        if (code === 64) { this.scrollOff += 3; /* wheel up */ }
+        else if (code === 65) { this.scrollOff = Math.max(0, this.scrollOff - 3); /* wheel down */ }
+        this.clampScroll(); this.viewportCache = null; this.paint();
+      }
+      return;
+    }
     if (this.modal) {
       const k = (str || "").toLowerCase();
       if (k === "y") { const m = this.modal; this.modal = null; m.resolve(true); }
