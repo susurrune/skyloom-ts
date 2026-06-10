@@ -231,7 +231,6 @@ export class BaseAgent {
   }
 
   async init(): Promise<void> {
-    if (this._baseSystemPrompt) return;
     await this.memory.initDb();
 
     // Always try to resume the last session (persistent memory across sky restarts)
@@ -493,13 +492,9 @@ export class BaseAgent {
       prompt += identity;
     }
 
-    // Find and replace system message, or add one
-    for (const msg of this.memory.shortTerm) {
-      if (msg.role === 'system') {
-        msg.content = prompt;
-        return;
-      }
-    }
+    // Remove ALL old system messages (including stale time tags), then add ONE fresh system prompt
+    const filtered = this.memory.shortTerm.filter(m => m.role !== 'system');
+    this.memory.shortTerm = filtered;
     this.memory.addMessage('system', prompt);
   }
 
