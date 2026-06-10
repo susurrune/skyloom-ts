@@ -15,6 +15,8 @@ import { appendQuickMemory, INIT_PROMPT } from "../core/skymd";
 import { resolveVerifyConfig, runVerify } from "../core/verify";
 import { InteractiveMode, ModeController } from "./mode";
 import { expandFileRefs, isBangCommand, bangCommand, runBang, isHashMemory, hashNote } from "./input_macros";
+import { loadCustomCommands, resolveCustomCommand } from "./commands_md";
+import { getFileCheckpoints } from "../core/file_checkpoint";
 import { LoomUI, OrchTask, circled, cutVisual } from "./loom";
 
 const OK_HEX = "#3a7a6e"; // 石绿 — success
@@ -302,11 +304,19 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
   const say = (s: string) => { ui.line(s); };
   const dim = (s: string) => { ui.line(chalk.dim(" " + s)); };
 
+  // 自定义斜杠命令（.sky/commands/ + ~/.skyloom/commands/），每轮重扫即时生效
+  let customCommands = loadCustomCommands();
+  ui.extraCommands = customCommands.map((c) => ["/" + c.name, c.description] as [string, string]);
+
   try {
     while (true) {
       const inp = await ui.readInput();
       if (!inp) continue;
       const cmdL = inp.toLowerCase();
+      if (inp.startsWith("/")) {
+        customCommands = loadCustomCommands();
+        ui.extraCommands = customCommands.map((c) => ["/" + c.name, c.description] as [string, string]);
+      }
 
       if (cmdL === "/quit" || cmdL === "/exit") break;
 
@@ -446,6 +456,44 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         await runLoomTask(ui, ctx, goal);
         continue;
       }
+      if (cmdL === "/rewind" || cmdL.startsWith("/rewind ")) {
+        const cp = getFileCheckpoints();
+        const arg = inp.slice(7).trim();
+        const n = /^\d+$/.test(arg) ? parseInt(arg, 10) : 1;
+        const r = cp.rewind(n);
+        if (r.turns === 0) {
+          const turns = cp.list();
+          if (!turns.length) { dim("没有可回退的文件改动（检查点覆盖 write/edit/delete_file；run_bash 的副作用无法回退）"); continue; }
+          say(" " + chalk.bold("检查点") + chalk.dim(` · ${turns.length} 轮可回退 — /rewind [n]`));
+          for (const t of turns.slice(0, 8)) dim(`${t.label} · ${t.files.length} 个文件`);
+          continue;
+        }
+        say(" " + chalk.hex(OK_HEX)(`↺ 已回退 ${r.turns} 轮`) + chalk.dim(` · 恢复 ${r.restored.length} 个文件${r.deleted.length ? ` · 删除 ${r.deleted.length} 个新建文件` : ""}`));
+        for (const f of [...r.restored, ...r.deleted].slice(0, 10)) dim(f);
+        continue;
+      }
+
+      // ── 自定义斜杠命令 ──
+      if (inp.startsWith("/")) {
+        const hit = resolveCustomCommand(inp, customCommands);
+        if (hit) {
+          if (hit.command.agent && ctx.agentMap.has(hit.command.agent)) {
+            const a = ctx.agentMap.get(hit.command.agent);
+            await a.init();
+            agent.planMode = false;
+            agent = a;
+            applyMode();
+            ui.agentName = a.name;
+          }
+          dim(`⌘ /${hit.command.name}` + (hit.command.agent ? ` → ${hit.command.agent}` : ""));
+          const expanded = expandFileRefs(hit.prompt);
+          ui.blank();
+          ui.text(cutVisual(hit.prompt, 400), (s) => chalk.hex(PALETTE.inkLight)(s), chalk.hex(PALETTE.inkLight)("❯ "));
+          await loomStream(ui, agent, expanded.text);
+          continue;
+        }
+      }
+
       if (inp.startsWith("/")) { dim(`未知命令 ${inp.split(" ")[0]} · 输入 / 看全部命令`); continue; }
 
       // ── input macros: # quick memory · ! shell · @file attach ──

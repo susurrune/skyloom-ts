@@ -471,6 +471,37 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
     if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); continue; }
     if (cmdL === "/setup") { const r = await setupWizard(); if (r) process.stdout.write(chalk.green(`  ${r.provider} · ${r.model} — Ready!\n`)); continue; }
     if (cmdL.startsWith("/model")) { process.stdout.write(chalk.dim("  Run /setup to reconfigure models\n")); continue; }
+    if (cmdL === "/rewind" || cmdL.startsWith("/rewind ")) {
+      const { getFileCheckpoints } = require("../core/file_checkpoint");
+      const cp = getFileCheckpoints();
+      const arg = inp.slice(7).trim();
+      const r = cp.rewind(/^\d+$/.test(arg) ? parseInt(arg, 10) : 1);
+      if (r.turns === 0) {
+        const turns = cp.list();
+        if (!turns.length) { process.stdout.write(chalk.dim("  没有可回退的文件改动\n")); continue; }
+        process.stdout.write(chalk.bold(`  检查点 · ${turns.length} 轮可回退\n`));
+        for (const t of turns.slice(0, 8)) process.stdout.write(chalk.dim(`  ${t.label} · ${t.files.length} 个文件\n`));
+        continue;
+      }
+      process.stdout.write(chalk.green(`  ↺ 已回退 ${r.turns} 轮`) + chalk.dim(` · 恢复 ${r.restored.length} 个文件${r.deleted.length ? ` · 删除 ${r.deleted.length} 个新建文件` : ""}\n`));
+      for (const f of [...r.restored, ...r.deleted].slice(0, 10)) process.stdout.write(chalk.dim(`  ${f}\n`));
+      continue;
+    }
+    if (inp.startsWith("/")) {
+      // 自定义斜杠命令（.sky/commands/ + ~/.skyloom/commands/）
+      const { loadCustomCommands, resolveCustomCommand } = require("./commands_md");
+      const hit = resolveCustomCommand(inp, loadCustomCommands());
+      if (hit) {
+        const target = hit.command.agent ? ctx.agentMap.get(hit.command.agent) : undefined;
+        if (target) {
+          await target.init();
+          currentAgent = target;
+        }
+        process.stdout.write(chalk.dim(`  ⌘ /${hit.command.name}${hit.command.agent ? ` → ${hit.command.agent}` : ""}\n`));
+        try { await streamResponse(currentAgent, hit.prompt); } catch (e: any) { process.stdout.write(chalk.red("  ✗ " + (e.message || e) + "\n")); }
+        continue;
+      }
+    }
     if (inp.startsWith("/")) { process.stdout.write("\n" + chalk.dim(`  未知命令 ${inp.split(" ")[0]}\n`) + renderPalette(cmdL.split(" ")[0]) + "\n"); continue; }
 
     // ── input macros: # quick memory · ! shell · @file attach ──

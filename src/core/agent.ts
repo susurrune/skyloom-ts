@@ -583,6 +583,15 @@ export class BaseAgent {
         if (onStatus) onStatus(p.label);
         await this.setState(AgentState.ACTING);
 
+        // File checkpoint: snapshot the target before any mutating file tool
+        // runs, so /rewind can restore the pre-turn state.
+        try {
+          const { getFileCheckpoints } = require('./file_checkpoint');
+          const cp = getFileCheckpoints();
+          const snapPath = cp.pathToSnapshot(p.toolName, p.toolArgs || {});
+          if (snapPath) cp.snapshot(snapPath);
+        } catch { /* checkpointing must never block execution */ }
+
         // pre_tool hooks are enforced policy: a non-zero exit blocks the call.
         const hooks = this.getHooks();
         if (hooks.preTool.length > 0) {
@@ -781,6 +790,9 @@ export class BaseAgent {
       ? `[计划模式] 只读调研，不要执行任何修改。请输出一份编号的执行计划（涉及哪些文件、每步做什么、风险点），等待用户批准后再实施。\n\n${message}`
       : message;
     this.memory.addMessage('user', userMessage);
+    try {
+      require('./file_checkpoint').getFileCheckpoints().beginTurn(message);
+    } catch { /* optional */ }
     let assistantStored = false;
 
     if (this.shouldAutoCompact()) {
@@ -1340,6 +1352,9 @@ export class BaseAgent {
     this.memory.addMessage('user', prompt);
     const preLen = this.memory.shortTerm.length;
     this._turnWroteFiles = false;
+    try {
+      require('./file_checkpoint').getFileCheckpoints().beginTurn(`[task] ${task.description}`);
+    } catch { /* optional */ }
 
     try {
       let response = await this.llmLoop({ onStatus, ephemeral: true });

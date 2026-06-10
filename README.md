@@ -134,6 +134,8 @@ sky init             # 初始化
 | **输入宏** | `@文件` `!命令` `#记忆` | 文件注入上下文 / shell 输出入上下文（不耗 LLM）/ 一句话存进 SKY.md |
 | **Hooks** | config `hooks.pre_tool/post_tool/session_start` | 强制执行的 shell 钩子，`pre_tool` 非零退出可拦截工具调用 |
 | **上下文明细** | `/context` | 按角色分解 token 占用 + 系统提示/工具/技能开销 |
+| **文件检查点** | `/rewind [n]` | 每轮自动快照被改文件，一键回退 n 轮（不依赖 git；`run_bash` 副作用除外） |
+| **自定义命令** | `.sky/commands/*.md`（项目）/ `~/.skyloom/commands/`（用户） | frontmatter 可指定 `description`/`agent`，正文支持 `$ARGUMENTS` `$1…$9`，子目录命名空间 `git/commit.md` → `/git:commit`，改完即生效 |
 
 ```yaml
 # ~/.skyloom/config.yaml 示例

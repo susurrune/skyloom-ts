@@ -399,6 +399,8 @@ export class LoomUI {
   onModeCycle: (() => void) | null = null;
   /** Styled mode badge shown in the status divider when idle ('' = default). */
   modeBadge = "";
+  /** User-defined slash commands shown in the palette ([name, description]). */
+  extraCommands: [string, string][] = [];
   private keypressHandler: ((str: string, key: any) => void) | null = null;
   private resizeHandler: (() => void) | null = null;
 
@@ -660,7 +662,7 @@ export class LoomUI {
   private paletteMatches(): [string, string][] {
     const l = this.inputGlyphs.join("");
     if (!l.startsWith("/") || l.includes(" ")) return [];
-    return SLASH_COMMANDS.filter(([c]) => c.trimEnd().startsWith(l));
+    return [...SLASH_COMMANDS, ...this.extraCommands].filter(([c]) => c.trimEnd().startsWith(l));
   }
 
   /* ── geometry ── */
