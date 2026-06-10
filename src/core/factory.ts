@@ -189,6 +189,14 @@ export function createSystemContext(): SystemContext {
         log.warn('delegate_tool_not_available', { agent: name, error: String(e) });
       }
 
+      // Register model self-service tools (list_models / set_my_model)
+      try {
+        const { createModelTools } = require('../tools/model_tool');
+        for (const t of createModelTools(name, config)) agentRegistry.register(t);
+      } catch (e) {
+        log.warn('model_tools_not_available', { agent: name, error: String(e) });
+      }
+
       agents.set(name, agent);
     } catch (e) {
       log.warn('agent_creation_failed', { agent: name, error: String(e) });
