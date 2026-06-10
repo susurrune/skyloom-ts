@@ -155,16 +155,31 @@ export class BaseAgent {
     }
   }
 
+  /** Always return the live current time — never stale. */
   protected currentTimeTag(): string {
-    const now = Date.now() / 1000;
-    if (BaseAgent._timeTag !== null && now - BaseAgent._timeTagTs < 30) {
-      return BaseAgent._timeTag;
-    }
     const date = new Date();
-    const tag = `Today is ${date.toISOString().slice(0, 10)}. Current time: ${date.toISOString().slice(0, 19).replace('T', ' ')}.`;
-    BaseAgent._timeTag = tag;
-    BaseAgent._timeTagTs = now;
-    return tag;
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const iso = date.toISOString();
+    const local = date.toLocaleString("zh-CN", { hour12: false, year: "numeric", month: "2-digit", day: "2-digit", weekday: "long", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return `Current time: ${iso.slice(0, 19).replace("T", " ")} UTC (${local} ${tz})`;
+  }
+
+  /** Inject live time into messages before every LLM call. */
+  protected injectCurrentTime(): void {
+    const tag = `[${this.currentTimeTag()}]`;
+    // Replace any previous time tag in the most recent system message or append
+    for (let i = this.memory.shortTerm.length - 1; i >= 0; i--) {
+      const m = this.memory.shortTerm[i];
+      if (m.role === "system" && (m.content || "").startsWith("[Current time:")) {
+        m.content = tag; return;
+      }
+    }
+    // No existing time tag — insert one before the last user message
+    const lastUser = [...this.memory.shortTerm].reverse().findIndex(m => m.role === "user");
+    if (lastUser >= 0) {
+      const idx = this.memory.shortTerm.length - 1 - lastUser;
+      this.memory.shortTerm.splice(idx, 0, { role: "system", content: tag });
+    }
   }
 
   protected injectBehaviorRules(prompt: string): string {
@@ -733,7 +748,7 @@ export class BaseAgent {
     if (options?.temperature != null) overrides.temperature = options.temperature;
     if (options?.maxTokens != null) overrides.maxTokens = options.maxTokens;
 
-    const messages = [{ role: 'user', content: prompt }];
+    const messages = [{ role: 'system', content: `[${this.currentTimeTag()}]` }, { role: 'user', content: prompt }];
     const response = await this.llm.complete(
       messages,
       this.name,
@@ -1238,6 +1253,8 @@ export class BaseAgent {
   }
 
   protected async messagesWithRecall(): Promise<Record<string, any>[]> {
+    // Inject live time before every LLM call so the agent always knows the current time
+    this.injectCurrentTime();
     const messages = this.memory.getMessages();
     if (!messages || process.env.WA_NO_RECALL === '1') return messages;
 
