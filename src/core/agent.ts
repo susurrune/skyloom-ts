@@ -164,22 +164,22 @@ export class BaseAgent {
     return `Current time: ${iso.slice(0, 19).replace("T", " ")} UTC (${local} ${tz})`;
   }
 
-  /** Inject live time into messages before every LLM call. */
+  /** Inject live time — only once per memory, never duplicates. */
   protected injectCurrentTime(): void {
     const tag = `[${this.currentTimeTag()}]`;
-    // Replace any previous time tag in the most recent system message or append
-    for (let i = this.memory.shortTerm.length - 1; i >= 0; i--) {
-      const m = this.memory.shortTerm[i];
-      if (m.role === "system" && (m.content || "").startsWith("[Current time:")) {
-        m.content = tag; return;
+    // Find and replace the single time-tag slot, or create it before the first user message
+    const st = this.memory.shortTerm;
+    for (let i = st.length - 1; i >= 0; i--) {
+      if (st[i].role === "system" && (st[i].content || "").startsWith("[Current time:")) {
+        st[i].content = tag; return;
       }
     }
-    // No existing time tag — insert one before the last user message
-    const lastUser = [...this.memory.shortTerm].reverse().findIndex(m => m.role === "user");
-    if (lastUser >= 0) {
-      const idx = this.memory.shortTerm.length - 1 - lastUser;
-      this.memory.shortTerm.splice(idx, 0, { role: "system", content: tag });
+    // Insert exactly ONE time tag at the beginning of the conversation (after any permanent system prompt)
+    let idx = 0;
+    for (let i = 0; i < st.length; i++) {
+      if (st[i].role !== "system") { idx = i; break; }
     }
+    st.splice(idx, 0, { role: "system", content: tag });
   }
 
   protected injectBehaviorRules(prompt: string): string {
@@ -232,10 +232,9 @@ export class BaseAgent {
     if (this._baseSystemPrompt) return;
     await this.memory.initDb();
 
+    // Always try to resume the last session (persistent memory across sky restarts)
     if (this.memory.getActiveSession() === null) {
-      const resumed = process.env.WA_NO_RESUME !== '1'
-        ? await this.memory.resumeLatestSession()
-        : null;
+      const resumed = await this.memory.resumeLatestSession();
       if (resumed === null) {
         await this.memory.createSession();
       }
