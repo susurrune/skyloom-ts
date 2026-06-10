@@ -401,7 +401,46 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       if (cmdL === "/memory clear") { await agent.memory.clearShortTerm(); dim("记忆已清空"); continue; }
       if (cmdL === "/workspace") { dim(String(ctx.workspacePath || "default")); continue; }
       if (cmdL === "/mcp") { dim(String(ctx.mcpStatus?.join(", ") || "none")); continue; }
-      if (cmdL === "/model") { dim("运行 /setup 重新选择模型"); continue; }
+      if (cmdL === "/model" || cmdL.startsWith("/model ")) {
+        const { setAgentModel, setUnifiedModel, clearAgentModel, setAgentApiKey, describeAgentLLM } = require("../core/model_config");
+        const cfg = (ctx as any).config;
+        const parts = inp.split(/\s+/).slice(1);
+        const t = agentTheme(agent.name);
+        if (parts.length === 0) {
+          const d = describeAgentLLM(cfg, agent.name);
+          const keyLabel = { agent: "独立 key", env: "环境变量", global: "全局 key", missing: chalk.yellow("缺失!") }[d.keySource as string] || d.keySource;
+          ui.blank();
+          say(" " + chalk.bold.hex(t.hex)(`${t.symbol} ${agent.name}`) + chalk.bold(` · ${d.model}`) + chalk.dim(` (${d.source === "agent" ? "独立配置" : "统一配置"} · ${d.provider || "?"} · ${keyLabel})`));
+          dim(`统一默认: ${cfg.default_model || cfg.llm?.default_model || "gpt-4o"}`);
+          dim("/model <id> 给当前灵单独换 · /model unified <id> 改统一默认 · /model reset 回到统一 · /model key <key> 独立 key");
+          ui.blank();
+          continue;
+        }
+        if (parts[0] === "reset") {
+          clearAgentModel(cfg, agent.name);
+          say(" " + chalk.hex(OK_HEX)(`✓ ${agent.name} 已回到统一配置`) + chalk.dim(` · ${describeAgentLLM(cfg, agent.name).model}`));
+          continue;
+        }
+        if (parts[0] === "unified" || parts[0] === "default") {
+          if (!parts[1]) { dim("用法: /model unified <模型id>"); continue; }
+          const r = setUnifiedModel(cfg, parts[1]);
+          if (!r.ok) { dim(`'${parts[1]}' 不在目录中${r.suggestions.length ? " · 可选: " + r.suggestions.join(", ") : ""}`); continue; }
+          say(" " + chalk.hex(OK_HEX)(`✓ 统一默认 → ${parts[1]}`) + chalk.dim(r.provider ? ` (${r.provider})` : ""));
+          continue;
+        }
+        if (parts[0] === "key") {
+          if (!parts[1]) { dim("用法: /model key <api-key> — 仅当前灵使用"); continue; }
+          setAgentApiKey(cfg, agent.name, parts[1]);
+          say(" " + chalk.hex(OK_HEX)(`✓ ${agent.name} 的独立 API key 已保存`));
+          continue;
+        }
+        const r = setAgentModel(cfg, agent.name, parts[0]);
+        if (!r.ok) { dim(`'${parts[0]}' 不在目录中${r.suggestions.length ? " · 可选: " + r.suggestions.join(", ") : " · /setup 查看全部"}`); continue; }
+        say(" " + chalk.hex(OK_HEX)(`✓ ${agent.name} → ${parts[0]}`) + chalk.dim(`${r.provider ? ` (${r.provider})` : ""} · 下一条消息生效 · /model reset 撤销`));
+        const d = describeAgentLLM(cfg, agent.name);
+        if (d.keySource === "missing") dim(`⚠ ${r.provider} 还没有 API key — /apikey set ${r.provider} <key> 或 /model key <key>`);
+        continue;
+      }
       if (cmdL === "/sessions") {
         lastSessions = await agent.memory.listSessions();
         const active = agent.memory.getActiveSession();

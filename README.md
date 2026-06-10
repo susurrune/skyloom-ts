@@ -136,6 +136,7 @@ sky init             # 初始化
 | **上下文明细** | `/context` | 按角色分解 token 占用 + 系统提示/工具/技能开销 |
 | **文件检查点** | `/rewind [n]` | 每轮自动快照被改文件，一键回退 n 轮（不依赖 git；`run_bash` 副作用除外） |
 | **自定义命令** | `.sky/commands/*.md`（项目）/ `~/.skyloom/commands/`（用户） | frontmatter 可指定 `description`/`agent`，正文支持 `$ARGUMENTS` `$1…$9`，子目录命名空间 `git/commit.md` → `/git:commit`，改完即生效 |
+| **模型配置** | `/model [id\|unified <id>\|reset\|key <key>]` | 统一默认 + 每灵独立覆盖（模型与 API key 均可），即改即生效并持久化；agent 也能用 `set_my_model` 工具**自己换自己的模型**（「换成 deepseek-chat」直接说就行） |
 
 ```yaml
 # ~/.skyloom/config.yaml 示例

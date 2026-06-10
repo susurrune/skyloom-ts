@@ -690,10 +690,10 @@ export class LLMClient {
         let usage: UsageStats = { promptTokens: 0, completionTokens: 0 };
 
         if (isAnthropic) {
-          const r = await this.callAnthropic(model, messages, tools, temperature, maxTokens);
+          const r = await this.callAnthropic(model, messages, tools, temperature, maxTokens, agentName);
           content = r.content; toolCalls = r.toolCalls; usage = r.usage;
         } else {
-          const r = await this.callOpenAI(model, messages, tools, temperature, maxTokens);
+          const r = await this.callOpenAI(model, messages, tools, temperature, maxTokens, agentName);
           content = r.content; toolCalls = r.toolCalls; usage = r.usage;
         }
 
@@ -714,9 +714,9 @@ export class LLMClient {
   }
 
   private async callOpenAI(
-    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string
   ): Promise<{ content: string; toolCalls: ToolCall[]; usage: UsageStats }> {
-    const apiKey = this.getApiKey(m);
+    const apiKey = this.getApiKey(m, agentName);
     const baseUrl = this.getBaseUrl(m);
     const body: Record<string, unknown> = { model: m, messages, temperature: temp ?? 0.7, max_tokens: maxTok ?? 4096 };
     if (tools?.length) {
@@ -731,9 +731,9 @@ export class LLMClient {
   }
 
   private async callAnthropic(
-    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string
   ): Promise<{ content: string; toolCalls: ToolCall[]; usage: UsageStats }> {
-    const apiKey = this.getApiKey("anthropic");
+    const apiKey = this.getApiKey("anthropic", agentName);
     const body: Record<string, unknown> = { model: m, max_tokens: maxTok ?? 4096, messages: messages.filter(msg => msg.role !== "system"), temperature: temp ?? 0.7 };
     const sys = messages.find(msg => msg.role === "system"); if (sys) body.system = sys.content;
     if (tools?.length) {
@@ -754,7 +754,13 @@ export class LLMClient {
     return { type: "object", properties: props, ...(required.length > 0 ? { required } : {}) };
   }
 
-  private getApiKey(model: string): string {
+  private getApiKey(model: string, agentName?: string): string {
+    // 0. Per-agent override (agents.<name>.api_key) beats everything
+    if (agentName) {
+      const agentKey = (this.config.agents as any)?.[agentName]?.api_key;
+      if (agentKey) return String(agentKey);
+    }
+
     let provider = "openai"; const [pr] = splitProvider(model); if (pr) provider = pr;
     else { const l = model.toLowerCase(); if (l.includes("claude")) provider = "anthropic"; else if (l.includes("deepseek")) provider = "deepseek"; else if (l.includes("groq")) provider = "groq"; else if (l.includes("openrouter")) provider = "openrouter"; else if (l.includes("gemini")) provider = "gemini"; }
     const envMap = getProviderEnvMap();
@@ -802,7 +808,7 @@ export class LLMClient {
    * emitted once complete. Usage comes from the final `stream_options` chunk.
    */
   private async *callOpenAIStream(
-    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, signal?: AbortSignal
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, signal?: AbortSignal, agentName?: string
   ): AsyncGenerator<StreamEvent> {
     const apiKey = this.getApiKey(m);
     const baseUrl = this.getBaseUrl(m);
@@ -884,7 +890,7 @@ export class LLMClient {
     let started = false;
     let usage: UsageStats = { promptTokens: 0, completionTokens: 0 };
     try {
-      for await (const ev of this.callOpenAIStream(model, messages, tools, temperature, maxTokens, signal)) {
+      for await (const ev of this.callOpenAIStream(model, messages, tools, temperature, maxTokens, signal, agentName)) {
         if (ev.type === "content" || ev.type === "tool_call") started = true;
         if (ev.type === "done" && ev.usage) usage = ev.usage;
         yield ev;

@@ -470,7 +470,34 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
     }
     if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); continue; }
     if (cmdL === "/setup") { const r = await setupWizard(); if (r) process.stdout.write(chalk.green(`  ${r.provider} · ${r.model} — Ready!\n`)); continue; }
-    if (cmdL.startsWith("/model")) { process.stdout.write(chalk.dim("  Run /setup to reconfigure models\n")); continue; }
+    if (cmdL === "/model" || cmdL.startsWith("/model ")) {
+      const { setAgentModel, setUnifiedModel, clearAgentModel, setAgentApiKey, describeAgentLLM } = require("../core/model_config");
+      const cfg = (ctx as any).config;
+      const parts = inp.split(/\s+/).slice(1);
+      if (parts.length === 0) {
+        const d = describeAgentLLM(cfg, currentAgent.name);
+        process.stdout.write(chalk.bold(`\n  ${currentAgent.name} · ${d.model}`) + chalk.dim(` (${d.source === "agent" ? "独立配置" : "统一配置"} · ${d.provider || "?"} · key:${d.keySource})\n`));
+        process.stdout.write(chalk.dim(`  统一默认: ${cfg.default_model || cfg.llm?.default_model || "gpt-4o"}\n`));
+        process.stdout.write(chalk.dim("  /model <id> 单独换 · /model unified <id> 改默认 · /model reset 回统一 · /model key <key>\n\n"));
+        continue;
+      }
+      if (parts[0] === "reset") { clearAgentModel(cfg, currentAgent.name); process.stdout.write(chalk.green(`  ✓ ${currentAgent.name} 已回到统一配置\n`)); continue; }
+      if (parts[0] === "unified" || parts[0] === "default") {
+        if (!parts[1]) { process.stdout.write(chalk.dim("  用法: /model unified <模型id>\n")); continue; }
+        const r = setUnifiedModel(cfg, parts[1]);
+        process.stdout.write(r.ok ? chalk.green(`  ✓ 统一默认 → ${parts[1]}\n`) : chalk.dim(`  '${parts[1]}' 不在目录中${r.suggestions.length ? " · 可选: " + r.suggestions.join(", ") : ""}\n`));
+        continue;
+      }
+      if (parts[0] === "key") {
+        if (!parts[1]) { process.stdout.write(chalk.dim("  用法: /model key <api-key>\n")); continue; }
+        setAgentApiKey(cfg, currentAgent.name, parts[1]);
+        process.stdout.write(chalk.green(`  ✓ ${currentAgent.name} 的独立 API key 已保存\n`));
+        continue;
+      }
+      const r = setAgentModel(cfg, currentAgent.name, parts[0]);
+      process.stdout.write(r.ok ? chalk.green(`  ✓ ${currentAgent.name} → ${parts[0]}`) + chalk.dim(" · 下一条消息生效\n") : chalk.dim(`  '${parts[0]}' 不在目录中${r.suggestions.length ? " · 可选: " + r.suggestions.join(", ") : ""}\n`));
+      continue;
+    }
     if (cmdL === "/rewind" || cmdL.startsWith("/rewind ")) {
       const { getFileCheckpoints } = require("../core/file_checkpoint");
       const cp = getFileCheckpoints();
