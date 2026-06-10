@@ -336,7 +336,9 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         if (cmdL === "/" + n) {
           const a = ctx.agentMap.get(n);
           if (a) {
-            await a.init();
+            await a.memory.initDb();
+            a._baseSystemPrompt = '';
+            a.reinitLanguage();
             agent.planMode = false;
             agent = a;
             applyMode(); // plan mode follows the session, not the agent instance
@@ -484,6 +486,7 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       }
       if (cmdL === "/new") {
         await agent.memory.clearShortTerm();
+        agent._baseSystemPrompt = ''; agent.reinitLanguage();
         const id = await agent.memory.createSession();
         say(" " + chalk.hex(OK_HEX)("✦ 新会话已开始") + chalk.dim(` · ${String(id).slice(0, 8)}`));
         continue;
@@ -543,7 +546,9 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         if (hit) {
           if (hit.command.agent && ctx.agentMap.has(hit.command.agent)) {
             const a = ctx.agentMap.get(hit.command.agent);
-            await a.init();
+            await a.memory.initDb();
+            a._baseSystemPrompt = '';
+            a.reinitLanguage();
             agent.planMode = false;
             agent = a;
             applyMode();
