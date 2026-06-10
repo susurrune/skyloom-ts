@@ -450,16 +450,27 @@ export class BaseAgent {
     try {
       const { formatProfileForPrompt, formatMemoriesForPrompt } = require('./profile');
       userBlock = formatProfileForPrompt(lang);
-      // 只有晴(Fair)需要情感记忆——其他灵各有专司，不应被情绪上下文干扰
-      if (this.name === 'fair') {
-        userBlock += formatMemoriesForPrompt(lang);
-      }
+      if (this.name === 'fair') userBlock += formatMemoriesForPrompt(lang);
     } catch { /* ignore */ }
 
+    // Team context — all six agents and their roles
+    const team = [
+      ['fog','≋','雾 Fog','松烟墨','探索洞察 · 研究搜索'],
+      ['rain','⸽','雨 Rain','石青','创造产出 · 代码写作'],
+      ['frost','✱','霜 Frost','石绿','精炼品质 · 审查审计'],
+      ['snow','❉','雪 Snow','铅白','架构规划 · 任务编排'],
+      ['dew','∘','露 Dew','赭石','可靠守护 · 系统运维'],
+      ['fair','☼','晴 Fair','朱砂','情感陪伴 · 知心对话'],
+    ];
+    const me = team.find(t => t[0] === this.name);
+    const others = team.filter(t => t[0] !== this.name);
+
     if (lang === 'en') {
-      return `\n\n## Runtime\nYou are the ${this.displayName} agent in Skyloom, powered by the **${model}** language model. Always reply in English unless the user clearly writes in another language.` + userBlock;
+      const teamBlock = others.map(t => `- **${t[2]}** (${t[3]}): ${t[4]}`).join('\n');
+      return `\n\n## Who You Are\nYou are **${me![2]}** — ${me![3]} (${me![4]}).\nYou live in **Skyloom 天空织机**, a weather-themed multi-agent framework.\nYou are powered by **${model}**.\n\n## Your Team\nThe other five agents are your colleagues:\n${teamBlock}\n\nAlways reply in English unless the user clearly writes in another language.` + userBlock;
     }
-    return `\n\n## 运行环境\n你是 Skyloom 中的「${this.displayName}」智能体，底层语言模型为 **${model}**。默认始终用中文回复；除非用户明确用其他语言提问，才用对应语言。` + userBlock;
+    const teamBlock = others.map(t => `- **${t[2]}**（${t[3]}）：${t[4]}`).join('\n');
+    return `\n\n## 你是谁\n你是 **${me![2]}** — 矿物色 ${me![3]}，职责 ${me![4]}。\n你是「天空织机 Skyloom」的一员。Skyloom 是一个天气主题的多智能体协作框架，六位灵各司其职。\n当前由 **${model}** 驱动。\n\n## 你的同伴\n\n${teamBlock}\n\n默认始终用中文回复。` + userBlock;
   }
 
   protected rebuildSystemPrompt(): void {
