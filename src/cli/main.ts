@@ -13,6 +13,7 @@ import { agentTheme } from "../core/theme";
 import { classify } from "../core/router";
 import { InteractiveMode, ModeController } from "./mode";
 import { readLine, renderPalette, StreamRenderer } from "./tui";
+import { loomChat } from "./loom_chat";
 
 const MODE = new ModeController();
 const VERSION = (() => { try { return require("../../package.json").version; } catch { return "1.5.2"; } })();
@@ -68,7 +69,9 @@ const program = new Command()
   .name("sky").description("天空织机 Skyloom").version(VERSION);
 
 program.command("chat").argument("[agent]", "agent name", "fog")
-  .option("-m,--model <m>", "model").action(async (a: string, o: { model?: string }) => { await chat(a, o.model); });
+  .option("-m,--model <m>", "model")
+  .option("--classic", "linear scrolling UI instead of the full-screen loom")
+  .action(async (a: string, o: { model?: string; classic?: boolean }) => { await chat(a, o.model, o.classic); });
 program.command("task").argument("[goal]", "task goal")
   .action(async (g?: string) => { if (g) await runTask(g); });
 program.command("web").option("-p,--port <p>", "port", "3000")
@@ -294,7 +297,7 @@ async function setupWizard(): Promise<{ provider: string; key: string; model: st
   return { provider: prov.id, key: key.trim(), model };
 }
 
-async function chat(agentName: string, modelOverride?: string): Promise<void> {
+async function chat(agentName: string, modelOverride?: string, classic?: boolean): Promise<void> {
   const haveKey = checkApiKeys();
   if (!haveKey) {
     process.stdout.write("\n" + chalk.cyan("  ✦ 天空织机 Skyloom ✦\n"));
@@ -337,6 +340,18 @@ async function chat(agentName: string, modelOverride?: string): Promise<void> {
       return answer === "y" || answer === "yes";
     });
   } catch { /* security module optional */ }
+
+  // ── 立轴 (full-screen loom) is the default on a real terminal;
+  //    --classic / SKYLOOM_CLASSIC=1 / pipes fall back to the linear UI. ──
+  const wantLoom =
+    !classic &&
+    !process.env.SKYLOOM_CLASSIC &&
+    !!process.stdout.isTTY && !!process.stdin.isTTY &&
+    (process.stdout.rows || 24) >= 14 && (process.stdout.columns || 80) >= 60;
+  if (wantLoom) {
+    await loomChat(ctx, agent, { version: VERSION, setupWizard, saveApiKey });
+    return; // loomChat exits the process itself
+  }
 
   // eslint-disable-next-line prefer-const
   let currentAgent = agent; // mutable for agent switching
@@ -456,13 +471,15 @@ async function runTask(goal: string): Promise<void> {
    ═══════════════════════════════════════ */
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length === 0) { await chat("fog"); return; }
-  if ((AGENT_NAMES as readonly string[]).includes(args[0])) {
+  const classic = args.includes("--classic");
+  const rest = args.filter((a) => a !== "--classic");
+  if (rest.length === 0) { await chat("fog", undefined, classic); return; }
+  if ((AGENT_NAMES as readonly string[]).includes(rest[0])) {
     let m: string | undefined;
-    for (let i = 1; i < args.length; i++) if ((args[i] === "-m" || args[i] === "--model") && i + 1 < args.length) m = args[++i];
-    await chat(args[0], m); return;
+    for (let i = 1; i < rest.length; i++) if ((rest[i] === "-m" || rest[i] === "--model") && i + 1 < rest.length) m = rest[++i];
+    await chat(rest[0], m, classic); return;
   }
-  if (!["chat", "task", "web", "config", "init", "version", "mcp", "help"].includes(args[0]) && !args[0].startsWith("-")) { await chat("fog"); return; }
+  if (!["chat", "task", "web", "config", "init", "version", "mcp", "help"].includes(rest[0]) && !rest[0].startsWith("-")) { await chat("fog", undefined, classic); return; }
   program.parse(process.argv);
 }
 
