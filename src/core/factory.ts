@@ -128,11 +128,17 @@ export function createSystemContext(): SystemContext {
   // Configure MCP manager
   let mcpManager: any = null;
   try {
-    const { MCPManager, loadPersistedServers } = require('./mcp');
+    const { MCPManager, loadPersistedServers, loadProjectMcpJson } = require('./mcp');
     mcpManager = new MCPManager(baseToolRegistry);
     const persisted = loadPersistedServers();
     const mcpServers = (config as any).mcp?.servers || [];
-    const allServers = [...mcpServers, ...persisted];
+    const projectServers = loadProjectMcpJson(); // Claude Code 标准 .mcp.json
+    // dedupe by name — project .mcp.json wins over runtime-added over config
+    const byName = new Map<string, any>();
+    for (const s of [...mcpServers, ...persisted, ...projectServers]) {
+      if (s?.name) byName.set(s.name, s);
+    }
+    const allServers = [...byName.values()];
     if (allServers.length > 0) {
       mcpManager.configure(allServers);
     }

@@ -140,6 +140,8 @@ sky init             # 初始化
 | **任务清单** | agent 自动调 `todo_write` | 3 步以上任务 agent 先列清单、逐项更新状态（✓ ◐ ·），存工作记忆不怕压缩，立轴/CLI 实时原位渲染 |
 | **工具可观测** | `/tools` | 每工具调用次数/失败/缓存命中/平均耗时/熔断状态 |
 | **上下文保护** | 自动 | 超大工具结果头尾保留中间截断（默认 12k 字符，`llm.tool_result_limit` 可调）并提示精确重取；`read_file` 支持 `offset/limit` 分页 |
+| **Claude Code 技能迁移** | 把 skill 文件夹丢进 `.claude/skills/` 或 `.sky/skills/` | SKILL.md 同架构（frontmatter `name/description/allowed-tools`，`Bash/Read` 等工具名自动映射）；扫描 `~/.claude/skills` `~/.skyloom/skills` `.claude/skills` `.sky/skills`，**零拷贝迁移**、改完即生效 |
+| **MCP 标准配置** | 项目根 `.mcp.json` | Claude Code 同款 schema（`mcpServers` + stdio/http + `${ENV_VAR}` 展开），与 config.yaml / `sky mcp` 添加的服务器合并（项目级优先） |
 
 ```yaml
 # ~/.skyloom/config.yaml 示例

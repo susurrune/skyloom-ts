@@ -872,6 +872,54 @@ export class MCPManager {
 }
 
 /**
+ * Project-level .mcp.json (Claude Code standard) — drop the same file you
+ * use with Claude Code into the repo root and Skyloom picks it up:
+ *
+ *   { "mcpServers": {
+ *       "github": { "type": "http", "url": "https://api.example.com/mcp/" },
+ *       "db": { "command": "npx", "args": ["-y", "@x/dbhub"],
+ *               "env": { "DB_URL": "${DB_URL}" } } } }
+ *
+ * `${VAR}` references expand from the environment, so secrets stay out of
+ * the committed file.
+ */
+
+/** Expand ${VAR} environment references (Claude Code .mcp.json convention). */
+export function expandEnvRefs(s: string): string {
+  return s.replace(/\$\{([A-Za-z0-9_]+)\}/g, (_, v) => process.env[v] ?? '');
+}
+
+/** Load and translate <cwd>/.mcp.json into Skyloom server configs. */
+export function loadProjectMcpJson(cwd: string = process.cwd()): MCPServerConfig[] {
+  const file = path.join(cwd, '.mcp.json');
+  if (!fs.existsSync(file)) return [];
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    const servers = data?.mcpServers;
+    if (!servers || typeof servers !== 'object') return [];
+    const out: MCPServerConfig[] = [];
+    for (const [name, raw] of Object.entries<any>(servers)) {
+      if (!raw || typeof raw !== 'object') continue;
+      const cfg: MCPServerConfig = { name, enabled: true };
+      if (typeof raw.command === 'string') {
+        cfg.command = expandEnvRefs(raw.command);
+        if (Array.isArray(raw.args)) cfg.args = raw.args.map((a: any) => expandEnvRefs(String(a)));
+      }
+      if (typeof raw.url === 'string') cfg.url = expandEnvRefs(raw.url);
+      if (raw.env && typeof raw.env === 'object') {
+        cfg.env = {};
+        for (const [k, v] of Object.entries(raw.env)) cfg.env[k] = expandEnvRefs(String(v));
+      }
+      if (!cfg.command && !cfg.url) continue; // unsupported transport entry
+      out.push(cfg);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Persistence helpers for runtime-added MCP servers.
  */
 

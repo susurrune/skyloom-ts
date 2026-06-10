@@ -304,6 +304,48 @@ export class SkillRegistry {
   }
 
   /**
+   * Load folder-style skills: `<root>/<skill-name>/SKILL.md` (the Claude
+   * Code layout). Only SKILL.md is parsed — sibling files (reference.md,
+   * scripts/…) are the skill's resources, not separate skills. The skill's
+   * resourceDir is its own folder so relative references resolve.
+   */
+  loadSkillFolders(rootDir: string): Skill[] {
+    const loaded: Skill[] = [];
+    let root: string;
+    try {
+      root = path.resolve(rootDir.replace(/^~/, process.env.HOME || process.env.USERPROFILE || ''));
+    } catch {
+      return loaded;
+    }
+    if (!fs.existsSync(root)) return loaded;
+
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(root);
+    } catch {
+      return loaded;
+    }
+    for (const entry of entries.sort()) {
+      if (entry.startsWith('.') || entry.startsWith('_')) continue;
+      const skillDir = path.join(root, entry);
+      try {
+        if (!fs.statSync(skillDir).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      const skillFile = path.join(skillDir, 'SKILL.md');
+      if (!fs.existsSync(skillFile)) continue;
+      const skill = Skill.fromMarkdown(skillFile);
+      if (skill) {
+        skill.resourceDir = skillDir;
+        this.register(skill);
+        loaded.push(skill);
+      }
+    }
+    return loaded;
+  }
+
+  /**
    * Load all .md skill files from a directory (Anthropic format).
    */
   loadSkillsFromDirectory(directory: string): Skill[] {

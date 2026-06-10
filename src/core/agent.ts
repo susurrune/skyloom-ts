@@ -257,6 +257,13 @@ export class BaseAgent {
       description: 'List all available skills with their names and descriptions. Use this first to discover what skills you can activate.',
       parameters: [],
       handler: async () => {
+        // live change detection: re-scan user/project skill folders so a
+        // SKILL.md edit or drop-in applies without restarting the session
+        try {
+          const { registerDynamicSkills } = require('../skills/loader');
+          registerDynamicSkills(self.skillRegistry);
+          self.loadSkills();
+        } catch { /* live reload is best-effort */ }
         const skills = self.getAvailableSkills();
         if (!skills.length) return 'No skills available.';
         const maxName = Math.max(...skills.map(s => s.name.length), 1);
