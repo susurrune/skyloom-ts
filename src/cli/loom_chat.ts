@@ -314,9 +314,12 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
   const say = (s: string) => { ui.line(s); };
   const dim = (s: string) => { ui.line(chalk.dim(" " + s)); };
 
-  // 自定义斜杠命令（.sky/commands/ + ~/.skyloom/commands/），每轮重扫即时生效
+  // 自定义斜杠命令（.sky/commands/ + ~/.skyloom/commands/），每轮重扫即时生效。
+  // 带参数占位符的命令在面板里以尾空格标记 — Enter 先填充等参数而非直接执行。
   let customCommands = loadCustomCommands();
-  ui.extraCommands = customCommands.map((c) => ["/" + c.name, c.description] as [string, string]);
+  const toPaletteEntries = () => customCommands.map((c) =>
+    ["/" + c.name + (/\$(ARGUMENTS|[1-9])/.test(c.body) ? " " : ""), c.description] as [string, string]);
+  ui.extraCommands = toPaletteEntries();
 
   try {
     while (true) {
@@ -325,7 +328,7 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       const cmdL = inp.toLowerCase();
       if (inp.startsWith("/")) {
         customCommands = loadCustomCommands();
-        ui.extraCommands = customCommands.map((c) => ["/" + c.name, c.description] as [string, string]);
+        ui.extraCommands = toPaletteEntries();
       }
 
       if (cmdL === "/quit" || cmdL === "/exit") break;

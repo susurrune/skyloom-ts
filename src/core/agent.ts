@@ -458,14 +458,15 @@ export class BaseAgent {
         const s = byName.get(name);
         if (!s) continue;
         const parts: string[] = [];
-        if (s.systemPrompt) parts.push(s.systemPrompt);
-        if (s.bodyTruncated && s.sourcePath) {
-          parts.push(lang === 'en'
-            ? `[Lazy-loaded skill: full guide at \`${s.sourcePath}\`]`
-            : `[此技能为懒加载：完整指南位于 \`${s.sourcePath}\`]`);
-        }
+        // Claude Code progressive disclosure: active skills get their FULL
+        // SKILL.md body (read on demand, mtime-cached) — only the metadata
+        // index lives in context before activation.
+        const body = typeof (s as any).fullBody === 'function' ? (s as any).fullBody() : s.systemPrompt;
+        if (body) parts.push(body);
         if (s.resourceDir) {
-          parts.push(lang === 'en' ? `Resource directory: ${s.resourceDir}` : `资源目录: ${s.resourceDir}`);
+          parts.push(lang === 'en'
+            ? `Skill resources: \`${s.resourceDir}\` (read reference files / run scripts from here)`
+            : `技能资源目录: \`${s.resourceDir}\`（参考文件与脚本从此读取/执行）`);
         }
         skillPrompts.push(parts.join('\n\n'));
       }
@@ -977,7 +978,19 @@ export class BaseAgent {
             const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
             const summary = (args?.summary as string) || '';
             const displayResult = summary ? `[Task completed: ${summary}]` : '[Task completed]';
-            this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
+            // Rewrite the tool message Phase D already recorded — appending a
+            // second one would put two tool results on the same tool_call_id,
+            // which OpenAI-compatible APIs reject when history is replayed.
+            let rewritten = false;
+            for (let i = this.memory.shortTerm.length - 1; i >= 0; i--) {
+              const m: any = this.memory.shortTerm[i];
+              if (m.role === 'tool' && m.toolCallId === r.tc.id) {
+                m.content = displayResult;
+                rewritten = true;
+                break;
+              }
+            }
+            if (!rewritten) this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
             yield { type: 'tool_done', label: `task_done: ${summary}` || 'task_done', success: true, tool_name: 'task_done', result: displayResult };
             continue;
           }

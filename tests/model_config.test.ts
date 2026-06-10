@@ -107,3 +107,23 @@ describe("agent 自助换模型工具", () => {
     expect(out).toContain("deepseek-chat");
   });
 });
+
+describe("独立 key 的 provider 作用域（bug 修复）", () => {
+  it("agent key records its provider; switching provider stops using it", () => {
+    setAgentModel(cfg, "fog", "deepseek-chat", tmp);
+    setAgentApiKey(cfg, "fog", "sk-deepseek-only", tmp);
+    expect(cfg.agents.fog.api_key_provider).toBe("deepseek");
+    expect(describeAgentLLM(cfg, "fog", tmp).keySource).toBe("agent");
+
+    // 切到 openai 模型 → deepseek 的独立 key 不再适用
+    setAgentModel(cfg, "fog", "gpt-4o-mini", tmp);
+    expect(describeAgentLLM(cfg, "fog", tmp).keySource).toBe("missing");
+
+    // 切回 deepseek → 恢复使用
+    setAgentModel(cfg, "fog", "deepseek-chat", tmp);
+    expect(describeAgentLLM(cfg, "fog", tmp).keySource).toBe("agent");
+
+    clearAgentApiKey(cfg, "fog", tmp);
+    expect(cfg.agents.fog.api_key_provider).toBeUndefined();
+  });
+});

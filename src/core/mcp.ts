@@ -673,7 +673,7 @@ export class MCPManager {
       }
 
       // Create tool wrapper
-      const mcpToolName = `mcp_${serverName}_${name}`;
+      const mcpToolName = `mcp__${serverName}__${name}`; // Claude Code 标准命名
       const tool = {
         name: mcpToolName,
         description: `[MCP/${serverName}] ${description}`,
@@ -783,7 +783,7 @@ export class MCPManager {
     );
 
     // Unregister tools
-    const prefix = `mcp_${cleanName}_`;
+    const prefix = `mcp__${cleanName}__`;
     let removed = 0;
 
     // Get all tool names with this prefix
@@ -825,7 +825,7 @@ export class MCPManager {
     const result = [];
 
     for (const cfg of this.serverConfigs) {
-      const prefix = `mcp_${cfg.name}_`;
+      const prefix = `mcp__${cfg.name}__`;
       const toolNames = this.toolRegistry.listNames?.() || [];
       const count = toolNames.filter((n: string) => n.startsWith(prefix))
         .length;
@@ -916,6 +916,43 @@ export function loadProjectMcpJson(cwd: string = process.cwd()): MCPServerConfig
     return out;
   } catch {
     return [];
+  }
+}
+
+/** Write/update a server entry in <cwd>/.mcp.json (Claude Code schema). */
+export function saveProjectMcpServer(cfg: MCPServerConfig, cwd: string = process.cwd()): string {
+  const file = path.join(cwd, '.mcp.json');
+  let data: any = {};
+  if (fs.existsSync(file)) {
+    try { data = JSON.parse(fs.readFileSync(file, 'utf-8')) || {}; } catch { data = {}; }
+  }
+  if (!data.mcpServers || typeof data.mcpServers !== 'object') data.mcpServers = {};
+  const entry: any = {};
+  if (cfg.url) {
+    entry.type = 'http';
+    entry.url = cfg.url;
+  } else {
+    entry.command = cfg.command;
+    if (cfg.args && cfg.args.length) entry.args = cfg.args;
+  }
+  if (cfg.env && Object.keys(cfg.env).length) entry.env = cfg.env;
+  data.mcpServers[cfg.name] = entry;
+  fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  return file;
+}
+
+/** Remove a server entry from <cwd>/.mcp.json. Returns true if removed. */
+export function removeProjectMcpServer(name: string, cwd: string = process.cwd()): boolean {
+  const file = path.join(cwd, '.mcp.json');
+  if (!fs.existsSync(file)) return false;
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8')) || {};
+    if (!data.mcpServers || !(name in data.mcpServers)) return false;
+    delete data.mcpServers[name];
+    fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -76,7 +76,56 @@ program.command("task").argument("[goal]", "task goal")
   .action(async (g?: string) => { if (g) await runTask(g); });
 program.command("web").option("-p,--port <p>", "port", "3000")
   .action((o: { port?: string }) => { import("../web/server").then(m => m.startWebServer(parseInt(o.port || "3000"))); });
-program.command("mcp").action(() => { import("../core/mcp_server").then(m => m.startMCPServer()); });
+// ── MCP 管理 CLI（Claude Code 同款用法）──
+const mcpCmd = program.command("mcp").description("管理 MCP 服务器 (add/list/remove/serve)");
+mcpCmd.command("serve").description("把 Skyloom 自身作为 MCP server 暴露")
+  .action(() => { import("../core/mcp_server").then(m => m.startMCPServer()); });
+mcpCmd.command("add")
+  .argument("<name>", "服务器名")
+  .argument("[commandAndArgs...]", "stdio: <command> [args...]；http: <url>")
+  .option("--transport <t>", "stdio|http|sse", "stdio")
+  .option("-e,--env <kv...>", "环境变量 KEY=VAL（可多个，支持 ${VAR} 留待运行时展开）")
+  .option("--scope <s>", "local|project（project 写入 .mcp.json 与团队共享）", "local")
+  .action((name: string, rest: string[], opts: { transport: string; env?: string[]; scope: string }) => {
+    const { savePersistedServer, saveProjectMcpServer } = require("../core/mcp");
+    const cfg: any = { name, enabled: true };
+    if (opts.env?.length) {
+      cfg.env = {};
+      for (const kv of opts.env) { const i = kv.indexOf("="); if (i > 0) cfg.env[kv.slice(0, i)] = kv.slice(i + 1); }
+    }
+    if (opts.transport === "http" || opts.transport === "sse") {
+      if (!rest[0]) { process.stderr.write("用法: sky mcp add --transport http <name> <url>\n"); process.exit(1); }
+      cfg.url = rest[0];
+    } else {
+      if (!rest[0]) { process.stderr.write("用法: sky mcp add <name> -- <command> [args...]\n"); process.exit(1); }
+      cfg.command = rest[0];
+      if (rest.length > 1) cfg.args = rest.slice(1);
+    }
+    if (opts.scope === "project") {
+      const file = saveProjectMcpServer(cfg);
+      process.stdout.write(chalk.green(`✓ ${name}`) + chalk.dim(` → ${file}（随 git 共享）\n`));
+    } else {
+      savePersistedServer(cfg);
+      process.stdout.write(chalk.green(`✓ ${name}`) + chalk.dim(" → ~/.skyloom/mcp_servers.json\n"));
+    }
+  });
+mcpCmd.command("list").action(() => {
+  const { loadPersistedServers, loadProjectMcpJson } = require("../core/mcp");
+  const cfg = loadConfig();
+  const rows: Array<[string, string, string]> = [];
+  for (const s of ((cfg as any).mcp?.servers || [])) rows.push([s.name, "config.yaml", s.url || s.command || ""]);
+  for (const s of loadPersistedServers()) rows.push([s.name, "local", s.url || s.command || ""]);
+  for (const s of loadProjectMcpJson()) rows.push([s.name, "project (.mcp.json)", s.url || s.command || ""]);
+  if (!rows.length) { process.stdout.write(chalk.dim("（没有配置 MCP 服务器 — sky mcp add 添加）\n")); return; }
+  for (const [n, scope, target] of rows) process.stdout.write(`  ${chalk.bold(n.padEnd(16))} ${chalk.dim(scope.padEnd(20))} ${chalk.dim(target)}\n`);
+});
+mcpCmd.command("remove").argument("<name>", "服务器名")
+  .option("--scope <s>", "local|project", "local")
+  .action((name: string, opts: { scope: string }) => {
+    const { removePersistedServer, removeProjectMcpServer } = require("../core/mcp");
+    const ok = opts.scope === "project" ? removeProjectMcpServer(name) : (removePersistedServer(name), true);
+    process.stdout.write(ok ? chalk.green(`✓ 已移除 ${name}\n`) : chalk.yellow(`未找到 ${name}（scope: ${opts.scope}）\n`));
+  });
 program.command("config").action(() => { const c = loadConfig(); process.stdout.write(chalk.cyan("\nConfig: ") + USER_CONFIG_DIR + "\n"); for (const [n, a] of Object.entries(c.agents || {})) process.stdout.write(`  ${chalk.bold(n)}: ${(a as any).model || "default"}\n`); });
 program.command("init").action(() => { if (!fs.existsSync(USER_CONFIG_DIR)) fs.mkdirSync(USER_CONFIG_DIR, { recursive: true }); process.stdout.write(chalk.green("✓ ") + USER_CONFIG_DIR + "\n"); });
 program.command("apikey").description("Manage API keys (persisted to ~/.skyloom/config.yaml)")
@@ -686,17 +735,24 @@ async function main() {
   // ── headless: sky -p "prompt" [--agent fog] [--json | --stream-json] ──
   const pIdx = args.findIndex((a) => a === "-p" || a === "--print");
   if (pIdx >= 0) {
-    const flags = new Set(args);
-    const agentIdx = args.findIndex((a) => a === "--agent");
-    const agentName = agentIdx >= 0 ? args[agentIdx + 1] : undefined;
-    const inline = args[pIdx + 1] && !args[pIdx + 1].startsWith("-") ? args[pIdx + 1] : "";
+    // collect positionals properly: flags (and --agent's value) are not the
+    // prompt, and the prompt may appear after flags
+    let agentName: string | undefined;
+    const positionals: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === "-p" || a === "--print" || a === "--json" || a === "--stream-json" || a === "--classic") continue;
+      if (a === "--agent") { agentName = args[++i]; continue; }
+      positionals.push(a);
+    }
+    const inline = positionals.join(" ");
     const piped = await readStdin();
     const prompt = [inline, piped].filter(Boolean).join("\n\n");
     if (!prompt) { process.stderr.write('Usage: sky -p "prompt" [--agent fog] [--json|--stream-json]\n'); process.exit(1); }
     await runHeadless(prompt, {
       agent: agentName,
-      json: flags.has("--json"),
-      streamJson: flags.has("--stream-json"),
+      json: args.includes("--json"),
+      streamJson: args.includes("--stream-json"),
     });
     return;
   }
