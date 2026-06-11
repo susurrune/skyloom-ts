@@ -313,13 +313,16 @@ export function loadConfig(): SkyloomConfig {
 export function saveUserConfig(config: SkyloomConfig): void {
   // Ensure user config directory exists
   if (!fs.existsSync(USER_CONFIG_DIR)) {
-    fs.mkdirSync(USER_CONFIG_DIR, { recursive: true });
+    fs.mkdirSync(USER_CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
 
   const userPath = path.join(USER_CONFIG_DIR, "config.yaml");
   const content = yaml.stringify(config);
 
-  fs.writeFileSync(userPath, content, "utf-8");
+  fs.writeFileSync(userPath, content, { encoding: "utf-8", mode: 0o600 });
+  // mode in writeFileSync only applies on creation; enforce on existing files
+  // too, since this config holds plaintext API keys.
+  try { fs.chmodSync(userPath, 0o600); } catch { /* best-effort (e.g. Windows) */ }
   log.info("Saved user configuration", { path: userPath });
 }
 

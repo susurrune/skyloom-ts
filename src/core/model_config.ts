@@ -44,8 +44,10 @@ function patchUserConfig(mutate: (cfg: any) => void, dir: string = USER_CONFIG_D
     try { cfg = yaml.parse(fs.readFileSync(file, 'utf-8')) || {}; } catch { cfg = {}; }
   }
   mutate(cfg);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(file, yaml.stringify(cfg), 'utf-8');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // config.yaml may hold plaintext API keys — keep it owner-only.
+  fs.writeFileSync(file, yaml.stringify(cfg), { encoding: 'utf-8', mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch { /* best-effort (e.g. Windows) */ }
 }
 
 /** Apply the same mutation to the in-memory runtime config (hot effect). */

@@ -251,12 +251,14 @@ function saveApiKey(provider: string, key: string): void {
   const path = require("path"); const fs = require("fs"); const yaml = require("yaml");
   const cfgPath = path.join(require("os").homedir(), ".skyloom", "config.yaml");
   const dir = path.dirname(cfgPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   let cfg: any = {};
   if (fs.existsSync(cfgPath)) { try { cfg = yaml.parse(fs.readFileSync(cfgPath, "utf-8")) || {}; } catch { } }
   if (!cfg.api_keys) cfg.api_keys = {};
   cfg.api_keys[provider] = key;
-  fs.writeFileSync(cfgPath, yaml.stringify(cfg), "utf-8");
+  // config.yaml holds plaintext API keys — keep it owner-only (0600).
+  fs.writeFileSync(cfgPath, yaml.stringify(cfg), { encoding: "utf-8", mode: 0o600 });
+  try { fs.chmodSync(cfgPath, 0o600); } catch { /* best-effort (e.g. Windows) */ }
 }
 
 /* ═══════════════════════════════════════
@@ -304,7 +306,8 @@ async function setupWizard(): Promise<{ provider: string; key: string; model: st
   const cfgPath = path.join(require("os").homedir(), ".skyloom", "config.yaml");
   let cfg: any = {}; if (fs.existsSync(cfgPath)) { try { cfg = yaml.parse(fs.readFileSync(cfgPath, "utf-8")) || {}; } catch { } }
   cfg.default_model = model; cfg.default_provider = prov.id;
-  fs.writeFileSync(cfgPath, yaml.stringify(cfg), "utf-8");
+  fs.writeFileSync(cfgPath, yaml.stringify(cfg), { encoding: "utf-8", mode: 0o600 });
+  try { fs.chmodSync(cfgPath, 0o600); } catch { /* best-effort (e.g. Windows) */ }
 
   rl.close();
   process.stdout.write(chalk.green(`\n  ✓ ${prov.name} · ${model} · 就绪!\n\n`));
