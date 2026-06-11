@@ -706,12 +706,13 @@ export class BaseAgent {
   }
 
   async close(): Promise<void> {
-    // Drain in-flight background work BEFORE closing memory
-    const pending = [...this._pendingExtracts];
+    // Drain ALL in-flight background work BEFORE closing memory — both fact
+    // extraction and background request handlers (delegate_to / agent requests).
+    // Missing _bgTasks meant a request handler could still be writing to memory
+    // as the DB closed, losing work or erroring on a closed database.
+    const pending = [...this._pendingExtracts, ...this._bgTasks];
     if (pending.length > 0) {
-      try {
-        await Promise.all(pending);
-      } catch { /* ignore */ }
+      await Promise.allSettled(pending);
     }
     await this.memory.close();
     this.bus.unsubscribe(this.name);

@@ -72,8 +72,35 @@ const PIGMENTS: Record<string, {
 export async function startWebServer(port: number = 3000): Promise<void> {
   const ctx = createSystemContext();
 
+  // Bind to loopback by default: the chat API drives the agent (and its tools)
+  // with no authentication, so it must not be exposed to the network unless the
+  // operator explicitly opts in via SKYLOOM_WEB_HOST=0.0.0.0.
+  const host = process.env.SKYLOOM_WEB_HOST || "127.0.0.1";
+  const loopbackOnly = host === "127.0.0.1" || host === "localhost" || host === "::1";
+
+  // Reject cross-origin / rebound Host headers when bound to loopback. Without
+  // this, a malicious web page could POST to http://localhost:<port>/api/chat
+  // from the victim's browser and execute agent tools (CORS does not block the
+  // side effect, only the response read).
+  const hostAllowed = (h: string | undefined): boolean => {
+    if (!loopbackOnly) return true;
+    const name = (h || "").split(":")[0].toLowerCase();
+    return name === "localhost" || name === "127.0.0.1" || name === "[::1]" || name === "::1" || name === "";
+  };
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    if (!hostAllowed(req.headers.host)) {
+      res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Forbidden host" }));
+      return;
+    }
+    // Same-origin only when loopback-bound (no wildcard CORS that would invite
+    // cross-site requests to a credential-less, tool-executing endpoint).
+    if (loopbackOnly) {
+      res.setHeader("Access-Control-Allow-Origin", `http://${req.headers.host || `localhost:${port}`}`);
+      res.setHeader("Vary", "Origin");
+    } else {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+    }
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
@@ -87,7 +114,13 @@ export async function startWebServer(port: number = 3000): Promise<void> {
     } catch (e) { res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: String(e) })); }
   });
 
-  return new Promise((resolve) => { server.listen(port, () => { console.log(`\n  水墨气象台  ·  Skyloom\n  http://localhost:${port}\n`); resolve(); }); });
+  return new Promise((resolve) => {
+    server.listen(port, host, () => {
+      const shown = loopbackOnly ? "localhost" : host;
+      console.log(`\n  水墨气象台  ·  Skyloom\n  http://${shown}:${port}${loopbackOnly ? "  (仅本机 · 设 SKYLOOM_WEB_HOST=0.0.0.0 可对外开放)" : "  ⚠ 已对外开放 · 无鉴权"}\n`);
+      resolve();
+    });
+  });
 }
 
 async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: ReturnType<typeof createSystemContext>) {
