@@ -157,3 +157,30 @@ describe("agent · interrupt (Ctrl-C)", () => {
     expect(agent.memory.getMessages().some((m) => m.role === "assistant" && String(m.content).includes("部分内容"))).toBe(true);
   });
 });
+
+describe("agent · run tracing", () => {
+  it("produces a turn → llm → tool span tree with token accounting", async () => {
+    const agent = makeAgent(
+      [{ content: "looking", toolCalls: [{ name: "ping", args: {} }] }, { content: "done" }],
+      [{ name: "ping", handler: async () => "pong" }],
+    );
+    await collect(agent.chatStream("hi"));
+    const trace = agent.getLastTrace();
+    expect(trace).toBeTruthy();
+    const kinds = trace!.spans.map((s: any) => s.kind);
+    expect(kinds).toContain("turn");
+    expect(kinds).toContain("llm");
+    expect(kinds).toContain("tool");
+
+    const toolSpan = trace!.spans.find((s: any) => s.kind === "tool" && s.name === "ping")!;
+    expect(toolSpan.status).toBe("ok");
+    expect(toolSpan.endMs).not.toBeNull();
+
+    const llmSpan = trace!.spans.find((s: any) => s.kind === "llm")!;
+    expect(llmSpan.attrs.promptTokens).toBe(1);
+    expect(llmSpan.attrs.completionTokens).toBe(1);
+
+    // every span is closed once the turn ends
+    expect(trace!.spans.every((s: any) => s.endMs !== null)).toBe(true);
+  });
+});

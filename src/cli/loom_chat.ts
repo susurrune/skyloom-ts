@@ -392,6 +392,22 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         ui.blank();
         continue;
       }
+      if (cmdL === "/trace") {
+        const trace = agent.getLastTrace?.();
+        if (!trace || !trace.spans?.length) { dim("本会话还没有可追踪的运行（先对话一次）"); continue; }
+        const { renderTrace } = require("../core/trace");
+        const t = agentTheme(agent.name);
+        ui.blank();
+        say(" " + chalk.bold.hex(t.hex)(`${t.symbol} 运行追踪`) + chalk.dim(` · ${trace.label}`));
+        const rendered = renderTrace(trace, {
+          dim: (s: string) => chalk.dim(s),
+          ok: (s: string) => chalk.hex(OK_HEX)(s),
+          err: (s: string) => chalk.hex(ERR_HEX)(s),
+        });
+        for (const ln of rendered.split("\n")) ui.line(" " + ln);
+        ui.blank();
+        continue;
+      }
       if (cmdL === "/verify") {
         const vc = resolveVerifyConfig((ctx as any).config);
         if (!vc.commands.length) { dim("未配置验证命令 — 在 config.yaml 的 verify.commands 或 SKY.md 的 ## Verify 小节声明"); continue; }

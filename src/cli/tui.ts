@@ -40,6 +40,7 @@ export const SLASH_COMMANDS: [string, string][] = [
   ["/context", "上下文占用明细"],
   ["/rewind", "回退本轮文件改动"],
   ["/tools", "工具调用统计"],
+  ["/trace", "本轮运行追踪（span 树）"],
   ["/model", "查看/切换模型（独立/统一）"],
   ["/cost", "费用统计"],
   ["/status", "状态总览"],

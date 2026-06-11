@@ -26,6 +26,7 @@ import { selectRelevantTools } from './tool_router';
 import { getModelInfo } from './catalog';
 import { estimateTokens } from './estimate';
 import { LoopGuard } from './agent/guard';
+import { Tracer, type Trace } from './trace';
 
 const log = getLogger('agent');
 
@@ -42,6 +43,12 @@ const TOOL_RESULT_LIMIT = 12000;
  * Clamp an oversized tool result before it enters the context window:
  * keep head + tail, tell the model what was cut and how to fetch precisely.
  */
+/** A short, single-line preview of tool arguments for trace spans. */
+function argsPreview(args: Record<string, any> | null | undefined): string {
+  if (!args) return '';
+  try { return JSON.stringify(args).replace(/\s+/g, ' ').slice(0, 80); } catch { return ''; }
+}
+
 export function clampToolResult(s: string, limit: number = TOOL_RESULT_LIMIT): string {
   if (s.length <= limit) return s;
   const head = s.slice(0, Math.floor(limit * 0.72));
@@ -74,6 +81,8 @@ export class BaseAgent {
   protected skillRegistry: SkillRegistry;
   public state: AgentState = AgentState.IDLE;
   public memory: Memory;
+  /** Per-agent run tracer: span tree of the current/recent turns (see /trace). */
+  public tracer: Tracer = new Tracer();
   protected _tools: ToolDefinition[] = [];
   protected _skills: Skill[] = [];
   protected _activeSkills: Set<string> = new Set();
@@ -653,6 +662,8 @@ export class BaseAgent {
           } catch { /* hook machinery must never break tool execution */ }
         }
 
+        // Leaf span: tools run concurrently, so they must not nest under each other.
+        const span = this.tracer.startSpan(p.toolName, 'tool', { args: argsPreview(p.toolArgs) }, { leaf: true });
         try {
           const toolResult = await this.toolRegistry.execute(p.toolName, p.toolArgs || {});
           const resultStr = toolResult.result || toolResult.error || '(no output)';
@@ -663,8 +674,10 @@ export class BaseAgent {
               runPostToolHooks(hooks, p.toolName, p.toolArgs || {}, this.name);
             } catch { /* best-effort */ }
           }
+          span.end(toolResult.success ? 'ok' : 'error', toolResult.success ? undefined : { error: (toolResult.error || resultStr).slice(0, 120) });
           return { idx, result: { tc: p.tc, result: resultStr, success: toolResult.success, toolName: p.toolName } };
         } catch (e) {
+          span.end('error', { error: String(e).slice(0, 120) });
           return { idx, result: { tc: p.tc, result: `Tool '${p.toolName}' execution failed: ${e}`, success: false, toolName: p.toolName } };
         }
       });
@@ -817,6 +830,7 @@ export class BaseAgent {
     const activatedNow = this.autoActivateSkills(message);
     const self = this;
 
+    this.tracer.startTrace(message.replace(/\s+/g, ' ').slice(0, 80), this.name);
     try {
       for await (const ev of self.chatStreamImpl(message, activatedNow.length > 0 ? activatedNow : undefined, signal)) {
         yield ev;
@@ -827,8 +841,13 @@ export class BaseAgent {
         this.popLastUserMessage();
       }
       throw err;
+    } finally {
+      this.tracer.endTrace();
     }
   }
+
+  /** The most recently completed (or in-progress) run trace. */
+  getLastTrace(): Trace | null { return this.tracer.last(); }
 
   protected async *chatStreamImpl(
     message: string,
@@ -926,6 +945,7 @@ export class BaseAgent {
         let streamUsage: any = null;
         let roundContent = '';
 
+        const llmSpan = this.tracer.startSpan('chat', 'llm', { model: this.resolveModelId(), round: roundCount });
         for await (const event of this.llm.streamWithTools(
           messages,
           this.name,
@@ -941,6 +961,7 @@ export class BaseAgent {
           } else if (event.type === 'tool_call' && event.toolCall) {
             toolCallsReceived.push(event.toolCall);
           } else if (event.type === 'error') {
+            llmSpan.end('error', { error: String(event.text).slice(0, 120) });
             yield { type: 'content', text: `\n[Error: ${event.text}]` };
             if (!assistantStored) this.popLastUserMessage();
             await this.setState(AgentState.IDLE);
@@ -952,6 +973,12 @@ export class BaseAgent {
             streamingReasoning = event.reasoningContent;
           }
         }
+        llmSpan.end('ok', streamUsage ? {
+          promptTokens: streamUsage.promptTokens ?? streamUsage.prompt_tokens,
+          completionTokens: streamUsage.completionTokens ?? streamUsage.completion_tokens,
+          cost: streamUsage.cost,
+          toolCalls: toolCallsReceived.length,
+        } : { toolCalls: toolCallsReceived.length });
 
         if (toolCallsReceived.length === 0) {
           let finalContent = roundContent;

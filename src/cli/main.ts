@@ -480,6 +480,18 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
       process.stdout.write("\n");
       continue;
     }
+    if (cmdL === "/trace") {
+      const trace = (currentAgent as any).getLastTrace?.();
+      if (!trace || !trace.spans?.length) { process.stdout.write(chalk.dim("  本会话还没有可追踪的运行\n")); continue; }
+      const { renderTrace } = require("../core/trace");
+      process.stdout.write(chalk.bold(`\n  运行追踪 · ${trace.label}\n`));
+      process.stdout.write("  " + renderTrace(trace, {
+        dim: (s: string) => chalk.dim(s),
+        ok: (s: string) => chalk.green(s),
+        err: (s: string) => chalk.red(s),
+      }).split("\n").join("\n  ") + "\n\n");
+      continue;
+    }
     if (cmdL === "/verify") {
       const { resolveVerifyConfig, runVerify } = require("../core/verify");
       const vc = resolveVerifyConfig((ctx as any).config);
