@@ -100,8 +100,13 @@ export class Tracer {
     return this.startSpan(label || 'turn', 'turn', { agent });
   }
 
-  /** Open a child span under the current span (or the root). */
-  startSpan(name: string, kind: SpanKind, attrs: Record<string, any> = {}): SpanHandle {
+  /**
+   * Open a child span under the current span (or the root).
+   * `leaf: true` attaches the span to the current parent but does NOT push it
+   * onto the nesting stack — use it for work that runs concurrently (e.g. tools
+   * executed in parallel), so siblings don't accidentally nest under each other.
+   */
+  startSpan(name: string, kind: SpanKind, attrs: Record<string, any> = {}, opts?: { leaf?: boolean }): SpanHandle {
     if (!this.enabled || !this.active) return NOOP_SPAN;
     const span: Span = {
       id: genId('s'),
@@ -113,7 +118,7 @@ export class Tracer {
       attrs: { ...attrs },
     };
     this.active.spans.push(span);
-    this.stack.push(span.id);
+    if (!opts?.leaf) this.stack.push(span.id);
     return new SpanHandle(this, span);
   }
 
