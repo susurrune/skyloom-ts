@@ -5,6 +5,9 @@ llm:
   max_retries: 2
   temperature: 0.7
   max_tokens: 4096
+  # Max tool calls a single LLM round runs in parallel. Bounds socket/FD/CPU
+  # use when the model requests many side-effecting tools at once. 1 = serial.
+  tool_concurrency: 4
 
 # Per-agent models inherit `llm.default_model` (or the user's wizard-chosen
 # top-level default_model) unless an agent sets its own `model:` here.

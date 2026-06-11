@@ -156,6 +156,31 @@ describe("agent · interrupt (Ctrl-C)", () => {
     // partial assistant content is in memory
     expect(agent.memory.getMessages().some((m) => m.role === "assistant" && String(m.content).includes("部分内容"))).toBe(true);
   });
+
+  it("skips queued tools in a round once the signal aborts (cooperative cancel)", async () => {
+    const controller = new AbortController();
+    // One round requests three tools. Serial execution (tool_concurrency: 1) +
+    // the first tool aborting → tools 2 and 3 must be skipped, not run.
+    let ran = 0;
+    const turns: Turn[] = [
+      { content: "批量执行…", toolCalls: [{ name: "step", args: { n: 1 } }, { name: "step", args: { n: 2 } }, { name: "step", args: { n: 3 } }] },
+      { content: "不应出现的第二轮" },
+    ];
+    const reg = new ToolRegistry();
+    reg.register({ name: "step", description: "step", cacheable: false, handler: async (a: any) => { ran++; if (a.n === 1) controller.abort(); return `did ${a.n}`; } });
+    const config = { agents: { fog: {} }, llm: { tool_concurrency: 1 }, memory: { shortTermLimit: 200, dbPath: "/tmp/sky-test" } };
+    const agent = new FogAgent(config as any, new MockLLM(turns) as any, new MessageBus(), reg, new SkillRegistry());
+
+    const evs = await collect(agent.chatStream("go", controller.signal));
+
+    // Only the first tool actually executed.
+    expect(ran).toBe(1);
+    // The other two were reported as cancelled, not run.
+    const cancelled = evs.filter((e) => e.type === "tool_done" && String(e.result).includes("[cancelled]"));
+    expect(cancelled.length).toBe(2);
+    // And the turn stopped instead of running round 2.
+    expect(evs.some((e) => e.type === "interrupted")).toBe(true);
+  });
 });
 
 describe("agent · run tracing", () => {
