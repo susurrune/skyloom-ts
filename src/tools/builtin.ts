@@ -3,6 +3,7 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { lookup } from 'dns/promises';
 import type { ToolRegistry } from '../core/tool';
@@ -66,6 +67,27 @@ async function assertFetchAllowed(rawUrl: string): Promise<void> {
   }
 }
 
+/* ── Optional workspace fence for file tools ──────────────────────────────
+   Off by default (the agent is a Claude-Code-style assistant that legitimately
+   works across a repo). Set SKYLOOM_WORKSPACE_FENCE=1 to confine read/write/
+   edit/delete/list/search to a root directory (SKYLOOM_WORKSPACE_ROOT, or the
+   process cwd), blocking traversal to ~/.ssh, /etc, etc.
+   ────────────────────────────────────────────────────────────────────────── */
+export function fenceRoot(): string | null {
+  if (process.env.SKYLOOM_WORKSPACE_FENCE !== '1') return null;
+  const raw = process.env.SKYLOOM_WORKSPACE_ROOT;
+  return raw ? path.resolve(raw.replace(/^~(?=$|\/|\\)/, os.homedir())) : process.cwd();
+}
+
+/** Returns an error string if `resolvedPath` is outside the fence, else null. */
+export function fenceCheck(resolvedPath: string): string | null {
+  const root = fenceRoot();
+  if (!root) return null;
+  const rel = path.relative(root, resolvedPath);
+  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return null;
+  return `Error: 路径越界 — 工作区围栏已启用 (SKYLOOM_WORKSPACE_FENCE=1)，'${resolvedPath}' 在根目录 '${root}' 之外。`;
+}
+
 /**
  * Register all built-in tools into the given registry.
  */
@@ -84,6 +106,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
       if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
       try {
         const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
@@ -111,6 +134,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
       try {
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         fs.writeFileSync(filePath, params.content as string, 'utf-8');
@@ -131,6 +155,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
       if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
       try {
         let content = fs.readFileSync(filePath, 'utf-8');
@@ -156,6 +181,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
       if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
       try {
         fs.unlinkSync(filePath);
@@ -174,6 +200,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const dirPath = path.resolve(params.path as string);
+      const fenced = fenceCheck(dirPath); if (fenced) return fenced;
       if (!fs.existsSync(dirPath)) return `Error: Directory not found: ${dirPath}`;
       try {
         const entries = fs.readdirSync(dirPath);
@@ -196,6 +223,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const dir = params.directory ? path.resolve(params.directory as string) : process.cwd();
+      const fenced = fenceCheck(dir); if (fenced) return fenced;
       const pattern = params.pattern as string;
       try {
         const { globSync } = require('glob');
@@ -406,6 +434,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     handler: async (params) => {
       const { execFileSync } = require('child_process');
       const searchDir = params.path ? path.resolve(params.path as string) : process.cwd();
+      const fenced = fenceCheck(searchDir); if (fenced) return fenced;
       const pat = String(params.pattern || '');
       // No shell: pattern and directory are passed as argv entries, and `--`
       // stops a leading `-` in the pattern from being read as a flag. This is a
@@ -439,6 +468,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     handler: async (params) => {
       const { execFileSync } = require('child_process');
       const treeDir = params.directory ? path.resolve(params.directory as string) : process.cwd();
+      const fenced = fenceCheck(treeDir); if (fenced) return fenced;
       const depth = Math.max(1, Math.min(20, Math.floor(Number(params.depth) || 3)));
       try {
         // No shell: directory passed as an argv entry, depth clamped to an int.
