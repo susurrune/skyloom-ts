@@ -304,4 +304,34 @@ describe("mouse wheel scrolling", () => {
     await p;
     expect(ui.scrollOff).toBe(0);
   });
+
+  it("wheel navigates the slash palette while it is open", () => {
+    const ui = fillUI();
+    for (const ch of "/") ui.onKey(ch, { name: ch });
+    expect(ui.paletteMatches().length).toBeGreaterThan(1);
+    expect(ui.paletteIdx).toBe(0);
+    wheel(ui, 65); // wheel down → next command
+    expect(ui.paletteIdx).toBe(1);
+    wheel(ui, 64); // wheel up → previous command
+    expect(ui.paletteIdx).toBe(0);
+    expect(ui.scrollOff).toBe(0); // palette nav must not scroll the viewport
+  });
+});
+
+describe("input cursor — Home/End", () => {
+  function makeInput() {
+    const out = { columns: 80, rows: 24, isTTY: false, write: (_: string) => true };
+    const ui = new LoomUI({ out, inp: null, headless: true }) as any;
+    ui.start();
+    for (const ch of "hello") ui.onKey(ch, { name: ch });
+    return ui;
+  }
+  it("Home jumps to the start, End to the end", () => {
+    const ui = makeInput();
+    expect(ui.cursor).toBe(5);
+    ui.onKey("", { name: "home" });
+    expect(ui.cursor).toBe(0);
+    ui.onKey("", { name: "end" });
+    expect(ui.cursor).toBe(5);
+  });
 });

@@ -576,8 +576,19 @@ export class LoomUI {
     if (!m) return;
     const code = parseInt(m[1], 10);
     if ((code & 64) === 0) return; // not a wheel event (clicks/drags ignored)
-    if (code & 1) this.scrollOff -= WHEEL_STEP; // wheel down → toward tail
-    else this.scrollOff += WHEEL_STEP;          // wheel up → into history
+    const down = (code & 1) !== 0; // odd button code = wheel down
+    // When the slash palette is open, the wheel moves the selection; otherwise
+    // it scrolls the conversation viewport.
+    if (this.paletteMatches().length > 0 && this.inputGlyphs[0] === "/") {
+      const n = this.paletteMatches().length;
+      this.paletteIdx = down
+        ? Math.min(n - 1, this.paletteIdx + 1)
+        : Math.max(0, this.paletteIdx - 1);
+      this.paint();
+      return;
+    }
+    if (down) this.scrollOff -= WHEEL_STEP; // wheel down → toward tail
+    else this.scrollOff += WHEEL_STEP;      // wheel up → into history
     this.clampScroll();
     this.viewportCache = null;
     this.paint();
@@ -690,6 +701,8 @@ export class LoomUI {
     if (name === "delete") { if (this.cursor < this.inputGlyphs.length) this.inputGlyphs.splice(this.cursor, 1); this.paint(); return; }
     if (name === "left") { if (this.cursor > 0) this.cursor--; this.paint(); return; }
     if (name === "right") { if (this.cursor < this.inputGlyphs.length) this.cursor++; this.paint(); return; }
+    if (name === "home") { this.cursor = 0; this.paint(); return; }
+    if (name === "end") { this.cursor = this.inputGlyphs.length; this.paint(); return; }
     if (key?.ctrl && name === "a") { this.cursor = 0; this.paint(); return; }
     if (key?.ctrl && name === "e") { this.cursor = this.inputGlyphs.length; this.paint(); return; }
     if (key?.ctrl && name === "u") { this.inputGlyphs.splice(0, this.cursor); this.cursor = 0; this.paint(); return; }
