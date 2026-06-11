@@ -246,3 +246,92 @@ describe("palette ↑↓ navigation + Enter execution", () => {
     expect(ui.inputGlyphs.length).toBe(0);
   });
 });
+
+describe("mouse wheel scrolling", () => {
+  // Replay an SGR mouse sequence the way Node's keypress parser fragments it:
+  // ESC[< as one event, then every remaining char separately.
+  function wheel(ui: any, code: number) {
+    ui.onKey("", { sequence: "\x1b[<" });
+    for (const ch of `${code};10;5M`) ui.onKey(ch, { name: ch });
+  }
+  // Fill the viewport past one screen so there is something to scroll through.
+  function fillUI() {
+    const out = { columns: 80, rows: 24, isTTY: false, write: (_: string) => true };
+    const ui = new LoomUI({ out, inp: null, headless: true }) as any;
+    ui.start();
+    for (let i = 0; i < 60; i++) ui.line(`line ${i}`);
+    return ui;
+  }
+
+  it("wheel up scrolls into history, wheel down returns toward the tail", () => {
+    const ui = fillUI();
+    expect(ui.scrollOff).toBe(0);
+    wheel(ui, 64); // wheel up
+    expect(ui.scrollOff).toBeGreaterThan(0);
+    const up = ui.scrollOff;
+    wheel(ui, 65); // wheel down
+    expect(ui.scrollOff).toBeLessThan(up);
+  });
+
+  it("mouse fragments never leak into the input line", () => {
+    const ui = fillUI();
+    wheel(ui, 64);
+    wheel(ui, 65);
+    // A click (button 0) must also be swallowed whole, not typed.
+    ui.onKey("", { sequence: "\x1b[<" });
+    for (const ch of "0;3;4M") ui.onKey(ch, { name: ch });
+    expect(ui.inputGlyphs.join("")).toBe("");
+  });
+
+  it("does not yank a scrolled-up reader to the tail on new content", () => {
+    const ui = fillUI();
+    wheel(ui, 64);
+    wheel(ui, 64);
+    const before = ui.scrollOff;
+    expect(before).toBeGreaterThan(0);
+    ui.line("a fresh tool event arrives");
+    ui.blank();
+    expect(ui.scrollOff).toBe(before); // position preserved
+  });
+
+  it("submitting a turn snaps back to the tail", async () => {
+    const ui = fillUI();
+    wheel(ui, 64);
+    expect(ui.scrollOff).toBeGreaterThan(0);
+    const p = ui.readInput();
+    for (const ch of "hi") ui.onKey(ch, { name: ch });
+    ui.onKey("", { name: "return" });
+    await p;
+    expect(ui.scrollOff).toBe(0);
+  });
+
+  it("wheel navigates the slash palette while it is open", () => {
+    const ui = fillUI();
+    for (const ch of "/") ui.onKey(ch, { name: ch });
+    expect(ui.paletteMatches().length).toBeGreaterThan(1);
+    expect(ui.paletteIdx).toBe(0);
+    wheel(ui, 65); // wheel down → next command
+    expect(ui.paletteIdx).toBe(1);
+    wheel(ui, 64); // wheel up → previous command
+    expect(ui.paletteIdx).toBe(0);
+    expect(ui.scrollOff).toBe(0); // palette nav must not scroll the viewport
+  });
+});
+
+describe("input cursor — Home/End", () => {
+  function makeInput() {
+    const out = { columns: 80, rows: 24, isTTY: false, write: (_: string) => true };
+    const ui = new LoomUI({ out, inp: null, headless: true }) as any;
+    ui.start();
+    for (const ch of "hello") ui.onKey(ch, { name: ch });
+    return ui;
+  }
+  it("Home jumps to the start, End to the end", () => {
+    const ui = makeInput();
+    expect(ui.cursor).toBe(5);
+    ui.onKey("", { name: "home" });
+    expect(ui.cursor).toBe(0);
+    ui.onKey("", { name: "end" });
+    expect(ui.cursor).toBe(5);
+  });
+});

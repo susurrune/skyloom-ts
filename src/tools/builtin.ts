@@ -3,12 +3,90 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import { lookup } from 'dns/promises';
 import type { ToolRegistry } from '../core/tool';
 import { getLogger } from '../core/logger';
 import { registerComputerTools } from './computer';
 
 const log = getLogger('builtin-tools');
+
+/* ── SSRF guard for outbound fetches ──────────────────────────────────────
+   http_get is auto-approved (DangerLevel.LOW), so without this an agent or
+   prompt-injected content could pivot to internal services / cloud metadata
+   (169.254.169.254). We block private, loopback and link-local targets — both
+   when the URL is an IP literal and after DNS resolution. Operators who need to
+   reach internal hosts set SKYLOOM_ALLOW_PRIVATE_FETCH=1.
+   ────────────────────────────────────────────────────────────────────────── */
+function isPrivateIPv4(ip: string): boolean {
+  const p = ip.split('.').map(Number);
+  if (p.length !== 4 || p.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
+  const [a, b] = p;
+  if (a === 0 || a === 127) return true;                 // this-host / loopback
+  if (a === 10) return true;                             // private
+  if (a === 172 && b >= 16 && b <= 31) return true;      // private
+  if (a === 192 && b === 168) return true;               // private
+  if (a === 169 && b === 254) return true;               // link-local + cloud metadata
+  if (a === 100 && b >= 64 && b <= 127) return true;     // CGNAT
+  return false;
+}
+
+function isPrivateIp(ip: string): boolean {
+  const v = ip.toLowerCase();
+  if (v === '::1' || v === '::') return true;
+  if (v.startsWith('::ffff:')) {                         // IPv4-mapped IPv6
+    const mapped = v.slice(7);
+    if (mapped.includes('.')) return isPrivateIPv4(mapped);
+  }
+  if (/^f[cd]/.test(v)) return true;                     // fc00::/7 unique-local
+  if (/^fe[89ab]/.test(v)) return true;                  // fe80::/10 link-local
+  if (v.includes('.') && !v.includes(':')) return isPrivateIPv4(v);
+  return false;
+}
+
+export { isPrivateIp, assertFetchAllowed }; // exported for tests
+
+async function assertFetchAllowed(rawUrl: string): Promise<void> {
+  let u: URL;
+  try { u = new URL(rawUrl); } catch { throw new Error(`invalid URL: ${rawUrl}`); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`blocked URL scheme '${u.protocol}' — only http/https are allowed`);
+  }
+  if (process.env.SKYLOOM_ALLOW_PRIVATE_FETCH === '1') return;
+  const host = u.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  if (isPrivateIp(host)) {
+    throw new Error(`blocked request to private/loopback address ${host} (set SKYLOOM_ALLOW_PRIVATE_FETCH=1 to allow)`);
+  }
+  let addrs: Array<{ address: string }> = [];
+  try { addrs = await lookup(host, { all: true }); } catch { return; /* let fetch surface DNS errors */ }
+  for (const a of addrs) {
+    if (isPrivateIp(a.address)) {
+      throw new Error(`blocked request: ${host} resolves to private address ${a.address} (set SKYLOOM_ALLOW_PRIVATE_FETCH=1 to allow)`);
+    }
+  }
+}
+
+/* ── Optional workspace fence for file tools ──────────────────────────────
+   Off by default (the agent is a Claude-Code-style assistant that legitimately
+   works across a repo). Set SKYLOOM_WORKSPACE_FENCE=1 to confine read/write/
+   edit/delete/list/search to a root directory (SKYLOOM_WORKSPACE_ROOT, or the
+   process cwd), blocking traversal to ~/.ssh, /etc, etc.
+   ────────────────────────────────────────────────────────────────────────── */
+export function fenceRoot(): string | null {
+  if (process.env.SKYLOOM_WORKSPACE_FENCE !== '1') return null;
+  const raw = process.env.SKYLOOM_WORKSPACE_ROOT;
+  return raw ? path.resolve(raw.replace(/^~(?=$|\/|\\)/, os.homedir())) : process.cwd();
+}
+
+/** Returns an error string if `resolvedPath` is outside the fence, else null. */
+export function fenceCheck(resolvedPath: string): string | null {
+  const root = fenceRoot();
+  if (!root) return null;
+  const rel = path.relative(root, resolvedPath);
+  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return null;
+  return `Error: 路径越界 — 工作区围栏已启用 (SKYLOOM_WORKSPACE_FENCE=1)，'${resolvedPath}' 在根目录 '${root}' 之外。`;
+}
 
 /**
  * Register all built-in tools into the given registry.
@@ -28,6 +106,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
       if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
       try {
         const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
@@ -55,6 +134,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
       try {
         fs.mkdirSync(path.dirname(filePath), { recursive: true });
         fs.writeFileSync(filePath, params.content as string, 'utf-8');
@@ -75,6 +155,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
       if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
       try {
         let content = fs.readFileSync(filePath, 'utf-8');
@@ -100,6 +181,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
       if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
       try {
         fs.unlinkSync(filePath);
@@ -118,6 +200,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const dirPath = path.resolve(params.path as string);
+      const fenced = fenceCheck(dirPath); if (fenced) return fenced;
       if (!fs.existsSync(dirPath)) return `Error: Directory not found: ${dirPath}`;
       try {
         const entries = fs.readdirSync(dirPath);
@@ -140,6 +223,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       const dir = params.directory ? path.resolve(params.directory as string) : process.cwd();
+      const fenced = fenceCheck(dir); if (fenced) return fenced;
       const pattern = params.pattern as string;
       try {
         const { globSync } = require('glob');
@@ -183,11 +267,12 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     ],
     handler: async (params) => {
       try {
+        await assertFetchAllowed(params.url as string);
         const response = await fetch(params.url as string);
         const text = await response.text();
         return `Status: ${response.status}\n\n${text.slice(0, 10000)}${text.length > 10000 ? '\n...[truncated]' : ''}`;
       } catch (e) {
-        return `Error fetching URL: ${e}`;
+        return `Error fetching URL: ${e instanceof Error ? e.message : e}`;
       }
     },
   });
@@ -306,10 +391,10 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'max_count', type: 'number', description: 'Number of commits to show (default: 10)', required: false },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       try {
-        const n = (params.max_count as number) || 10;
-        return execSync(`git log --oneline -${n}`, { encoding: 'utf-8' });
+        const n = Math.max(1, Math.min(1000, Math.floor(Number(params.max_count) || 10)));
+        return execFileSync('git', ['log', '--oneline', `-${n}`], { encoding: 'utf-8' });
       } catch (e: any) {
         return `Error: ${e.message || e}`;
       }
@@ -323,10 +408,12 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'message', type: 'string', description: 'Commit message', required: true },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       try {
-        const msg = params.message as string;
-        execSync(`git commit -m "${msg.replace(/"/g, '\\"')}"`, { encoding: 'utf-8' });
+        const msg = String(params.message ?? '');
+        // execFileSync passes the message as a single argv entry — no shell, so
+        // backticks / $() / ; in the message cannot be interpreted.
+        execFileSync('git', ['commit', '-m', msg], { encoding: 'utf-8' });
         return 'Commit created successfully.';
       } catch (e: any) {
         return `Error: ${e.message || e}`;
@@ -345,15 +432,29 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'path', type: 'string', description: 'Directory to search in', required: false },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const searchDir = params.path ? path.resolve(params.path as string) : process.cwd();
+      const fenced = fenceCheck(searchDir); if (fenced) return fenced;
       const pat = String(params.pattern || '');
-      try {
-        const out = execSync('rg -n ' + pat + ' ' + searchDir + ' 2>/dev/null || grep -rn ' + pat + ' ' + searchDir + ' 2>/dev/null || echo "No matches found"', { encoding: 'utf-8', maxBuffer: 1024 * 1024 });
-        return out;
-      } catch {
-        return 'No matches found.';
+      // No shell: pattern and directory are passed as argv entries, and `--`
+      // stops a leading `-` in the pattern from being read as a flag. This is a
+      // non-dangerous (auto-approved) tool, so shell injection here would have
+      // bypassed the tool-approval gate entirely.
+      const variants: [string, string[]][] = [
+        ['rg', ['-n', '--', pat, searchDir]],
+        ['grep', ['-rn', '--', pat, searchDir]],
+      ];
+      for (const [bin, args] of variants) {
+        try {
+          const out = execFileSync(bin, args, { encoding: 'utf-8', maxBuffer: 1024 * 1024 });
+          return out || 'No matches found.';
+        } catch (e: any) {
+          // exit status 1 = ran successfully, zero matches; anything else
+          // (e.g. binary not installed) falls through to the next variant.
+          if (e?.status === 1) return 'No matches found.';
+        }
       }
+      return 'No matches found.';
     },
   });
 
@@ -365,11 +466,13 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'depth', type: 'number', description: 'Maximum depth (default: 3)', required: false },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const treeDir = params.directory ? path.resolve(params.directory as string) : process.cwd();
-      const depth = (params.depth as number) || 3;
+      const fenced = fenceCheck(treeDir); if (fenced) return fenced;
+      const depth = Math.max(1, Math.min(20, Math.floor(Number(params.depth) || 3)));
       try {
-        const out = execSync('tree "' + treeDir + '" -L ' + depth + ' --charset=utf-8 2>/dev/null || echo "tree unavailable"', { encoding: 'utf-8' });
+        // No shell: directory passed as an argv entry, depth clamped to an int.
+        const out = execFileSync('tree', [treeDir, '-L', String(depth), '--charset=utf-8'], { encoding: 'utf-8' });
         return out;
       } catch {
         return 'Directory tree unavailable.';
