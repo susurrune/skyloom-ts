@@ -82,6 +82,7 @@ const TOOL_DANGER_MAP: Record<string, DangerLevel> = {
   make_directory: DangerLevel.LOW,
   append_file: DangerLevel.LOW,
   replace_in_file: DangerLevel.LOW,
+  sqlite_query: DangerLevel.LOW,
   gzip_file: DangerLevel.LOW,
   gunzip_file: DangerLevel.LOW,
   clipboard_write: DangerLevel.LOW,

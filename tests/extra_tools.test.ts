@@ -24,7 +24,7 @@ describe("extra tools — registration & gating", () => {
       "dns_lookup", "port_check", "git_add", "git_branch", "git_checkout",
       "git_push", "git_pull", "env_get", "disk_usage", "clipboard_read", "clipboard_write",
       "which", "replace_in_file", "diff_files", "gzip_file", "gunzip_file",
-      "uuid", "random_string", "current_time",
+      "uuid", "random_string", "current_time", "sqlite_query",
     ]) expect(names, n).toContain(n);
   });
 
@@ -166,6 +166,40 @@ describe("extra tools — batch 2", () => {
     for (const id of ids) expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(await call("random_string", { length: 16, encoding: "hex" })).toHaveLength(16);
     expect(await call("current_time")).toMatch(/iso_utc: \d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+describe("extra tools — sqlite_query", () => {
+  let dir: string;
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "sky-sql-")); });
+  afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+  async function makeDb(file: string) {
+    const initSqlJs = require("sql.js");
+    const SQL = await (initSqlJs.default || initSqlJs)();
+    const db = new SQL.Database();
+    db.run("CREATE TABLE t (id INTEGER, name TEXT); INSERT INTO t VALUES (1,'a'),(2,'b');");
+    fs.writeFileSync(file, Buffer.from(db.export()));
+    db.close();
+  }
+
+  it("reads rows, blocks writes by default, allows writes with the flag", async () => {
+    const reg = new ToolRegistry();
+    registerExtraTools(reg);
+    const call = (p: Record<string, unknown>) => reg.get("sqlite_query")!.handler!(p);
+    const file = path.join(dir, "x.db");
+    await makeDb(file);
+
+    const sel = await call({ path: file, sql: "SELECT name FROM t ORDER BY id" });
+    expect(sel).toContain('"name": "a"');
+    expect(sel).toContain('"name": "b"');
+
+    const blocked = await call({ path: file, sql: "INSERT INTO t VALUES (3,'c')" });
+    expect(blocked).toMatch(/blocked/);
+
+    await call({ path: file, sql: "INSERT INTO t VALUES (3,'c')", allow_write: true });
+    const after = await call({ path: file, sql: "SELECT COUNT(*) AS n FROM t" });
+    expect(after).toContain('"n": 3'); // persisted to disk
   });
 });
 

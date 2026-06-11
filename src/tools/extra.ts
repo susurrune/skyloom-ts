@@ -611,5 +611,52 @@ export function registerExtraTools(registry: ToolRegistry): void {
     },
   });
 
+  /* ════════════════ Databases ════════════════ */
+
+  registry.register({
+    name: 'sqlite_query',
+    description: 'Run SQL against a SQLite database file. Read-only by default (SELECT/PRAGMA); set allow_write=true to permit INSERT/UPDATE/DELETE/DDL. Tip: list tables with "SELECT name FROM sqlite_master WHERE type=\'table\'".',
+    parameters: [
+      { name: 'path', type: 'string', description: 'Path to the .db / .sqlite file', required: true },
+      { name: 'sql', type: 'string', description: 'SQL statement to execute', required: true },
+      { name: 'allow_write', type: 'boolean', description: 'Permit data-modifying / DDL statements (default false)', required: false },
+    ],
+    handler: async (params) => {
+      const file = path.resolve(String(params.path || ''));
+      const fenced = fenceCheck(file); if (fenced) return fenced;
+      if (!fs.existsSync(file)) return `Error: database not found: ${file}`;
+      const sql = String(params.sql || '').trim();
+      if (!sql) return 'Error: sql is required';
+      const writeRe = /\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|REPLACE|TRUNCATE|ATTACH|DETACH|VACUUM)\b/i;
+      if (!params.allow_write && writeRe.test(sql)) {
+        return 'Error: write/DDL statement blocked — set allow_write=true to permit modifications';
+      }
+      try {
+        const SQL = await getSqlJs();
+        const db = new SQL.Database(fs.readFileSync(file));
+        try {
+          const res = db.exec(sql); // [{ columns, values }] for the statements run
+          if (params.allow_write) fs.writeFileSync(file, Buffer.from(db.export()));
+          if (!res.length) return params.allow_write ? 'OK (no rows returned)' : '(no rows)';
+          const { columns, values } = res[res.length - 1];
+          const rows = values.slice(0, 200).map((r: any[]) =>
+            Object.fromEntries(columns.map((c: string, i: number) => [c, r[i]])));
+          const more = values.length > 200 ? `\n…(${values.length - 200} more rows)` : '';
+          return clip(JSON.stringify(rows, null, 2)) + more;
+        } finally { db.close(); }
+      } catch (e: any) { return `Error: ${e.message || e}`; }
+    },
+  });
+
   log.info('extra_tools_registered');
+}
+
+/** Lazily-initialised sql.js runtime (wasm), shared across calls. */
+let _sqlJs: any = null;
+async function getSqlJs(): Promise<any> {
+  if (!_sqlJs) {
+    const mod = require('sql.js');
+    _sqlJs = await (mod.default || mod)();
+  }
+  return _sqlJs;
 }
