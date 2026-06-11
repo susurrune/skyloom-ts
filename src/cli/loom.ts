@@ -991,7 +991,9 @@ export class LoomUI {
         const counter = sel && matches.length > maxShow ? chalk.dim(` ${this.paletteIdx + 1}/${matches.length}`) : "";
         const lineStr = mark + (sel ? chalk.bold(color(cmd.padEnd(11))) : color(cmd.padEnd(11))) + chalk.dim(cutVisual(desc, this.viewW() - 22)) + counter;
         const row = baseRow + i;
-        frame[row] = B("│") + padAnsi(this.railLines(bodyH)[row - 1 - SKY_H] ?? "", RAIL_W) + B("│") + " " + padAnsi(lineStr, this.viewW()) + B("│");
+        // Reuse the rail already composed for the body rather than rebuilding it
+        // per overlay row (railLines runs wrapPlain etc. — wasteful at frame rate).
+        frame[row] = B("│") + padAnsi(rail[row - 1 - SKY_H] ?? "", RAIL_W) + B("│") + " " + padAnsi(lineStr, this.viewW()) + B("│");
       });
     }
 

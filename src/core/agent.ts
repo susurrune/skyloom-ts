@@ -24,6 +24,7 @@ import {
 } from './agent_helpers';
 import { selectRelevantTools } from './tool_router';
 import { getModelInfo } from './catalog';
+import { estimateTokens } from './estimate';
 import { LoopGuard } from './agent/guard';
 
 const log = getLogger('agent');
@@ -1156,8 +1157,10 @@ export class BaseAgent {
   contextDetail(): Record<string, any> {
     const byRole: Record<string, { tokens: number; count: number }> = {};
     for (const m of this.memory.shortTerm) {
-      const extra = (m as any).toolCalls ? JSON.stringify((m as any).toolCalls).length : 0;
-      const tokens = Math.ceil(((m.content || '').length + extra) / 4);
+      const extra = (m as any).toolCalls ? JSON.stringify((m as any).toolCalls) : '';
+      // CJK-aware estimate so the per-role breakdown matches the header total
+      // (getContextWindowUsage weights Chinese characters ~2 tokens each).
+      const tokens = estimateTokens((m.content || '') + extra);
       const slot = byRole[m.role] || (byRole[m.role] = { tokens: 0, count: 0 });
       slot.tokens += tokens;
       slot.count += 1;
@@ -1165,7 +1168,7 @@ export class BaseAgent {
     return {
       ...this.contextUsage(),
       byRole,
-      systemPromptTokens: Math.ceil(this._baseSystemPrompt.length / 4),
+      systemPromptTokens: estimateTokens(this._baseSystemPrompt),
       toolCount: this.activeToolNames().length,
       activeSkills: [...this._activeSkills],
     };

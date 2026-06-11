@@ -654,8 +654,15 @@ export class Memory {
     let cjk = 0;
 
     for (const m of this.shortTerm) {
-      totalChars += m.content.length;
-      for (const c of m.content) {
+      // Count the tool-call payload too: a single tool call with large JSON args
+      // occupies real context, and ignoring it made tool-heavy turns under-count
+      // and auto-compaction fire too late.
+      let text = m.content || '';
+      if (m.toolCalls) {
+        try { text += JSON.stringify(m.toolCalls); } catch { /* unserializable — skip */ }
+      }
+      totalChars += text.length;
+      for (const c of text) {
         const code = c.charCodeAt(0);
         if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3000 && code <= 0x303f)) {
           cjk++;
