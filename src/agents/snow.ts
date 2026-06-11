@@ -2,6 +2,7 @@
  * 雪 (Snow) — 架构规划型 Agent.
  */
 import { BaseAgent, Task } from '../core/agent';
+import { parseWithRetry, parseSchema, validateTaskPlan, SchemaValidationError } from '../core/schemas';
 
 const VALID_AGENTS = new Set(['fog', 'rain', 'frost', 'snow', 'dew']);
 
@@ -36,11 +37,43 @@ Do 90% yourself. When orchestrating, assign to fog/rain/frost/dew. Never assign 
 Like snow—silent but all-covering. Framework first, then detail. Note dependencies and risks. Prioritize and deliver.`;
 
   async orchestrate(goal: string): Promise<Task[]> {
-    const prompt = `请将以下目标分解为子任务，并分配给合适的 Agent。\n\n目标: ${goal}\n\n请严格按 JSON 格式输出：\n{"goal": "目标", "steps": [{"id": "1", "description": "任务", "agent": "fog|rain|frost|dew"}]}\n\n可用: fog(调研) rain(代码) frost(审查) dew(运维)。不要分配 fair。直接输出 JSON。`;
-    this.memory.addMessage('user', prompt);
-    const response = await this.llmLoop();
-    this.memory.addMessage('assistant', response.content);
-    return this.parseTaskPlan(response.content, goal);
+    const base = `请将以下目标分解为子任务，并分配给合适的 Agent。\n\n目标: ${goal}\n\n请严格按 JSON 格式输出：\n{"goal": "目标", "steps": [{"id": "1", "description": "任务", "agent": "fog|rain|frost|dew"}]}\n\n可用: fog(调研) rain(代码) frost(审查) dew(运维)。不要分配 fair。直接输出 JSON。`;
+    try {
+      // Structured-output retry: if the plan JSON is malformed, feed the parse
+      // error back and re-ask before falling back — a bad response no longer
+      // silently collapses a multi-step plan into a single task.
+      return await parseWithRetry(
+        async (priorError) => {
+          const prompt = priorError
+            ? `${base}\n\n[你上一次的输出无法解析：${priorError}。只输出严格合法的 JSON，不要任何额外文字、解释或 markdown 代码围栏。]`
+            : base;
+          this.memory.addMessage('user', prompt);
+          const response = await this.llmLoop();
+          this.memory.addMessage('assistant', response.content);
+          return response.content;
+        },
+        (raw) => this.parsePlanStrict(raw, goal),
+        { retries: 2 },
+      );
+    } catch {
+      // Every attempt failed → safe single-task fallback (prior behavior).
+      return [new Task({ id: '1', description: goal, assignedTo: 'rain', metadata: { goal } })];
+    }
+  }
+
+  /** Strict plan parse: throws on unparseable/invalid JSON or an empty plan. */
+  private parsePlanStrict(content: string, goal: string): Task[] {
+    const data: any = parseSchema(content); // throws SchemaValidationError on bad JSON
+    if (data && typeof data.goal !== 'string') data.goal = goal; // we already know the goal
+    const plan = validateTaskPlan(data); // throws on a malformed plan shape
+    const tasks: Task[] = [];
+    for (const step of plan.steps) {
+      const a = VALID_AGENTS.has(String(step.agent)) ? String(step.agent) : 'rain';
+      const deps = Array.isArray((step as any).depends_on) ? (step as any).depends_on : [];
+      tasks.push(new Task({ id: String(step.id), description: step.description, assignedTo: a, dependsOn: deps, metadata: { goal } }));
+    }
+    if (!tasks.length) throw new SchemaValidationError('plan has no steps');
+    return tasks;
   }
 
   private parseTaskPlan(content: string, goal: string): Task[] {

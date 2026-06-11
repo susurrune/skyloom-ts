@@ -280,3 +280,40 @@ export function validateExtractionResult(data: unknown): ExtractionResultSchema 
 
   return { facts };
 }
+
+/* ════════════════════════════════════════
+   Structured-output retry
+   ════════════════════════════════════════ */
+
+/**
+ * Ask an LLM for structured output and validate it, retrying with the parse
+ * error fed back as a correction when it comes back malformed — the pattern
+ * every production agent framework uses (LangGraph structured output, Pydantic
+ * AI, OpenAI Agents SDK output types). Without it, a single bad JSON response
+ * silently degrades the run (e.g. a multi-step plan collapses to one task).
+ *
+ * `ask(priorError, attempt)` produces the raw model text; on a retry it receives
+ * the previous validation error so the caller can append a correction to the
+ * prompt. `parse` must THROW (ideally SchemaValidationError) on invalid input.
+ * Returns the first valid value, or throws after exhausting `retries`.
+ */
+export async function parseWithRetry<T>(
+  ask: (priorError: string | null, attempt: number) => Promise<string>,
+  parse: (raw: string) => T,
+  opts?: { retries?: number; onRetry?: (attempt: number, error: string) => void },
+): Promise<T> {
+  const retries = Math.max(0, opts?.retries ?? 2);
+  let lastError = "";
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const raw = await ask(attempt === 0 ? null : lastError, attempt);
+    try {
+      return parse(raw);
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+      if (attempt < retries) opts?.onRetry?.(attempt + 1, lastError);
+    }
+  }
+  throw new SchemaValidationError(
+    `structured output still invalid after ${retries + 1} attempt(s): ${lastError}`,
+  );
+}
