@@ -23,6 +23,8 @@ describe("extra tools — registration & gating", () => {
       "hash", "base64", "json_query", "http_request", "download_file",
       "dns_lookup", "port_check", "git_add", "git_branch", "git_checkout",
       "git_push", "git_pull", "env_get", "disk_usage", "clipboard_read", "clipboard_write",
+      "which", "replace_in_file", "diff_files", "gzip_file", "gunzip_file",
+      "uuid", "random_string", "current_time",
     ]) expect(names, n).toContain(n);
   });
 
@@ -113,6 +115,57 @@ describe("extra tools — filesystem", () => {
     } finally {
       delete process.env.SKYLOOM_WORKSPACE_FENCE; delete process.env.SKYLOOM_WORKSPACE_ROOT;
     }
+  });
+});
+
+describe("extra tools — batch 2", () => {
+  let dir: string;
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "sky-extra2-")); });
+  afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+  function setup2() {
+    const reg = new ToolRegistry();
+    registerExtraTools(reg);
+    return (name: string, params: Record<string, unknown> = {}) => reg.get(name)!.handler!(params);
+  }
+
+  it("which finds a real executable and reports misses", async () => {
+    const call = setup2();
+    const node = await call("which", { name: "node" });
+    expect(node).toMatch(/node/);
+    expect(await call("which", { name: "definitely-not-a-real-binary-xyz" })).toMatch(/not found/);
+  });
+
+  it("replace_in_file replaces ALL occurrences (literal and regex)", async () => {
+    const call = setup2();
+    const f = path.join(dir, "t.txt");
+    fs.writeFileSync(f, "a a a", "utf-8");
+    expect(await call("replace_in_file", { path: f, find: "a", replace: "b" })).toMatch(/3 occurrence/);
+    expect(fs.readFileSync(f, "utf-8")).toBe("b b b");
+    fs.writeFileSync(f, "x1 x2 x3", "utf-8");
+    await call("replace_in_file", { path: f, find: "x\\d", replace: "N", regex: true });
+    expect(fs.readFileSync(f, "utf-8")).toBe("N N N");
+  });
+
+  it("gzip_file then gunzip_file round-trips", async () => {
+    const call = setup2();
+    const f = path.join(dir, "data.txt");
+    const payload = "中文 content ".repeat(50);
+    fs.writeFileSync(f, payload, "utf-8");
+    await call("gzip_file", { path: f });
+    expect(fs.existsSync(f + ".gz")).toBe(true);
+    const out = path.join(dir, "restored.txt");
+    await call("gunzip_file", { path: f + ".gz", destination: out });
+    expect(fs.readFileSync(out, "utf-8")).toBe(payload);
+  });
+
+  it("uuid, random_string and current_time produce valid output", async () => {
+    const call = setup2();
+    const ids = (await call("uuid", { count: 3 })).split("\n");
+    expect(ids).toHaveLength(3);
+    for (const id of ids) expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(await call("random_string", { length: 16, encoding: "hex" })).toHaveLength(16);
+    expect(await call("current_time")).toMatch(/iso_utc: \d{4}-\d{2}-\d{2}T/);
   });
 });
 

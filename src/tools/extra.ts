@@ -14,6 +14,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as net from 'net';
+import * as zlib from 'zlib';
 import { lookup } from 'dns/promises';
 import { execFileSync } from 'child_process';
 import type { ToolRegistry } from '../core/tool';
@@ -439,6 +440,174 @@ export function registerExtraTools(registry: ToolRegistry): void {
         }
         return clip(out);
       } catch (e: any) { return `Error (no clipboard utility?): ${e.message || e}`; }
+    },
+  });
+
+  /* ════════════════ Developer utilities ════════════════ */
+
+  registry.register({
+    name: 'which',
+    description: 'Locate an executable in PATH (like `which`/`where`). Tells you if a command is installed and where.',
+    parameters: [{ name: 'name', type: 'string', description: 'Executable name to find', required: true }],
+    handler: async (params) => {
+      const name = String(params.name || '').trim();
+      if (!name || /[\\/]/.test(name)) return 'Error: provide a bare command name (no path separators)';
+      const exts = platform === 'win32'
+        ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+        : [''];
+      const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+      const hits: string[] = [];
+      for (const dir of dirs) {
+        for (const ext of exts) {
+          const candidate = path.join(dir, name + ext);
+          try { if (fs.statSync(candidate).isFile()) hits.push(candidate); } catch { /* not here */ }
+        }
+      }
+      return hits.length ? hits.join('\n') : `${name}: not found in PATH`;
+    },
+  });
+
+  registry.register({
+    name: 'replace_in_file',
+    description: 'Replace text in a file. Replaces ALL occurrences (unlike edit_file, which replaces only the first). Set regex=true to treat find as a regular expression.',
+    parameters: [
+      { name: 'path', type: 'string', description: 'File to edit', required: true },
+      { name: 'find', type: 'string', description: 'Text (or regex) to search for', required: true },
+      { name: 'replace', type: 'string', description: 'Replacement text', required: true },
+      { name: 'regex', type: 'boolean', description: 'Treat find as a regular expression', required: false },
+    ],
+    handler: async (params) => {
+      const filePath = path.resolve(String(params.path || ''));
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
+      if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
+      try {
+        const before = fs.readFileSync(filePath, 'utf-8');
+        const find = String(params.find ?? '');
+        const replace = String(params.replace ?? '');
+        let after: string; let count = 0;
+        if (params.regex) {
+          let re: RegExp;
+          try { re = new RegExp(find, 'g'); } catch (e: any) { return `Error: invalid regex — ${e.message || e}`; }
+          after = before.replace(re, () => { count++; return replace; });
+        } else {
+          if (!find) return 'Error: find must be non-empty';
+          count = before.split(find).length - 1;
+          after = before.split(find).join(replace);
+        }
+        if (count === 0) return `No occurrences of the search text in ${filePath}`;
+        fs.writeFileSync(filePath, after, 'utf-8');
+        return `Replaced ${count} occurrence(s) in ${filePath}`;
+      } catch (e: any) { return `Error: ${e.message || e}`; }
+    },
+  });
+
+  registry.register({
+    name: 'diff_files',
+    description: 'Show a unified diff between two files.',
+    parameters: [
+      { name: 'a', type: 'string', description: 'First (old) file path', required: true },
+      { name: 'b', type: 'string', description: 'Second (new) file path', required: true },
+    ],
+    handler: async (params) => {
+      const a = path.resolve(String(params.a || ''));
+      const b = path.resolve(String(params.b || ''));
+      const fa = fenceCheck(a); if (fa) return fa;
+      const fb = fenceCheck(b); if (fb) return fb;
+      for (const f of [a, b]) if (!fs.existsSync(f)) return `Error: file not found: ${f}`;
+      try {
+        // git diff --no-index exits 1 when files differ — that's the normal case.
+        return clip(git(['diff', '--no-index', '--no-color', '--', a, b]) || '(files are identical)');
+      } catch (e: any) {
+        const out = (e.stdout || '').toString();
+        return out ? clip(out) : `Error: ${e.message || e}`;
+      }
+    },
+  });
+
+  /* ════════════════ Compression ════════════════ */
+
+  registry.register({
+    name: 'gzip_file',
+    description: 'Gzip-compress a file to <path>.gz (or a given destination).',
+    parameters: [
+      { name: 'path', type: 'string', description: 'File to compress', required: true },
+      { name: 'destination', type: 'string', description: 'Output path (default: <path>.gz)', required: false },
+    ],
+    handler: async (params) => {
+      const src = path.resolve(String(params.path || ''));
+      const dest = path.resolve(String(params.destination || src + '.gz'));
+      const f1 = fenceCheck(src); if (f1) return f1;
+      const f2 = fenceCheck(dest); if (f2) return f2;
+      if (!fs.existsSync(src)) return `Error: file not found: ${src}`;
+      try {
+        const out = zlib.gzipSync(fs.readFileSync(src));
+        fs.writeFileSync(dest, out);
+        return `Compressed ${src} → ${dest} (${out.length} bytes)`;
+      } catch (e: any) { return `Error: ${e.message || e}`; }
+    },
+  });
+
+  registry.register({
+    name: 'gunzip_file',
+    description: 'Decompress a .gz file.',
+    parameters: [
+      { name: 'path', type: 'string', description: '.gz file to decompress', required: true },
+      { name: 'destination', type: 'string', description: 'Output path (default: strips .gz)', required: false },
+    ],
+    handler: async (params) => {
+      const src = path.resolve(String(params.path || ''));
+      const dest = path.resolve(String(params.destination || src.replace(/\.gz$/, '') || src + '.out'));
+      const f1 = fenceCheck(src); if (f1) return f1;
+      const f2 = fenceCheck(dest); if (f2) return f2;
+      if (!fs.existsSync(src)) return `Error: file not found: ${src}`;
+      try {
+        const out = zlib.gunzipSync(fs.readFileSync(src));
+        fs.writeFileSync(dest, out);
+        return `Decompressed ${src} → ${dest} (${out.length} bytes)`;
+      } catch (e: any) { return `Error: ${e.message || e}`; }
+    },
+  });
+
+  /* ════════════════ Generators / time ════════════════ */
+
+  registry.register({
+    name: 'uuid',
+    description: 'Generate a random UUID (v4).',
+    parameters: [{ name: 'count', type: 'number', description: 'How many to generate (default 1)', required: false }],
+    handler: async (params) => {
+      const n = Math.max(1, Math.min(100, Math.floor(Number(params.count) || 1)));
+      return Array.from({ length: n }, () => crypto.randomUUID()).join('\n');
+    },
+  });
+
+  registry.register({
+    name: 'random_string',
+    description: 'Generate a cryptographically-random string.',
+    parameters: [
+      { name: 'length', type: 'number', description: 'Length in characters (default 32)', required: false },
+      { name: 'encoding', type: 'string', description: 'hex | base64 | base64url (default hex)', required: false },
+    ],
+    handler: async (params) => {
+      const len = Math.max(1, Math.min(4096, Math.floor(Number(params.length) || 32)));
+      const enc = String(params.encoding || 'hex').toLowerCase();
+      if (!['hex', 'base64', 'base64url'].includes(enc)) return `Error: unsupported encoding '${enc}'`;
+      return crypto.randomBytes(len).toString(enc as BufferEncoding).slice(0, len);
+    },
+  });
+
+  registry.register({
+    name: 'current_time',
+    description: 'Get the current date and time (ISO UTC, local, epoch ms, timezone).',
+    parameters: [],
+    handler: async () => {
+      const now = new Date();
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      return [
+        `iso_utc: ${now.toISOString()}`,
+        `local: ${now.toString()}`,
+        `epoch_ms: ${now.getTime()}`,
+        `timezone: ${tz}`,
+      ].join('\n');
     },
   });
 
