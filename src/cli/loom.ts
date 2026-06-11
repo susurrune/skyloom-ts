@@ -362,6 +362,14 @@ export interface LoomOpts {
 const RAIL_W = 15; // visual columns of the left rail (inside borders)
 const SKY_H = 2;
 
+/* Mouse: SGR extended tracking (1006) + button tracking (1000). We only ever
+   *act* on wheel events; clicks/drags are parsed-and-swallowed so they can
+   never leak into the input line. Shift+drag still selects text in most
+   terminals (they bypass app tracking), so copy/paste keeps working. */
+const MOUSE_ON = "\x1b[?1000h\x1b[?1006h";
+const MOUSE_OFF = "\x1b[?1000l\x1b[?1006l";
+const WHEEL_STEP = 3; // viewport lines per wheel notch
+
 export class LoomUI {
   private out: OutLike;
   private inp: NodeJS.ReadStream | null;
@@ -415,7 +423,7 @@ export class LoomUI {
 
   start() {
     if (!this.headless) {
-      this.out.write("\x1b[?1049h\x1b[2J"); // alternate screen
+      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON); // alternate screen + mouse wheel
       if (this.inp && this.inp.isTTY) {
         readline.emitKeypressEvents(this.inp);
         this.inp.setRawMode(true);
@@ -438,7 +446,7 @@ export class LoomUI {
     if (this.resizeHandler) (process.stdout as any).removeListener?.("resize", this.resizeHandler);
     if (!this.headless) {
       if (this.inp && this.inp.isTTY) this.inp.setRawMode(false);
-      this.out.write("\x1b[?1049l\x1b[?25h");
+      this.out.write(MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
     }
   }
 
@@ -447,11 +455,11 @@ export class LoomUI {
     if (this.inp && this.inp.isTTY) this.inp.setRawMode(false);
     if (this.inp && this.keypressHandler) this.inp.removeListener("keypress", this.keypressHandler);
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    this.out.write("\x1b[?1049l\x1b[?25h");
+    this.out.write(MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
     try {
       return await fn();
     } finally {
-      this.out.write("\x1b[?1049h\x1b[2J");
+      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON);
       if (this.inp && this.inp.isTTY) {
         this.inp.setRawMode(true);
         this.inp.resume();
@@ -473,7 +481,10 @@ export class LoomUI {
       const drop = this.blocks.splice(0, 500);
       for (const d of drop) if (d.id) this.byId.delete(d.id);
     }
-    this.scrollOff = 0; // new content snaps to tail
+    // Note: we intentionally do NOT reset scrollOff here. When the user is at
+    // the tail (scrollOff === 0) the view keeps following new content; when
+    // they have scrolled up to read, their position is preserved instead of
+    // being yanked to the bottom on every tool event or blank line.
     return blk;
   }
 
@@ -553,8 +564,40 @@ export class LoomUI {
 
   setHistory(h: string[]) { this.history = h.slice(); }
 
+  // Mouse-sequence reassembly. Node's readline keypress parser does NOT emit an
+  // SGR mouse sequence (ESC[<btn;col;rowM) as one event — it yields ESC[< then
+  // each remaining char separately. We accumulate from the ESC[< marker until
+  // the terminating M/m, then act, swallowing every fragment so none of it can
+  // ever land in the input line (the bug that sank the previous attempt).
+  private mouseBuf: string | null = null;
+
+  private handleMouse(seq: string) {
+    const m = /^(\d+);(\d+);(\d+)[Mm]$/.exec(seq);
+    if (!m) return;
+    const code = parseInt(m[1], 10);
+    if ((code & 64) === 0) return; // not a wheel event (clicks/drags ignored)
+    if (code & 1) this.scrollOff -= WHEEL_STEP; // wheel down → toward tail
+    else this.scrollOff += WHEEL_STEP;          // wheel up → into history
+    this.clampScroll();
+    this.viewportCache = null;
+    this.paint();
+  }
+
   private onKey(str: string, key: any) {
     if (this.destroyed) return;
+
+    // ── mouse sequence reassembly (see mouseBuf) ──
+    if (this.mouseBuf !== null) {
+      this.mouseBuf += str ?? "";
+      if (str === "M" || str === "m" || this.mouseBuf.length > 24) {
+        const seq = this.mouseBuf;
+        this.mouseBuf = null;
+        this.handleMouse(seq);
+      }
+      return; // swallow every byte of the sequence
+    }
+    if (key?.sequence === "\x1b[<" || str === "\x1b[<") { this.mouseBuf = ""; return; }
+
     if (this.modal) {
       const k = (str || "").toLowerCase();
       if (k === "y") { const m = this.modal; this.modal = null; m.resolve(true); }
@@ -595,6 +638,7 @@ export class LoomUI {
       }
 
       this.inputGlyphs = []; this.cursor = 0; this.histIdx = -1; this.paletteIdx = 0;
+      this.scrollOff = 0; // submitting a turn snaps back to the tail to watch the reply
       if (text) { this.history.unshift(text); if (this.history.length > 200) this.history.pop(); }
       const r = this.pendingResolve;
       this.pendingResolve = null;
@@ -911,7 +955,7 @@ export class LoomUI {
         ? " Ctrl-C 中断本轮 "
         : paletteUp
           ? " ↑↓ 选命令 · Enter 执行 · Tab 补全 · Esc 收起 "
-          : " / 命令 · PgUp 回看 · Shift+Tab 切模式 · Ctrl-C 退出 ";
+          : " / 命令 · 滚轮/PgUp 回看 · Shift+Tab 切模式 · Ctrl-C 退出 ";
       // └─ hint ───…┘  →  2 + w(hint) + fill + 1 = cols
       const fill = innerW - visualWidth(hint) - 1;
       frame.push(B("└─") + chalk.dim(hint) + B("─".repeat(Math.max(0, fill)) + "┘"));

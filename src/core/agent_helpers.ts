@@ -72,10 +72,13 @@ const RE_TRAILING_COMMA = /,\s*([}\]])/g;
 const RE_UNQUOTED_STRING = /(:\s*)([a-zA-Z_.][a-zA-Z0-9_ ./\\@.\-+#~$]*?)(\s*[,}\]])/g;
 
 // ── Tool-signature loop detector tuning ──
-// Raised from 8/4/6 — editing workflows need more room
-export const SIG_WINDOW = 16;
-export const SIG_LOOP_HINT = 10;
-export const SIG_LOOP_HARDSTOP = 24;
+// These count *identical* tool-call signatures (same name + same args). Real
+// editing workflows produce distinct signatures (different file/old_text), so
+// a moderate window/threshold gives them room without disarming the loop guard:
+// an identical call repeated 10x is always a stuck loop, never legitimate work.
+export const SIG_WINDOW = 16;       // observation window for repeated signatures
+export const SIG_LOOP_HINT = 6;     // warn once after this many identical repeats
+export const SIG_LOOP_HARDSTOP = 10; // force-stop after this many identical repeats
 
 // ── Tool-failure markers ──
 const TOOL_FAILURE_MARKERS = [

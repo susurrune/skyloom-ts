@@ -306,10 +306,10 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'max_count', type: 'number', description: 'Number of commits to show (default: 10)', required: false },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       try {
-        const n = (params.max_count as number) || 10;
-        return execSync(`git log --oneline -${n}`, { encoding: 'utf-8' });
+        const n = Math.max(1, Math.min(1000, Math.floor(Number(params.max_count) || 10)));
+        return execFileSync('git', ['log', '--oneline', `-${n}`], { encoding: 'utf-8' });
       } catch (e: any) {
         return `Error: ${e.message || e}`;
       }
@@ -323,10 +323,12 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'message', type: 'string', description: 'Commit message', required: true },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       try {
-        const msg = params.message as string;
-        execSync(`git commit -m "${msg.replace(/"/g, '\\"')}"`, { encoding: 'utf-8' });
+        const msg = String(params.message ?? '');
+        // execFileSync passes the message as a single argv entry — no shell, so
+        // backticks / $() / ; in the message cannot be interpreted.
+        execFileSync('git', ['commit', '-m', msg], { encoding: 'utf-8' });
         return 'Commit created successfully.';
       } catch (e: any) {
         return `Error: ${e.message || e}`;
@@ -345,15 +347,28 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'path', type: 'string', description: 'Directory to search in', required: false },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const searchDir = params.path ? path.resolve(params.path as string) : process.cwd();
       const pat = String(params.pattern || '');
-      try {
-        const out = execSync('rg -n ' + pat + ' ' + searchDir + ' 2>/dev/null || grep -rn ' + pat + ' ' + searchDir + ' 2>/dev/null || echo "No matches found"', { encoding: 'utf-8', maxBuffer: 1024 * 1024 });
-        return out;
-      } catch {
-        return 'No matches found.';
+      // No shell: pattern and directory are passed as argv entries, and `--`
+      // stops a leading `-` in the pattern from being read as a flag. This is a
+      // non-dangerous (auto-approved) tool, so shell injection here would have
+      // bypassed the tool-approval gate entirely.
+      const variants: [string, string[]][] = [
+        ['rg', ['-n', '--', pat, searchDir]],
+        ['grep', ['-rn', '--', pat, searchDir]],
+      ];
+      for (const [bin, args] of variants) {
+        try {
+          const out = execFileSync(bin, args, { encoding: 'utf-8', maxBuffer: 1024 * 1024 });
+          return out || 'No matches found.';
+        } catch (e: any) {
+          // exit status 1 = ran successfully, zero matches; anything else
+          // (e.g. binary not installed) falls through to the next variant.
+          if (e?.status === 1) return 'No matches found.';
+        }
       }
+      return 'No matches found.';
     },
   });
 
@@ -365,11 +380,12 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'depth', type: 'number', description: 'Maximum depth (default: 3)', required: false },
     ],
     handler: async (params) => {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const treeDir = params.directory ? path.resolve(params.directory as string) : process.cwd();
-      const depth = (params.depth as number) || 3;
+      const depth = Math.max(1, Math.min(20, Math.floor(Number(params.depth) || 3)));
       try {
-        const out = execSync('tree "' + treeDir + '" -L ' + depth + ' --charset=utf-8 2>/dev/null || echo "tree unavailable"', { encoding: 'utf-8' });
+        // No shell: directory passed as an argv entry, depth clamped to an int.
+        const out = execFileSync('tree', [treeDir, '-L', String(depth), '--charset=utf-8'], { encoding: 'utf-8' });
         return out;
       } catch {
         return 'Directory tree unavailable.';

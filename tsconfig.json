@@ -26,6 +26,7 @@
     "noFallthroughCasesInSwitch": true,
     "allowSyntheticDefaultImports": true,
     "moduleResolution": "node",
+    "ignoreDeprecations": "5.0",
     "baseUrl": ".",
     "paths": {
       "@skyloom/*": ["src/*"],

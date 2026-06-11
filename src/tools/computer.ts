@@ -5,7 +5,7 @@
  * processes and services, and install/uninstall software.
  */
 
-import { execSync, spawn } from 'child_process';
+import { execSync, execFileSync, spawn } from 'child_process';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -169,9 +169,9 @@ export function registerComputerTools(registry: ToolRegistry): void {
           return `Killed process ${target}`;
         } else {
           if (platform === 'win32') {
-            execSync(`taskkill /F /IM "${target}" /T`, { timeout: 10000 });
+            execFileSync('taskkill', ['/F', '/IM', target, '/T'], { timeout: 10000 });
           } else {
-            execSync(`pkill -f "${target}"`, { timeout: 10000 });
+            execFileSync('pkill', ['-f', target], { timeout: 10000 });
           }
           return `Killed process ${target}`;
         }
@@ -198,7 +198,7 @@ export function registerComputerTools(registry: ToolRegistry): void {
       // Auto-detect package manager
       let pm: string;
       const has = (cmd: string) => {
-        try { execSync(`${cmd} --version`, { stdio: 'ignore' }); return true; }
+        try { execFileSync(cmd, ['--version'], { stdio: 'ignore' }); return true; }
         catch { return false; }
       };
 
@@ -230,7 +230,11 @@ export function registerComputerTools(registry: ToolRegistry): void {
       if (!cmdMap || !cmdMap[action]) return `Unsupported action '${action}' for ${pm}`;
 
       try {
-        const out = execSync(`${pm} ${cmdMap[action]} "${name}"`, { encoding: 'utf-8', timeout: 120000 });
+        // cmdMap entries may carry flags (e.g. 'install -y', '-S --noconfirm');
+        // split them into argv so the package name stays a single argument with
+        // no shell interpretation.
+        const pmArgs = cmdMap[action].split(/\s+/).filter(Boolean);
+        const out = execFileSync(pm, [...pmArgs, name], { encoding: 'utf-8', timeout: 120000 });
         return truncate(out, MAX_OUT);
       } catch (e: any) {
         return `Error: ${e.message || e}`;
@@ -252,12 +256,18 @@ export function registerComputerTools(registry: ToolRegistry): void {
       const name = String(params.name || '').trim();
       if (!action || !name) return 'Error: action and name are required';
 
+      const allowed = ['start', 'stop', 'restart', 'status'];
+      if (!allowed.includes(action)) return `Unsupported action '${action}' (use: ${allowed.join('/')})`;
       try {
         if (platform === 'win32') {
-          const out = execSync(`sc ${action} "${name}"`, { encoding: 'utf-8', timeout: 30000 });
+          const out = execFileSync('sc', [action, name], { encoding: 'utf-8', timeout: 30000 });
           return truncate(out, MAX_OUT);
-        } else {
-          const out = execSync(`systemctl ${action} "${name}" 2>/dev/null || service "${name}" ${action}`, { encoding: 'utf-8', timeout: 30000 });
+        }
+        try {
+          const out = execFileSync('systemctl', [action, name], { encoding: 'utf-8', timeout: 30000 });
+          return truncate(out, MAX_OUT);
+        } catch {
+          const out = execFileSync('service', [name, action], { encoding: 'utf-8', timeout: 30000 });
           return truncate(out, MAX_OUT);
         }
       } catch (e: any) {
