@@ -12,6 +12,7 @@
 import * as readline from "readline";
 import chalk from "chalk";
 import { agentTheme, PALETTE } from "../core/theme";
+import { registry } from "../core/commands";
 
 const TUI_VERSION = (() => { try { return require("../../package.json").version; } catch { return ""; } })();
 
@@ -24,38 +25,11 @@ export interface TUIContext {
   height: number;
 }
 
-/* ── Slash commands (for tab-completion + the inline palette) ── */
-export const SLASH_COMMANDS: [string, string][] = [
-  ["/fog", "≋ 雾 · 探索洞察"],
-  ["/rain", "⸽ 雨 · 创造产出"],
-  ["/frost", "✱ 霜 · 精炼品质"],
-  ["/snow", "❉ 雪 · 架构规划"],
-  ["/dew", "∘ 露 · 可靠守护"],
-  ["/fair", "☼ 晴 · 情感陪伴"],
-  ["/help", "查看所有命令"],
-  ["/setup", "配置向导"],
-  ["/init", "扫描项目生成 SKY.md"],
-  ["/plan", "切换计划模式（只读出方案）"],
-  ["/verify", "运行项目验证命令"],
-  ["/context", "上下文占用明细"],
-  ["/rewind", "回退本轮文件改动"],
-  ["/tools", "工具调用统计"],
-  ["/trace", "本轮运行追踪（span 树）"],
-  ["/model", "查看/切换模型（独立/统一）"],
-  ["/cost", "费用统计"],
-  ["/status", "状态总览"],
-  ["/memory", "记忆状态"],
-  ["/sessions", "会话列表"],
-  ["/resume ", "恢复会话（序号/id）"],
-  ["/new", "开始新会话"],
-  ["/workspace", "工作空间"],
-  ["/compact", "压缩上下文"],
-  ["/clear", "清屏"],
-  ["/task ", "多 Agent 编排"],
-  ["/mcp", "MCP 服务器"],
-  ["/version", "版本信息"],
-  ["/quit", "退出"],
-];
+/* ── Slash commands (for tab-completion + the inline palette) ──
+   Derived from the central command registry (src/core/commands.ts) so the
+   palette, tab-completer, and /help all stay in sync with a single source of
+   truth — no parallel hand-kept array to drift. */
+export const SLASH_COMMANDS: [string, string][] = registry.slashItems("zh");
 
 /* ════════════════════════════════════════
    Markdown stripping — clean raw md for terminal display
