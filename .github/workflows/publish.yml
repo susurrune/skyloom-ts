@@ -4,16 +4,21 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual trigger: publishes whatever version master's package.json declares,
+  # then creates the matching v* tag. Needed because some environments (e.g.
+  # remote agent sessions) can push branches but not tags.
+  workflow_dispatch: {}
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -24,4 +29,32 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-      - run: npm publish --access public
+
+      # Refuse to republish an existing version (idempotent dispatches).
+      - name: Skip if version already published
+        id: check
+        run: |
+          V=$(node -p "require('./package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if npm view "skyloom@$V" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "skyloom@$V already on npm — skipping publish"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.check.outputs.already == 'false'
+        run: npm publish --access public
+
+      # On manual dispatch, create the release tag the environment couldn't push.
+      - name: Tag release (manual dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          V="v${{ steps.check.outputs.version }}"
+          if git ls-remote --exit-code origin "refs/tags/$V" >/dev/null 2>&1; then
+            echo "$V already exists"
+          else
+            git tag "$V"
+            git push origin "$V"
+          fi
