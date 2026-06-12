@@ -30,18 +30,42 @@ const SLASH_CMDS: [string, string][] = [
   ["/cost", "Usage & cost"],
   ["/cost reset", "Reset usage stats"],
   ["/compact", "Compress context"],
+  ["/summarize", "Alias for /compact"],
   ["/retry", "Resend last msg"],
   ["/memory", "Memory stats"],
   ["/memory clear", "Clear short-term memory"],
   ["/sessions", "Session list"],
+  ["/resume <id>", "Resume session"],
+  ["/new", "New session"],
   ["/workspace", "Workspace info"],
-  ["/model", "Model info"],
+  ["/model", "Model info & switch"],
+  ["/models", "Browse all available models"],
+  ["/connect <p>", "Add/configure provider"],
   ["/mcp", "MCP server status"],
   ["/version", "Version info"],
+  ["/context", "Token usage breakdown"],
+  ["/tools", "Tool call statistics"],
   ["/task <goal>", "Multi-agent orchestrate"],
+  ["/init", "Generate SKY.md project memory"],
+  ["/review", "Code review of changes"],
+  ["/verify", "Run verification commands"],
+  ["/plan", "Enter plan mode (read-only)"],
+  ["/auto", "Enter auto mode (no approval)"],
+  ["/default", "Return to default mode"],
+  ["/rewind [n]", "Undo last turn (revert files)"],
+  ["/undo", "Alias for /rewind"],
+  ["/redo", "Redo previously undone turn"],
+  ["/export", "Export conversation to Markdown"],
+  ["/thinking", "Toggle reasoning visibility"],
+  ["/details", "Toggle tool details"],
+  ["/skills", "Browse available skills"],
+  ["/warp <path>", "Change workspace"],
+  ["/move <path>", "Move session to project"],
+  ["/setup", "Setup wizard"],
+  ["/apikey", "Manage API keys"],
   ["/fog", "≋ Fog — research insight"],
   ["/rain", "⸽ Rain — creation codegen"],
-  ["/frost", "✱ Frost — review quality"],
+  ["/frost", " Frost — review quality"],
   ["/snow", "❉ Snow — planning architect"],
   ["/dew", "∘ Dew — devops reliability"],
   ["/fair", "☼ Fair — companion warmth"],
@@ -538,6 +562,32 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
       process.stdout.write(r.ok ? chalk.green(`  ✓ ${currentAgent.name} → ${parts[0]}`) + chalk.dim(" · 下一条消息生效\n") : chalk.dim(`  '${parts[0]}' 不在目录中${r.suggestions.length ? " · 可选: " + r.suggestions.join(", ") : ""}\n`));
       continue;
     }
+    if (cmdL === "/models" || cmdL.startsWith("/models ")) {
+      const { listProviders, modelsFor, providerLabel, allModels } = require("../core/catalog");
+      const args = inp.split(/\s+/).slice(1);
+      const filter = args[0]?.toLowerCase() || "";
+      process.stdout.write(chalk.bold("\n  ✦ 模型目录 · Model Catalog\n"));
+      process.stdout.write(chalk.dim("  ─────────────────────────────────────────────\n"));
+      const providers = listProviders();
+      let totalModels = 0;
+      for (const p of providers) {
+        const models = modelsFor(p);
+        if (!models.length) continue;
+        if (filter && !p.toLowerCase().includes(filter) && !providerLabel(p).toLowerCase().includes(filter)) continue;
+        const label = providerLabel(p);
+        process.stdout.write(chalk.bold.hex("#3a7a6e")(`\n  ${label}\n`));
+        for (const m of models) {
+          totalModels++;
+          const costStr = m.costIn === 0 && m.costOut === 0 ? chalk.green("免费") : chalk.dim(`$${m.costIn.toFixed(2)}/$${m.costOut.toFixed(2)}`);
+          const ctxStr = m.context >= 1000000 ? chalk.cyan(`${(m.context / 1000000).toFixed(0)}M`) : m.context >= 1000 ? chalk.cyan(`${(m.context / 1000).toFixed(0)}K`) : chalk.cyan(`${m.context}`);
+          process.stdout.write(chalk.dim("    · ") + chalk.white(m.id.padEnd(42)) + ctxStr + chalk.dim("  ") + costStr + chalk.dim("  ") + chalk.gray(m.desc) + "\n");
+        }
+      }
+      process.stdout.write(chalk.dim(`\n  ────────────────────────────────────────────\n`));
+      process.stdout.write(chalk.dim(`  共 ${providers.length} 个 Provider · ${totalModels} 个模型\n`));
+      process.stdout.write(chalk.dim("  用法: /models [provider] 筛选 · /model <id> 切换\n\n"));
+      continue;
+    }
     if (cmdL === "/rewind" || cmdL.startsWith("/rewind ")) {
       const { getFileCheckpoints } = require("../core/file_checkpoint");
       const cp = getFileCheckpoints();
@@ -552,6 +602,140 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
       }
       process.stdout.write(chalk.green(`  ↺ 已回退 ${r.turns} 轮`) + chalk.dim(` · 恢复 ${r.restored.length} 个文件${r.deleted.length ? ` · 删除 ${r.deleted.length} 个新建文件` : ""}\n`));
       for (const f of [...r.restored, ...r.deleted].slice(0, 10)) process.stdout.write(chalk.dim(`  ${f}\n`));
+      continue;
+    }
+    if (cmdL === "/undo" || cmdL.startsWith("/undo ")) {
+      // /undo is alias for /rewind
+      const { getFileCheckpoints } = require("../core/file_checkpoint");
+      const cp = getFileCheckpoints();
+      const arg = inp.slice(5).trim();
+      const r = cp.rewind(/^\d+$/.test(arg) ? parseInt(arg, 10) : 1);
+      if (r.turns === 0) {
+        const turns = cp.list();
+        if (!turns.length) { process.stdout.write(chalk.dim("  没有可回退的文件改动\n")); continue; }
+        process.stdout.write(chalk.bold(`  检查点 · ${turns.length} 轮可回退\n`));
+        for (const t of turns.slice(0, 8)) process.stdout.write(chalk.dim(`  ${t.label} · ${t.files.length} 个文件\n`));
+        continue;
+      }
+      process.stdout.write(chalk.green(`  ↺ 已撤销 ${r.turns} 轮`) + chalk.dim(` · 恢复 ${r.restored.length} 个文件${r.deleted.length ? ` · 删除 ${r.deleted.length} 个新建文件` : ""}\n`));
+      for (const f of [...r.restored, ...r.deleted].slice(0, 10)) process.stdout.write(chalk.dim(`  ${f}\n`));
+      continue;
+    }
+    if (cmdL === "/redo") {
+      const { getFileCheckpoints } = require("../core/file_checkpoint");
+      const cp = getFileCheckpoints();
+      const r = cp.redo();
+      if (r.turns === 0) { process.stdout.write(chalk.dim("  没有可重做的操作\n")); continue; }
+      process.stdout.write(chalk.green(`  ↻ 已重做 ${r.turns} 轮`) + chalk.dim(` · 恢复 ${r.restored.length} 个文件\n`));
+      for (const f of r.restored.slice(0, 10)) process.stdout.write(chalk.dim(`  ${f}\n`));
+      continue;
+    }
+    if (cmdL === "/export" || cmdL.startsWith("/export ")) {
+      const filename = inp.slice(8).trim() || `skyloom-export-${Date.now()}.md`;
+      const msgs = currentAgent.memory.shortTerm.filter((m: any) => m.role !== "system");
+      let md = `# Skyloom Session Export\n\n**Agent**: ${currentAgent.name}\n**Date**: ${new Date().toISOString()}\n**Messages**: ${msgs.length}\n\n---\n\n`;
+      for (const m of msgs) {
+        const role = m.role === "user" ? "👤 User" : `🤖 ${currentAgent.name}`;
+        md += `## ${role}\n\n${m.content}\n\n`;
+      }
+      fs.writeFileSync(filename, md, "utf-8");
+      process.stdout.write(chalk.green(`  ✓ 已导出到 ${filename}`) + chalk.dim(` · ${msgs.length} 条消息\n`));
+      continue;
+    }
+    if (cmdL === "/thinking") {
+      const cfg = (ctx as any).config;
+      cfg.show_thinking = !cfg.show_thinking;
+      process.stdout.write(chalk.dim(`  推理过程显示 → ${cfg.show_thinking ? "开启" : "关闭"}\n`));
+      continue;
+    }
+    if (cmdL === "/details") {
+      const cfg = (ctx as any).config;
+      cfg.show_tool_details = !cfg.show_tool_details;
+      process.stdout.write(chalk.dim(`  工具执行详情 → ${cfg.show_tool_details ? "开启" : "关闭"}\n`));
+      continue;
+    }
+    if (cmdL === "/skills") {
+      const { globalSkillRegistry } = require("../core/skill");
+      const skills = globalSkillRegistry.getSkills();
+      process.stdout.write(chalk.bold("\n  ✦ 技能目录 · Skills\n"));
+      process.stdout.write(chalk.dim("  ─────────────────────────────────────────────\n"));
+      for (const s of skills.slice(0, 20)) {
+        process.stdout.write(chalk.dim("  · ") + chalk.white(s.name.padEnd(24)) + chalk.gray(s.description.slice(0, 50)) + "\n");
+      }
+      process.stdout.write(chalk.dim(`\n  共 ${skills.length} 个技能 · 使用时自动激活\n\n`));
+      continue;
+    }
+    if (cmdL === "/review" || cmdL.startsWith("/review ")) {
+      const target = inp.slice(9).trim() || "uncommitted";
+      process.stdout.write(chalk.bold("\n   代码审查 · Code Review\n"));
+      process.stdout.write(chalk.dim(`  目标: ${target}\n\n`));
+      const reviewPrompt = `Please review the code changes for ${target}. Focus on:
+1. Code quality and best practices
+2. Potential bugs or issues
+3. Security concerns
+4. Performance implications
+5. Suggestions for improvement
+
+Provide specific, actionable feedback.`;
+      try { await streamResponse(currentAgent, reviewPrompt); }
+      catch (e: any) { process.stdout.write(chalk.red("  ✗ " + (e.message || e) + "\n")); }
+      continue;
+    }
+    if (cmdL === "/connect" || cmdL.startsWith("/connect ")) {
+      const provider = inp.slice(9).trim();
+      if (!provider) {
+        process.stdout.write(chalk.bold("\n  ✦ 配置 Provider\n"));
+        process.stdout.write(chalk.dim("  用法: /connect <provider>\n"));
+        process.stdout.write(chalk.dim("  示例: /connect openai\n\n"));
+        continue;
+      }
+      const { PROVIDER_META } = require("../core/catalog");
+      const meta = PROVIDER_META[provider.toLowerCase()];
+      if (!meta) {
+        process.stdout.write(chalk.dim(`  '${provider}' 不是已知 Provider\n`));
+        continue;
+      }
+      process.stdout.write(chalk.bold(`\n  ${meta.name}\n`));
+      process.stdout.write(chalk.dim(`  环境变量: ${meta.envVar || "(无)"}\n`));
+      process.stdout.write(chalk.dim(`  设置: /apikey set ${provider} <key>\n\n`));
+      continue;
+    }
+    if (cmdL === "/warp" || cmdL.startsWith("/warp ")) {
+      const newPath = inp.slice(6).trim();
+      if (!newPath) {
+        process.stdout.write(chalk.dim("  用法: /warp <path> — 切换工作区\n"));
+        continue;
+      }
+      const resolved = require("path").resolve(newPath);
+      if (!fs.existsSync(resolved)) {
+        process.stdout.write(chalk.dim(`  路径不存在: ${resolved}\n`));
+        continue;
+      }
+      (ctx as any).workspacePath = resolved;
+      currentAgent.reloadProjectMemory();
+      process.stdout.write(chalk.green(`  ✓ 工作区 → ${resolved}\n`));
+      continue;
+    }
+    if (cmdL === "/move" || cmdL.startsWith("/move ")) {
+      const newPath = inp.slice(6).trim();
+      if (!newPath) {
+        process.stdout.write(chalk.dim("  用法: /move <path> — 移动会话到项目\n"));
+        continue;
+      }
+      const resolved = require("path").resolve(newPath);
+      if (!fs.existsSync(resolved)) {
+        process.stdout.write(chalk.dim(`  路径不存在: ${resolved}\n`));
+        continue;
+      }
+      // Change workspace to new project
+      (ctx as any).workspacePath = resolved;
+      currentAgent.reloadProjectMemory();
+      process.stdout.write(chalk.green(`  ✓ 工作区 → ${resolved}\n`));
+      continue;
+    }
+    if (cmdL === "/summarize") {
+      const r = await currentAgent.compact();
+      process.stdout.write(chalk.green("  ✓ " + r + "\n\n"));
       continue;
     }
     if (inp.startsWith("/")) {

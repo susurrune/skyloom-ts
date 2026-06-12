@@ -1,4 +1,9 @@
 # Provider catalog — API key env vars, base URLs, docs
+# All providers use OpenAI-compatible API format unless noted.
+
+# ═══════════════════════════════════════════
+# Major International Providers
+# ═══════════════════════════════════════════
 openai:
   env_var: OPENAI_API_KEY
   base_url: https://api.openai.com/v1
@@ -9,31 +14,129 @@ anthropic:
   base_url: https://api.anthropic.com/v1
   docs_url: https://console.anthropic.com/settings/keys
 
+google:
+  env_var: GEMINI_API_KEY
+  base_url: https://generativelanguage.googleapis.com/v1beta
+  docs_url: https://aistudio.google.com/app/apikey
+
 deepseek:
   env_var: DEEPSEEK_API_KEY
   base_url: https://api.deepseek.com/v1
   docs_url: https://platform.deepseek.com/api_keys
 
-groq:
-  env_var: GROQ_API_KEY
-  base_url: https://api.groq.com/openai/v1
+xai:
+  env_var: XAI_API_KEY
+  base_url: https://api.x.ai/v1
+  docs_url: https://console.x.ai/
 
 mistral:
   env_var: MISTRAL_API_KEY
   base_url: https://api.mistral.ai/v1
+  docs_url: https://console.mistral.ai/api-keys/
+
+groq:
+  env_var: GROQ_API_KEY
+  base_url: https://api.groq.com/openai/v1
+  docs_url: https://console.groq.com/keys
 
 cohere:
   env_var: COHERE_API_KEY
   base_url: https://api.cohere.ai/v1
+  docs_url: https://dashboard.cohere.com/api-keys
+
+perplexity:
+  env_var: PERPLEXITY_API_KEY
+  base_url: https://api.perplexity.ai
+  docs_url: https://www.perplexity.ai/settings/api
+
+fireworks:
+  env_var: FIREWORKS_API_KEY
+  base_url: https://api.fireworks.ai/inference/v1
+  docs_url: https://fireworks.ai/api-keys
+
+together:
+  env_var: TOGETHER_API_KEY
+  base_url: https://api.together.xyz/v1
+  docs_url: https://api.together.xyz/settings/api-keys
 
 openrouter:
   env_var: OPENROUTER_API_KEY
   base_url: https://openrouter.ai/api/v1
+  docs_url: https://openrouter.ai/keys
 
-gemini:
-  env_var: GEMINI_API_KEY
-  base_url: https://generativelanguage.googleapis.com/v1beta
+reka:
+  env_var: REKA_API_KEY
+  base_url: https://api.reka.ai/v1
+  docs_url: https://platform.reka.ai/api-keys
 
+nvidia:
+  env_var: NVIDIA_API_KEY
+  base_url: https://integrate.api.nvidia.com/v1
+  docs_url: https://build.nvidia.com/explore/discover
+
+sambanova:
+  env_var: SAMBANOVA_API_KEY
+  base_url: https://api.sambanova.ai/v1
+  docs_url: https://cloud.sambanova.ai/apis
+
+# ═══════════════════════════════════════════
+# Chinese Providers
+# ═══════════════════════════════════════════
+qwen:
+  env_var: QWEN_API_KEY
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  docs_url: https://dashscope.console.aliyun.com/apiKey
+
+zhipu:
+  env_var: ZHIPU_API_KEY
+  base_url: https://open.bigmodel.cn/api/paas/v4
+  docs_url: https://open.bigmodel.cn/usercenter/apikeys
+
+lingyiwanwu:
+  env_var: LINGYIWANWU_API_KEY
+  base_url: https://api.lingyiwanwu.com/v1
+  docs_url: https://platform.lingyiwanwu.com/apikeys
+
+minimax:
+  env_var: MINIMAX_API_KEY
+  base_url: https://api.minimax.chat/v1
+  docs_url: https://platform.minimaxi.com/user-center/basic-information/interface-key
+
+moonshot:
+  env_var: MOONSHOT_API_KEY
+  base_url: https://api.moonshot.cn/v1
+  docs_url: https://platform.moonshot.cn/console/api-keys
+
+baidu:
+  env_var: BAIDU_API_KEY
+  base_url: https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop
+  docs_url: https://console.bce.baidu.com/qianfan/ais/console/onlineService
+
+baichuan:
+  env_var: BAICHUAN_API_KEY
+  base_url: https://api.baichuan-ai.com/v1
+  docs_url: https://platform.baichuan-ai.com/console/apikey
+
+stepfun:
+  env_var: STEPFUN_API_KEY
+  base_url: https://api.stepfun.com/v1
+  docs_url: https://platform.stepfun.com/interface-key
+
+# ═══════════════════════════════════════════
+# Local / Self-hosted
+# ═══════════════════════════════════════════
 ollama:
   base_url: http://localhost:11434/v1
   env_var: OLLAMA_HOST
+
+lmstudio:
+  base_url: http://localhost:1234/v1
+  env_var: LMSTUDIO_HOST
+
+vllm:
+  base_url: http://localhost:8000/v1
+  env_var: VLLM_HOST
+
+litellm:
+  base_url: http://localhost:4000/v1
+  env_var: LITELLM_HOST

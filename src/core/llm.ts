@@ -73,39 +73,71 @@ function splitProvider(model: string): [string | null, string] {
 /**
  * Get set of known provider ID prefixes.
  */
-function getKnownProviders(): Set<string> {
-  return new Set([
-    "openai",
-    "azure",
-    "anthropic",
-    "deepseek",
-    "ollama",
-    "groq",
-    "mistral",
-    "cohere",
-    "together_ai",
-    "openrouter",
-    "gemini",
-    "vertex_ai",
-  ]);
-}
+  function getKnownProviders(): Set<string> {
+    return new Set([
+      "openai",
+      "azure",
+      "anthropic",
+      "deepseek",
+      "ollama",
+      "groq",
+      "mistral",
+      "cohere",
+      "together",
+      "openrouter",
+      "google",
+      "vertex_ai",
+      "xai",
+      "perplexity",
+      "fireworks",
+      "reka",
+      "nvidia",
+      "sambanova",
+      "qwen",
+      "zhipu",
+      "lingyiwanwu",
+      "minimax",
+      "moonshot",
+      "baidu",
+      "baichuan",
+      "stepfun",
+      "lmstudio",
+      "vllm",
+      "litellm",
+    ]);
+  }
 
 /**
  * Get provider-to-env-var mapping.
  */
-function getProviderEnvMap(): Map<string, string> {
-  const envMap = new Map([
-    ["openai", "OPENAI_API_KEY"],
-    ["anthropic", "ANTHROPIC_API_KEY"],
-    ["deepseek", "DEEPSEEK_API_KEY"],
-    ["groq", "GROQ_API_KEY"],
-    ["mistral", "MISTRAL_API_KEY"],
-    ["cohere", "COHERE_API_KEY"],
-    ["openrouter", "OPENROUTER_API_KEY"],
-    ["gemini", "GEMINI_API_KEY"],
-  ]);
-  return envMap;
-}
+  function getProviderEnvMap(): Map<string, string> {
+    const envMap = new Map([
+      ["openai", "OPENAI_API_KEY"],
+      ["anthropic", "ANTHROPIC_API_KEY"],
+      ["google", "GEMINI_API_KEY"],
+      ["deepseek", "DEEPSEEK_API_KEY"],
+      ["xai", "XAI_API_KEY"],
+      ["mistral", "MISTRAL_API_KEY"],
+      ["groq", "GROQ_API_KEY"],
+      ["cohere", "COHERE_API_KEY"],
+      ["perplexity", "PERPLEXITY_API_KEY"],
+      ["fireworks", "FIREWORKS_API_KEY"],
+      ["together", "TOGETHER_API_KEY"],
+      ["openrouter", "OPENROUTER_API_KEY"],
+      ["reka", "REKA_API_KEY"],
+      ["nvidia", "NVIDIA_API_KEY"],
+      ["sambanova", "SAMBANOVA_API_KEY"],
+      ["qwen", "QWEN_API_KEY"],
+      ["zhipu", "ZHIPU_API_KEY"],
+      ["lingyiwanwu", "LINGYIWANWU_API_KEY"],
+      ["minimax", "MINIMAX_API_KEY"],
+      ["moonshot", "MOONSHOT_API_KEY"],
+      ["baidu", "BAIDU_API_KEY"],
+      ["baichuan", "BAICHUAN_API_KEY"],
+      ["stepfun", "STEPFUN_API_KEY"],
+    ]);
+    return envMap;
+  }
 
 /**
  * Check if model targets Anthropic's API.
@@ -787,11 +819,36 @@ export class LLMClient {
   private getBaseUrl(model: string): string {
     let provider = "openai"; const [pr] = splitProvider(model); if (pr) provider = pr;
     else { const l = model.toLowerCase(); if (l.includes("claude")) return "https://api.anthropic.com/v1"; else if (l.includes("deepseek")) return "https://api.deepseek.com/v1"; else if (l.includes("groq")) return "https://api.groq.com/openai/v1"; else if (l.includes("openrouter")) return "https://openrouter.ai/api/v1"; else if (l.includes("ollama")) return ((process.env.OLLAMA_HOST || "http://localhost:11434") + "/v1"); }
-    if (provider === "deepseek") return "https://api.deepseek.com/v1";
-    if (provider === "groq") return "https://api.groq.com/openai/v1";
-    if (provider === "openrouter") return "https://openrouter.ai/api/v1";
-    if (provider === "ollama") return ((process.env.OLLAMA_HOST || "http://localhost:11434") + "/v1");
-    return "https://api.openai.com/v1";
+    const urls: Record<string, string> = {
+      openai: "https://api.openai.com/v1",
+      anthropic: "https://api.anthropic.com/v1",
+      google: "https://generativelanguage.googleapis.com/v1beta",
+      deepseek: "https://api.deepseek.com/v1",
+      xai: "https://api.x.ai/v1",
+      mistral: "https://api.mistral.ai/v1",
+      groq: "https://api.groq.com/openai/v1",
+      cohere: "https://api.cohere.ai/v1",
+      perplexity: "https://api.perplexity.ai",
+      fireworks: "https://api.fireworks.ai/inference/v1",
+      together: "https://api.together.xyz/v1",
+      openrouter: "https://openrouter.ai/api/v1",
+      reka: "https://api.reka.ai/v1",
+      nvidia: "https://integrate.api.nvidia.com/v1",
+      sambanova: "https://api.sambanova.ai/v1",
+      qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      zhipu: "https://open.bigmodel.cn/api/paas/v4",
+      lingyiwanwu: "https://api.lingyiwanwu.com/v1",
+      minimax: "https://api.minimax.chat/v1",
+      moonshot: "https://api.moonshot.cn/v1",
+      baidu: "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop",
+      baichuan: "https://api.baichuan-ai.com/v1",
+      stepfun: "https://api.stepfun.com/v1",
+      ollama: (process.env.OLLAMA_HOST || "http://localhost:11434") + "/v1",
+      lmstudio: (process.env.LMSTUDIO_HOST || "http://localhost:1234") + "/v1",
+      vllm: (process.env.VLLM_HOST || "http://localhost:8000") + "/v1",
+      litellm: (process.env.LITELLM_HOST || "http://localhost:4000") + "/v1",
+    };
+    return urls[provider] || urls.openai;
   }
 
   async *stream(

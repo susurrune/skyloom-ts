@@ -18,6 +18,8 @@ import { expandFileRefs, isBangCommand, bangCommand, runBang, isHashMemory, hash
 import { loadCustomCommands, resolveCustomCommand } from "./commands_md";
 import { getFileCheckpoints } from "../core/file_checkpoint";
 import { LoomUI, OrchTask, circled, cutVisual } from "./loom";
+import { PROVIDER_META } from "../core/catalog";
+import { globalSkillRegistry } from "../core/skill";
 
 const OK_HEX = "#3a7a6e"; // 石绿 — success
 const ERR_HEX = "#b3342d"; // 朱砂 — failure
@@ -484,6 +486,34 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         if (d.keySource === "missing") dim(`⚠ ${r.provider} 还没有 API key — /apikey set ${r.provider} <key> 或 /model key <key>`);
         continue;
       }
+      if (cmdL === "/models" || cmdL.startsWith("/models ")) {
+        const { listProviders, modelsFor, providerLabel } = require("../core/catalog");
+        const args = inp.split(/\s+/).slice(1);
+        const filter = args[0]?.toLowerCase() || "";
+        ui.blank();
+        say(" " + chalk.bold.hex("#3a7a6e")("✦ 模型目录 · Model Catalog"));
+        dim("  ─────────────────────────────────────────────");
+        const providers = listProviders();
+        let totalModels = 0;
+        for (const p of providers) {
+          const models = modelsFor(p);
+          if (!models.length) continue;
+          if (filter && !p.toLowerCase().includes(filter) && !providerLabel(p).toLowerCase().includes(filter)) continue;
+          const label = providerLabel(p);
+          say(" " + chalk.bold.hex("#3a7a6e")(`  ${label}`));
+          for (const m of models) {
+            totalModels++;
+            const costStr = m.costIn === 0 && m.costOut === 0 ? chalk.green("免费") : chalk.dim(`$${m.costIn.toFixed(2)}/$${m.costOut.toFixed(2)}`);
+            const ctxStr = m.context >= 1000000 ? chalk.cyan(`${(m.context / 1000000).toFixed(0)}M`) : m.context >= 1000 ? chalk.cyan(`${(m.context / 1000).toFixed(0)}K`) : chalk.cyan(`${m.context}`);
+            say(`   ${chalk.dim("·")} ${chalk.white(m.id.padEnd(38))} ${ctxStr} ${chalk.dim(" ")} ${costStr} ${chalk.gray(m.desc)}`);
+          }
+        }
+        dim(`  ────────────────────────────────────────────`);
+        dim(`  共 ${providers.length} 个 Provider · ${totalModels} 个模型`);
+        dim("  用法: /models [provider] 筛选 · /model <id> 切换");
+        ui.blank();
+        continue;
+      }
       if (cmdL === "/sessions") {
         lastSessions = await agent.memory.listSessions();
         const active = agent.memory.getActiveSession();
@@ -555,8 +585,131 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         for (const f of [...r.restored, ...r.deleted].slice(0, 10)) dim(f);
         continue;
       }
+      if (cmdL === "/undo" || cmdL.startsWith("/undo ")) {
+        const cp = getFileCheckpoints();
+        const arg = inp.slice(5).trim();
+        const n = /^\d+$/.test(arg) ? parseInt(arg, 10) : 1;
+        const r = cp.rewind(n);
+        if (r.turns === 0) {
+          const turns = cp.list();
+          if (!turns.length) { dim("没有可撤销的文件改动"); continue; }
+          say(" " + chalk.bold("检查点") + chalk.dim(` · ${turns.length} 轮可撤销`));
+          for (const t of turns.slice(0, 8)) dim(`${t.label} · ${t.files.length} 个文件`);
+          continue;
+        }
+        say(" " + chalk.hex(OK_HEX)(`↺ 已撤销 ${r.turns} 轮`) + chalk.dim(` · 恢复 ${r.restored.length} 个文件`));
+        for (const f of r.restored.slice(0, 10)) dim(f);
+        continue;
+      }
+      if (cmdL === "/redo") {
+        const cp = getFileCheckpoints();
+        const r = cp.redo();
+        if (r.turns === 0) { dim("没有可重做的操作"); continue; }
+        say(" " + chalk.hex(OK_HEX)(`↻ 已重做 ${r.turns} 轮`) + chalk.dim(` · 恢复 ${r.restored.length} 个文件`));
+        for (const f of r.restored.slice(0, 10)) dim(f);
+        continue;
+      }
+      if (cmdL === "/export" || cmdL.startsWith("/export ")) {
+        const filename = inp.slice(8).trim() || `skyloom-export-${Date.now()}.md`;
+        const msgs = agent.memory.shortTerm.filter((m: any) => m.role !== "system");
+        let md = `# Skyloom Session Export\n\n**Agent**: ${agent.name}\n**Date**: ${new Date().toISOString()}\n**Messages**: ${msgs.length}\n\n---\n\n`;
+        for (const m of msgs) {
+          const role = m.role === "user" ? "👤 User" : `🤖 ${agent.name}`;
+          md += `## ${role}\n\n${m.content}\n\n`;
+        }
+        require("fs").writeFileSync(filename, md, "utf-8");
+        say(" " + chalk.hex(OK_HEX)(`✓ 已导出到 ${filename}`) + chalk.dim(` · ${msgs.length} 条消息`));
+        continue;
+      }
+      if (cmdL === "/thinking") {
+        const cfg = (ctx as any).config;
+        cfg.show_thinking = !cfg.show_thinking;
+        dim(`推理过程显示 → ${cfg.show_thinking ? "开启" : "关闭"}`);
+        continue;
+      }
+      if (cmdL === "/details") {
+        const cfg = (ctx as any).config;
+        cfg.show_tool_details = !cfg.show_tool_details;
+        dim(`工具执行详情 → ${cfg.show_tool_details ? "开启" : "关闭"}`);
+        continue;
+      }
+      if (cmdL === "/skills") {
+        const skills = globalSkillRegistry.getSkills();
+        ui.blank();
+        say(" " + chalk.bold.hex("#3a7a6e")("✦ 技能目录 · Skills"));
+        dim("  ─────────────────────────────────────────────");
+        for (const s of skills.slice(0, 20)) {
+          say(`   ${chalk.dim("·")} ${chalk.white(s.name.padEnd(24))} ${chalk.gray(s.description.slice(0, 50))}`);
+        }
+        dim(`  共 ${skills.length} 个技能 · 使用时自动激活`);
+        ui.blank();
+        continue;
+      }
+      if (cmdL === "/review" || cmdL.startsWith("/review ")) {
+        const target = inp.slice(9).trim() || "uncommitted";
+        ui.blank();
+        say(" " + chalk.bold("  代码审查 · Code Review"));
+        dim(`  目标: ${target}`);
+        ui.blank();
+        const reviewPrompt = `Please review the code changes for ${target}. Focus on:
+1. Code quality and best practices
+2. Potential bugs or issues
+3. Security concerns
+4. Performance implications
+5. Suggestions for improvement
 
-      // ── 自定义斜杠命令 ──
+Provide specific, actionable feedback.`;
+        await loomStream(ui, agent, reviewPrompt);
+        continue;
+      }
+      if (cmdL === "/connect" || cmdL.startsWith("/connect ")) {
+        const provider = inp.slice(9).trim();
+        if (!provider) {
+          ui.blank();
+          say(" " + chalk.bold("✦ 配置 Provider"));
+          dim("  用法: /connect <provider>");
+          dim("  示例: /connect openai");
+          ui.blank();
+          continue;
+        }
+        const meta = PROVIDER_META[provider.toLowerCase()];
+        if (!meta) { dim(`'${provider}' 不是已知 Provider`); continue; }
+        ui.blank();
+        say(" " + chalk.bold.hex("#3a7a6e")(meta.name));
+        dim(`  环境变量: ${meta.envVar || "(无)"}`);
+        dim(`  设置: /apikey set ${provider} <key>`);
+        ui.blank();
+        continue;
+      }
+      if (cmdL === "/warp" || cmdL.startsWith("/warp ")) {
+        const newPath = inp.slice(6).trim();
+        if (!newPath) { dim("用法: /warp <path> — 切换工作区"); continue; }
+        const resolved = require("path").resolve(newPath);
+        if (!require("fs").existsSync(resolved)) { dim(`路径不存在: ${resolved}`); continue; }
+        (ctx as any).workspacePath = resolved;
+        agent.reloadProjectMemory();
+        say(" " + chalk.hex(OK_HEX)(`✓ 工作区 → ${resolved}`));
+        continue;
+      }
+      if (cmdL === "/move" || cmdL.startsWith("/move ")) {
+        const newPath = inp.slice(6).trim();
+        if (!newPath) { dim("用法: /move <path> — 移动会话到项目"); continue; }
+        const resolved = require("path").resolve(newPath);
+        if (!require("fs").existsSync(resolved)) { dim(`路径不存在: ${resolved}`); continue; }
+        (ctx as any).workspacePath = resolved;
+        agent.reloadProjectMemory();
+        say(" " + chalk.hex(OK_HEX)(`✓ 工作区 → ${resolved}`));
+        continue;
+      }
+      if (cmdL === "/summarize") {
+        ui.busy = true; ui.busyLabel = "压缩上下文";
+        try { const r = await agent.compact(); say(" " + chalk.hex(OK_HEX)("✓ ") + chalk.dim(String(r))); }
+        catch (e: any) { say(" " + chalk.hex(ERR_HEX)("✗ ") + chalk.dim(String(e?.message || e))); }
+        ui.busy = false; ui.busyLabel = "";
+        continue;
+      }
+
+      // ── 自定义斜杠命令 ─
       if (inp.startsWith("/")) {
         const hit = resolveCustomCommand(inp, customCommands);
         if (hit) {

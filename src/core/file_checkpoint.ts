@@ -38,6 +38,7 @@ const MUTATING_TOOL_RE = /^(write_file|edit_file|delete_file)$/;
 class FileCheckpointStore {
   private turns: CheckpointTurn[] = [];
   private current: CheckpointTurn | null = null;
+  private redoStack: CheckpointTurn[] = [];
   private seq = 0;
 
   /** Open a new turn; subsequent snapshots attach to it. */
@@ -118,10 +119,36 @@ class FileCheckpointStore {
       }
     }
 
-    // Rewound turns are consumed.
+    // Rewound turns are consumed and pushed to redo stack.
     const ids = new Set(target.map(t => t.id));
+    const rewoundTurns = this.turns.filter(t => ids.has(t.id));
     this.turns = this.turns.filter(t => !ids.has(t.id));
     if (this.current && ids.has(this.current.id)) this.current = null;
+    this.redoStack.push(...rewoundTurns.reverse());
+    return { restored, deleted, turns: target.length };
+  }
+
+  /**
+   * Redo the last undone turns. Restores files to their post-rewind state.
+   */
+  redo(): { restored: string[]; deleted: string[]; turns: number } {
+    if (this.redoStack.length === 0) return { restored: [], deleted: [], turns: 0 };
+    const target = [this.redoStack.pop()!];
+    const restored: string[] = [];
+    const deleted: string[] = [];
+    for (const snap of target[0].snapshots.values()) {
+      try {
+        if (snap.content === null) {
+          if (fs.existsSync(snap.path)) { fs.unlinkSync(snap.path); deleted.push(snap.path); }
+        } else {
+          fs.mkdirSync(path.dirname(snap.path), { recursive: true });
+          fs.writeFileSync(snap.path, snap.content, 'utf-8');
+          restored.push(snap.path);
+        }
+      } catch (e) {
+        log.warn('redo_failed', { path: snap.path, error: String(e) });
+      }
+    }
     return { restored, deleted, turns: target.length };
   }
 
