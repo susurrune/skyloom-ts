@@ -559,8 +559,9 @@ export function renderInkWashUI(): string {
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta name="color-scheme" content="light dark">
 <title>水墨气象台 · Skyloom</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="shortcut icon" href="/favicon.ico">
+<link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=1.15.5">
+<link rel="shortcut icon" type="image/svg+xml" href="/favicon.ico?v=1.15.5">
+<link rel="apple-touch-icon" href="/favicon.svg?v=1.15.5">
 <meta name="theme-color" content="#f7f3e9">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
