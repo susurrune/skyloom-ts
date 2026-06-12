@@ -34,6 +34,12 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      # OIDC trusted publishing requires npm >= 11.5.1; Node 20 bundles npm 10,
+      # whose unauthenticated PUT is rejected by the registry with 404 — the
+      # reason every previous publish run (v1.14.8, v1.14.9) failed.
+      - run: npm install -g npm@^11.5.1
+      - run: npm --version
+
       - run: npm ci
       - run: npm run build
 
