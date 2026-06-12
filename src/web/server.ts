@@ -16,7 +16,7 @@ const log = getLogger("web-server");
 /* ──────────────────────────────────────────────
    Server
    ────────────────────────────────────────────── */
-export async function startWebServer(port: number = 3000): Promise<void> {
+export async function startWebServer(port: number = 7777): Promise<void> {
   const ctx = createSystemContext();
 
   // Bind to loopback by default: the chat API drives the agent (and its tools)
