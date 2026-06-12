@@ -51,15 +51,36 @@ export interface ProviderMeta {
  * Provider *ids* match the keys used in config/models.yaml.
  */
 export const PROVIDER_META: Record<string, ProviderMeta> = {
-  deepseek: { id: "deepseek", name: "DeepSeek", envVar: "DEEPSEEK_API_KEY", order: 1 },
-  openai: { id: "openai", name: "OpenAI", envVar: "OPENAI_API_KEY", order: 2 },
-  anthropic: { id: "anthropic", name: "Anthropic", envVar: "ANTHROPIC_API_KEY", order: 3 },
-  google: { id: "google", name: "Google Gemini", envVar: "GEMINI_API_KEY", order: 4 },
-  groq: { id: "groq", name: "Groq", envVar: "GROQ_API_KEY", order: 5 },
-  openrouter: { id: "openrouter", name: "OpenRouter (多模型)", envVar: "OPENROUTER_API_KEY", order: 6 },
-  mistral: { id: "mistral", name: "Mistral", envVar: "MISTRAL_API_KEY", order: 7 },
-  xai: { id: "xai", name: "xAI (Grok)", envVar: "XAI_API_KEY", order: 8 },
-  ollama: { id: "ollama", name: "Ollama 本地", order: 9 },
+  // Major international providers
+  openai: { id: "openai", name: "OpenAI", envVar: "OPENAI_API_KEY", order: 1 },
+  anthropic: { id: "anthropic", name: "Anthropic", envVar: "ANTHROPIC_API_KEY", order: 2 },
+  google: { id: "google", name: "Google Gemini", envVar: "GEMINI_API_KEY", order: 3 },
+  deepseek: { id: "deepseek", name: "DeepSeek", envVar: "DEEPSEEK_API_KEY", order: 4 },
+  xai: { id: "xai", name: "xAI (Grok)", envVar: "XAI_API_KEY", order: 5 },
+  mistral: { id: "mistral", name: "Mistral", envVar: "MISTRAL_API_KEY", order: 6 },
+  groq: { id: "groq", name: "Groq", envVar: "GROQ_API_KEY", order: 7 },
+  cohere: { id: "cohere", name: "Cohere", envVar: "COHERE_API_KEY", order: 8 },
+  perplexity: { id: "perplexity", name: "Perplexity", envVar: "PERPLEXITY_API_KEY", order: 9 },
+  fireworks: { id: "fireworks", name: "Fireworks AI", envVar: "FIREWORKS_API_KEY", order: 10 },
+  together: { id: "together", name: "Together AI", envVar: "TOGETHER_API_KEY", order: 11 },
+  openrouter: { id: "openrouter", name: "OpenRouter (多模型)", envVar: "OPENROUTER_API_KEY", order: 12 },
+  reka: { id: "reka", name: "Reka", envVar: "REKA_API_KEY", order: 13 },
+  nvidia: { id: "nvidia", name: "Nvidia NIM", envVar: "NVIDIA_API_KEY", order: 14 },
+  sambanova: { id: "sambanova", name: "SambaNova", envVar: "SAMBANOVA_API_KEY", order: 15 },
+  // Chinese providers
+  qwen: { id: "qwen", name: "通义千问 (Qwen)", envVar: "QWEN_API_KEY", order: 20 },
+  zhipu: { id: "zhipu", name: "智谱 AI (GLM)", envVar: "ZHIPU_API_KEY", order: 21 },
+  lingyiwanwu: { id: "lingyiwanwu", name: "零一万物 (Yi)", envVar: "LINGYIWANWU_API_KEY", order: 22 },
+  minimax: { id: "minimax", name: "MiniMax", envVar: "MINIMAX_API_KEY", order: 23 },
+  moonshot: { id: "moonshot", name: "月之暗面 (Kimi)", envVar: "MOONSHOT_API_KEY", order: 24 },
+  baidu: { id: "baidu", name: "百度 (文心一言)", envVar: "BAIDU_API_KEY", order: 25 },
+  baichuan: { id: "baichuan", name: "百川智能", envVar: "BAICHUAN_API_KEY", order: 26 },
+  stepfun: { id: "stepfun", name: "阶跃星辰", envVar: "STEPFUN_API_KEY", order: 27 },
+  // Local / self-hosted
+  ollama: { id: "ollama", name: "Ollama 本地", order: 30 },
+  lmstudio: { id: "lmstudio", name: "LM Studio 本地", order: 31 },
+  vllm: { id: "vllm", name: "vLLM 自托管", order: 32 },
+  litellm: { id: "litellm", name: "LiteLLM 代理", order: 33 },
 };
 
 /** Raw shape of an entry in config/models.yaml. */

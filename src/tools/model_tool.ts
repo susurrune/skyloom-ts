@@ -16,19 +16,38 @@ export function createModelTools(agentName: string, runtimeConfig: any): ToolDef
     name: 'list_models',
     description:
       'List every model available in the catalog (grouped by provider) plus your current model. ' +
-      'Call this before set_my_model to pick a valid id.',
-    parameters: [],
-    handler: async () => {
+      'Call this before set_my_model to pick a valid id. ' +
+      'Shows model id, context window, cost per 1M tokens, and description.',
+    parameters: [
+      {
+        name: 'provider',
+        type: 'string',
+        description: 'Optional: filter by provider name (e.g. "openai", "deepseek", "qwen")',
+        required: false,
+      },
+    ],
+    handler: async (kwargs: Record<string, any>) => {
       const me = describeAgentLLM(runtimeConfig, agentName);
+      const filter = String(kwargs.provider || '').toLowerCase();
       const lines: string[] = [
         `Current: ${me.model} (${me.source === 'agent' ? 'per-agent override' : 'unified default'})`,
         '',
       ];
+      let totalModels = 0;
       for (const p of listProviders()) {
         const models = modelsFor(p);
         if (!models.length) continue;
-        lines.push(`${providerLabel(p)}: ${models.map(m => m.id).join(', ')}`);
+        if (filter && !p.toLowerCase().includes(filter) && !providerLabel(p).toLowerCase().includes(filter)) continue;
+        lines.push(`${providerLabel(p)}:`);
+        for (const m of models) {
+          totalModels++;
+          const costStr = m.costIn === 0 && m.costOut === 0 ? 'FREE' : `$${m.costIn.toFixed(2)}/$${m.costOut.toFixed(2)}`;
+          const ctxStr = m.context >= 1000000 ? `${(m.context / 1000000).toFixed(0)}M` : m.context >= 1000 ? `${(m.context / 1000).toFixed(0)}K` : `${m.context}`;
+          lines.push(`  · ${m.id.padEnd(42)} ${ctxStr.padStart(5)}  ${costStr.padStart(14)}  ${m.desc}`);
+        }
+        lines.push('');
       }
+      lines.push(`Total: ${listProviders().length} providers · ${totalModels} models`);
       return lines.join('\n');
     },
   };

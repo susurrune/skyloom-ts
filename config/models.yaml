@@ -1,6 +1,10 @@
-# Model Catalog — latest models per provider
+# Model Catalog — comprehensive multi-provider model directory
 # Every model listed here is directly callable via the LLM client.
+# Costs are USD per 1M tokens. Context windows in tokens.
 
+# ═══════════════════════════════════════════
+# OpenAI
+# ═══════════════════════════════════════════
 openai:
   - name: gpt-4.1
     context: 1048576
@@ -12,6 +16,11 @@ openai:
     cost_in: 0.40
     cost_out: 1.60
     desc: "轻量，同款长上下文"
+  - name: gpt-4.1-nano
+    context: 1048576
+    cost_in: 0.10
+    cost_out: 0.40
+    desc: "超轻量，极致性价比"
   - name: gpt-4o
     context: 131072
     cost_in: 2.50
@@ -22,12 +31,45 @@ openai:
     cost_in: 0.15
     cost_out: 0.60
     desc: "小模型高性价比"
+  - name: o3
+    context: 204800
+    cost_in: 2.00
+    cost_out: 8.00
+    desc: "最新推理模型"
+  - name: o3-mini
+    context: 204800
+    cost_in: 1.10
+    cost_out: 4.40
+    desc: "推理模型轻量版"
   - name: o4-mini
     context: 204800
     cost_in: 1.10
     cost_out: 4.40
     desc: "推理模型轻量版"
+  - name: o1
+    context: 204800
+    cost_in: 15.00
+    cost_out: 60.00
+    desc: "深度推理旗舰"
+  - name: o1-mini
+    context: 131072
+    cost_in: 3.00
+    cost_out: 12.00
+    desc: "推理模型轻量版"
+  - name: o1-pro
+    context: 204800
+    cost_in: 150.00
+    cost_out: 600.00
+    desc: "推理模型专业版（极贵）"
+  - name: gpt-4.5-preview
+    context: 131072
+    cost_in: 75.00
+    cost_out: 150.00
+    desc: "GPT-4.5预览版"
 
+# ═══════════════════════════════════════════
+# Anthropic
+# ═══════════════════════════════════════════
 anthropic:
   - name: claude-sonnet-4-6
     context: 204800
@@ -44,7 +86,65 @@ anthropic:
     cost_in: 0.80
     cost_out: 4.00
     desc: "速度最快"
+  - name: claude-3-7-sonnet
+    context: 204800
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "Claude 3.7 Sonnet"
+  - name: claude-3-5-sonnet
+    context: 204800
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "Claude 3.5 Sonnet"
+  - name: claude-3-5-haiku
+    context: 204800
+    cost_in: 0.80
+    cost_out: 4.00
+    desc: "Claude 3.5 Haiku"
+  - name: claude-3-opus
+    context: 204800
+    cost_in: 15.00
+    cost_out: 75.00
+    desc: "Claude 3 Opus"
 
+# ═══════════════════════════════════════════
+# Google
+# ═══════════════════════════════════════════
+google:
+  - name: gemini-2.5-pro
+    context: 1048576
+    cost_in: 1.25
+    cost_out: 10.00
+    desc: "旗舰推理"
+  - name: gemini-2.5-flash
+    context: 1048576
+    cost_in: 0.30
+    cost_out: 2.50
+    desc: "快速长上下文"
+  - name: gemini-2.0-flash
+    context: 1048576
+    cost_in: 0.10
+    cost_out: 0.40
+    desc: "快速低成本"
+  - name: gemini-2.0-flash-lite
+    context: 1048576
+    cost_in: 0.075
+    cost_out: 0.30
+    desc: "超轻量快速"
+  - name: gemini-1.5-pro
+    context: 2097152
+    cost_in: 1.25
+    cost_out: 5.00
+    desc: "百万上下文"
+  - name: gemini-1.5-flash
+    context: 1048576
+    cost_in: 0.075
+    cost_out: 0.30
+    desc: "快速低成本"
+
+# ═══════════════════════════════════════════
+# DeepSeek
+# ═══════════════════════════════════════════
 deepseek:
   - name: deepseek-chat
     context: 131072
@@ -66,19 +166,80 @@ deepseek:
     cost_in: 1.74
     cost_out: 3.48
     desc: "旗舰版"
+  - name: deepseek-r1
+    context: 131072
+    cost_in: 0.55
+    cost_out: 2.19
+    desc: "推理模型"
 
-google:
-  - name: gemini-2.5-pro
-    context: 1048576
-    cost_in: 1.25
-    cost_out: 10.00
-    desc: "旗舰推理"
-  - name: gemini-2.5-flash
-    context: 1048576
+# ═══════════════════════════════════════════
+# xAI (Grok)
+# ═══════════════════════════════════════════
+xai:
+  - name: grok-4
+    context: 131072
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "Grok最新旗舰"
+  - name: grok-3
+    context: 131072
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "Grok 3"
+  - name: grok-3-mini
+    context: 131072
     cost_in: 0.30
-    cost_out: 2.50
-    desc: "快速长上下文"
+    cost_out: 0.50
+    desc: "Grok 3 Mini"
+  - name: grok-2
+    context: 131072
+    cost_in: 2.00
+    cost_out: 10.00
+    desc: "Grok 2"
 
+# ═══════════════════════════════════════════
+# Mistral
+# ═══════════════════════════════════════════
+mistral:
+  - name: mistral-large
+    context: 131072
+    cost_in: 2.00
+    cost_out: 6.00
+    desc: "旗舰通用"
+  - name: mistral-small
+    context: 32768
+    cost_in: 0.20
+    cost_out: 0.60
+    desc: "轻量高效"
+  - name: codestral
+    context: 32768
+    cost_in: 0.30
+    cost_out: 0.90
+    desc: "代码专用"
+  - name: pixtral-large
+    context: 131072
+    cost_in: 2.00
+    cost_out: 6.00
+    desc: "多模态旗舰"
+  - name: pixtral
+    context: 131072
+    cost_in: 0.15
+    cost_out: 0.45
+    desc: "多模态轻量"
+  - name: ministral-8b
+    context: 131072
+    cost_in: 0.10
+    cost_out: 0.10
+    desc: "8B小模型"
+  - name: ministral-3b
+    context: 131072
+    cost_in: 0.04
+    cost_out: 0.04
+    desc: "3B超轻量"
+
+# ═══════════════════════════════════════════
+# Groq (极速推理)
+# ═══════════════════════════════════════════
 groq:
   - name: llama-4-scout
     context: 131072
@@ -95,29 +256,160 @@ groq:
     cost_in: 0
     cost_out: 0
     desc: "MoE混合专家"
+  - name: gemma2-9b-it
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "Google Gemma 9B"
+  - name: llama-3.1-8b-instant
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.1 8B 极速"
 
-mistral:
-  - name: mistral-large
+# ═══════════════════════════════════════════
+# Cohere
+# ═══════════════════════════════════════════
+cohere:
+  - name: command-r-plus
+    context: 131072
+    cost_in: 2.50
+    cost_out: 10.00
+    desc: "旗舰RAG优化"
+  - name: command-r
+    context: 131072
+    cost_in: 0.50
+    cost_out: 1.50
+    desc: "RAG优化"
+  - name: command-light
+    context: 4096
+    cost_in: 0.30
+    cost_out: 0.60
+    desc: "轻量快速"
+  - name: command
+    context: 4096
+    cost_in: 1.00
+    cost_out: 2.00
+    desc: "通用对话"
+
+# ═══════════════════════════════════════════
+# Perplexity (搜索增强)
+# ═══════════════════════════════════════════
+perplexity:
+  - name: sonar-pro
+    context: 204800
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "搜索增强旗舰"
+  - name: sonar
+    context: 131072
+    cost_in: 1.00
+    cost_out: 1.00
+    desc: "搜索增强标准"
+  - name: sonar-reasoning
+    context: 131072
+    cost_in: 5.00
+    cost_out: 5.00
+    desc: "搜索+推理"
+  - name: sonar-reasoning-pro
     context: 131072
     cost_in: 2.00
-    cost_out: 6.00
-    desc: "旗舰通用"
-  - name: mistral-small
-    context: 32768
-    cost_in: 0.20
-    cost_out: 0.60
-    desc: "轻量高效"
+    cost_out: 8.00
+    desc: "搜索+推理专业版"
 
+# ═══════════════════════════════════════════
+# Fireworks AI
+# ═══════════════════════════════════════════
+fireworks:
+  - name: accounts/fireworks/models/llama-v3p1-405b-instruct
+    context: 131072
+    cost_in: 3.00
+    cost_out: 3.00
+    desc: "Llama 3.1 405B"
+  - name: accounts/fireworks/models/llama-v3p1-70b-instruct
+    context: 131072
+    cost_in: 0.90
+    cost_out: 0.90
+    desc: "Llama 3.1 70B"
+  - name: accounts/fireworks/models/mixtral-8x22b-instruct
+    context: 65536
+    cost_in: 1.20
+    cost_out: 1.20
+    desc: "Mixtral 8x22B"
+  - name: accounts/fireworks/models/qwen2p5-72b-instruct
+    context: 32768
+    cost_in: 0.90
+    cost_out: 0.90
+    desc: "Qwen 2.5 72B"
+
+# ═══════════════════════════════════════════
+# Together AI
+# ═══════════════════════════════════════════
+together:
+  - name: meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo
+    context: 32768
+    cost_in: 3.50
+    cost_out: 3.50
+    desc: "Llama 3.1 405B Turbo"
+  - name: meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
+    context: 32768
+    cost_in: 0.88
+    cost_out: 0.88
+    desc: "Llama 3.1 70B Turbo"
+  - name: meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
+    context: 32768
+    cost_in: 0.18
+    cost_out: 0.18
+    desc: "Llama 3.1 8B Turbo"
+  - name: Qwen/Qwen2.5-72B-Instruct-Turbo
+    context: 32768
+    cost_in: 1.20
+    cost_out: 1.20
+    desc: "Qwen 2.5 72B Turbo"
+  - name: deepseek-ai/DeepSeek-V3
+    context: 32768
+    cost_in: 1.25
+    cost_out: 1.25
+    desc: "DeepSeek V3"
+  - name: deepseek-ai/DeepSeek-R1
+    context: 32768
+    cost_in: 7.00
+    cost_out: 7.00
+    desc: "DeepSeek R1"
+
+# ═══════════════════════════════════════════
+# OpenRouter (多模型聚合)
+# ═══════════════════════════════════════════
 openrouter:
   - name: openai/gpt-4.1
     context: 1048576
     cost_in: 2.00
     cost_out: 8.00
     desc: "通过OpenRouter"
+  - name: openai/gpt-4o
+    context: 131072
+    cost_in: 2.50
+    cost_out: 10.00
+    desc: "通过OpenRouter"
+  - name: openai/gpt-4o-mini
+    context: 131072
+    cost_in: 0.15
+    cost_out: 0.60
+    desc: "通过OpenRouter"
   - name: anthropic/claude-sonnet-4-6
     context: 204800
     cost_in: 3.00
     cost_out: 15.00
+    desc: "通过OpenRouter"
+  - name: anthropic/claude-opus-4-7
+    context: 204800
+    cost_in: 5.00
+    cost_out: 25.00
+    desc: "通过OpenRouter"
+  - name: google/gemini-2.5-pro
+    context: 1048576
+    cost_in: 1.25
+    cost_out: 10.00
     desc: "通过OpenRouter"
   - name: google/gemini-2.5-flash
     context: 1048576
@@ -129,27 +421,508 @@ openrouter:
     cost_in: 0.20
     cost_out: 0.60
     desc: "Meta旗舰"
-
-xai:
-  - name: grok-4
+  - name: meta-llama/llama-3.1-405b-instruct
+    context: 32768
+    cost_in: 2.50
+    cost_out: 2.50
+    desc: "Llama 3.1 405B"
+  - name: deepseek/deepseek-chat
+    context: 131072
+    cost_in: 0.27
+    cost_out: 1.10
+    desc: "通过OpenRouter"
+  - name: deepseek/deepseek-r1
+    context: 131072
+    cost_in: 0.55
+    cost_out: 2.19
+    desc: "通过OpenRouter"
+  - name: x-ai/grok-4
     context: 131072
     cost_in: 3.00
     cost_out: 15.00
-    desc: "Grok最新"
+    desc: "通过OpenRouter"
+  - name: mistralai/mistral-large
+    context: 131072
+    cost_in: 2.00
+    cost_out: 6.00
+    desc: "通过OpenRouter"
 
+# ═══════════════════════════════════════════
+# 通义千问 / Qwen (阿里云)
+# ══════════════════════════════════════════
+qwen:
+  - name: qwen-max
+    context: 32768
+    cost_in: 2.80
+    cost_out: 8.40
+    desc: "通义千问旗舰"
+  - name: qwen-plus
+    context: 131072
+    cost_in: 0.56
+    cost_out: 1.68
+    desc: "通义千问增强版"
+  - name: qwen-turbo
+    context: 131072
+    cost_in: 0.084
+    cost_out: 0.252
+    desc: "通义千问快速版"
+  - name: qwen-long
+    context: 1000000
+    cost_in: 0.07
+    cost_out: 0.28
+    desc: "百万上下文"
+  - name: qwen-vl-max
+    context: 32768
+    cost_in: 2.80
+    cost_out: 8.40
+    desc: "视觉理解旗舰"
+  - name: qwen-vl-plus
+    context: 32768
+    cost_in: 0.56
+    cost_out: 1.68
+    desc: "视觉理解增强"
+  - name: qwen-coder-plus
+    context: 131072
+    cost_in: 0.56
+    cost_out: 1.68
+    desc: "代码专用增强"
+  - name: qwen-coder-turbo
+    context: 131072
+    cost_in: 0.084
+    cost_out: 0.252
+    desc: "代码专用快速"
+  - name: qwq-plus
+    context: 131072
+    cost_in: 0.56
+    cost_out: 1.68
+    desc: "推理增强版"
+
+# ═══════════════════════════════════════════
+# 智谱 AI / GLM
+# ═══════════════════════════════════════════
+zhipu:
+  - name: glm-4-plus
+    context: 131072
+    cost_in: 7.00
+    cost_out: 7.00
+    desc: "智谱旗舰"
+  - name: glm-4
+    context: 131072
+    cost_in: 14.00
+    cost_out: 14.00
+    desc: "智谱标准版"
+  - name: glm-4-flash
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "智谱免费版"
+  - name: glm-4-air
+    context: 131072
+    cost_in: 1.40
+    cost_out: 1.40
+    desc: "智谱Air版"
+  - name: glm-4-airx
+    context: 131072
+    cost_in: 14.00
+    cost_out: 14.00
+    desc: "智谱AirX版"
+  - name: glm-4-long
+    context: 1000000
+    cost_in: 1.40
+    cost_out: 1.40
+    desc: "智谱长上下文"
+  - name: glm-4-flashx
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "智谱FlashX免费"
+  - name: glm-4v-plus
+    context: 8192
+    cost_in: 14.00
+    cost_out: 14.00
+    desc: "智谱视觉旗舰"
+  - name: glm-4v-flash
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "智谱视觉免费"
+  - name: glm-z1-air
+    context: 131072
+    cost_in: 1.40
+    cost_out: 1.40
+    desc: "智谱推理Air"
+  - name: glm-z1-flash
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "智谱推理免费"
+
+# ═══════════════════════════════════════════
+# 零一万物 / 01.AI (Yi)
+# ═══════════════════════════════════════════
+lingyiwanwu:
+  - name: yi-large
+    context: 32768
+    cost_in: 2.80
+    cost_out: 2.80
+    desc: "零一万物旗舰"
+  - name: yi-large-turbo
+    context: 16384
+    cost_in: 1.68
+    cost_out: 1.68
+    desc: "零一万物快速"
+  - name: yi-large-rag
+    context: 16384
+    cost_in: 3.50
+    cost_out: 3.50
+    desc: "零一万物RAG"
+  - name: yi-medium
+    context: 16384
+    cost_in: 0.35
+    cost_out: 0.35
+    desc: "零一万物中等"
+  - name: yi-spark
+    context: 16384
+    cost_in: 0.14
+    cost_out: 0.14
+    desc: "零一万物轻量"
+  - name: yi-vision
+    context: 16384
+    cost_in: 0.84
+    cost_out: 0.84
+    desc: "零一万物视觉"
+
+# ═══════════════════════════════════════════
+# MiniMax
+# ═══════════════════════════════════════════
+minimax:
+  - name: MiniMax-Text-01
+    context: 1000000
+    cost_in: 0.14
+    cost_out: 1.12
+    desc: "MiniMax旗舰，百万上下文"
+  - name: abab6.5s-chat
+    context: 245760
+    cost_in: 0.14
+    cost_out: 0.14
+    desc: "MiniMax 6.5s"
+  - name: abab5.5s-chat
+    context: 8192
+    cost_in: 0.21
+    cost_out: 0.21
+    desc: "MiniMax 5.5s"
+
+# ═══════════════════════════════════════════
+# 月之暗面 / Moonshot
+# ═══════════════════════════════════════════
+moonshot:
+  - name: moonshot-v1-128k
+    context: 131072
+    cost_in: 8.40
+    cost_out: 8.40
+    desc: "Moonshot 128K"
+  - name: moonshot-v1-32k
+    context: 32768
+    cost_in: 3.36
+    cost_out: 3.36
+    desc: "Moonshot 32K"
+  - name: moonshot-v1-8k
+    context: 8192
+    cost_in: 1.68
+    cost_out: 1.68
+    desc: "Moonshot 8K"
+  - name: kimi-latest
+    context: 131072
+    cost_in: 1.68
+    cost_out: 1.68
+    desc: "Kimi最新模型"
+
+# ═══════════════════════════════════════════
+# 百度 / 文心一言
+# ═══════════════════════════════════════════
+baidu:
+  - name: ernie-4.0-8k
+    context: 8192
+    cost_in: 4.20
+    cost_out: 12.60
+    desc: "文心4.0旗舰"
+  - name: ernie-3.5-8k
+    context: 8192
+    cost_in: 1.68
+    cost_out: 1.68
+    desc: "文心3.5标准"
+  - name: ernie-speed-8k
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "文心Speed免费"
+  - name: ernie-lite-8k
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "文心Lite免费"
+  - name: ernie-tiny-8k
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "文心Tiny免费"
+  - name: ernie-4.0-turbo-8k
+    context: 8192
+    cost_in: 4.20
+    cost_out: 12.60
+    desc: "文心4.0 Turbo"
+  - name: ernie-4.0-turbo-128k
+    context: 131072
+    cost_in: 4.20
+    cost_out: 12.60
+    desc: "文心4.0 Turbo 128K"
+
+# ═══════════════════════════════════════════
+# 百川智能 / Baichuan
+# ═══════════════════════════════════════════
+baichuan:
+  - name: baichuan4
+    context: 32768
+    cost_in: 14.00
+    cost_out: 14.00
+    desc: "百川4旗舰"
+  - name: baichuan3-turbo
+    context: 32768
+    cost_in: 0.98
+    cost_out: 0.98
+    desc: "百川3 Turbo"
+  - name: baichuan2-turbo
+    context: 32768
+    cost_in: 0.56
+    cost_out: 0.56
+    desc: "百川2 Turbo"
+
+# ═══════════════════════════════════════════
+# 阶跃星辰 / StepFun
+# ═══════════════════════════════════════════
+stepfun:
+  - name: step-2-16k
+    context: 16384
+    cost_in: 1.40
+    cost_out: 1.40
+    desc: "阶跃2代 16K"
+  - name: step-1-128k
+    context: 131072
+    cost_in: 2.80
+    cost_out: 2.80
+    desc: "阶跃1代 128K"
+  - name: step-1-32k
+    context: 32768
+    cost_in: 0.70
+    cost_out: 0.70
+    desc: "阶跃1代 32K"
+  - name: step-1-flash
+    context: 8192
+    cost_in: 0.14
+    cost_out: 0.14
+    desc: "阶跃1代 Flash"
+  - name: step-1v-8k
+    context: 8192
+    cost_in: 0.70
+    cost_out: 0.70
+    desc: "阶跃视觉 8K"
+
+# ═══════════════════════════════════════════
+# Reka
+# ═══════════════════════════════════════════
+reka:
+  - name: reka-core
+    context: 131072
+    cost_in: 3.00
+    cost_out: 15.00
+    desc: "Reka旗舰多模态"
+  - name: reka-flash
+    context: 131072
+    cost_in: 0.80
+    cost_out: 2.00
+    desc: "Reka快速多模态"
+  - name: reka-edge
+    context: 131072
+    cost_in: 0.40
+    cost_out: 1.00
+    desc: "Reka轻量多模态"
+
+# ═══════════════════════════════════════════
+# Nvidia (NIM)
+# ═══════════════════════════════════════════
+nvidia:
+  - name: nemotron-4-340b-instruct
+    context: 4096
+    cost_in: 0
+    cost_out: 0
+    desc: "Nvidia Nemotron 340B 免费"
+  - name: meta/llama-3.1-405b-instruct
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.1 405B 免费"
+  - name: meta/llama-3.1-70b-instruct
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.1 70B 免费"
+  - name: meta/llama-3.1-8b-instruct
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.1 8B 免费"
+  - name: qwen/qwen2.5-72b-instruct
+    context: 32768
+    cost_in: 0
+    cost_out: 0
+    desc: "Qwen 2.5 72B 免费"
+  - name: google/gemma-2-9b-it
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "Gemma 2 9B 免费"
+  - name: mistralai/mixtral-8x22b-instruct-v0.1
+    context: 65536
+    cost_in: 0
+    cost_out: 0
+    desc: "Mixtral 8x22B 免费"
+  - name: mistralai/mistral-large-2
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Mistral Large 2 免费"
+
+# ═══════════════════════════════════════════
+# SambaNova
+# ═══════════════════════════════════════════
+sambanova:
+  - name: Meta-Llama-3.1-405B-Instruct
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.1 405B 免费"
+  - name: Meta-Llama-3.1-70B-Instruct
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.1 70B 免费"
+  - name: Meta-Llama-3.1-8B-Instruct
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.1 8B 免费"
+  - name: Qwen2.5-72B-Instruct
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "Qwen 2.5 72B 免费"
+
+# ═══════════════════════════════════════════
+# Ollama (本地部署)
+# ═══════════════════════════════════════════
 ollama:
+  - name: llama3.3
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.3 70B"
+  - name: llama3.2
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.2"
+  - name: llama3.1
+    context: 131072
+    cost_in: 0
+    cost_out: 0
+    desc: "Llama 3.1"
   - name: llama3
     context: 8192
     cost_in: 0
     cost_out: 0
-    desc: "本地部署"
+    desc: "Llama 3"
   - name: qwen2.5
     context: 32768
     cost_in: 0
     cost_out: 0
-    desc: "通义千问"
+    desc: "通义千问 2.5"
+  - name: qwen2.5-coder
+    context: 32768
+    cost_in: 0
+    cost_out: 0
+    desc: "通义千问代码版"
   - name: deepseek-r1
     context: 32768
     cost_in: 0
     cost_out: 0
-    desc: "本地推理"
+    desc: "DeepSeek R1 本地推理"
+  - name: deepseek-v3
+    context: 32768
+    cost_in: 0
+    cost_out: 0
+    desc: "DeepSeek V3 本地"
+  - name: mistral
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "Mistral 7B"
+  - name: mixtral
+    context: 32768
+    cost_in: 0
+    cost_out: 0
+    desc: "Mixtral 8x7B"
+  - name: gemma2
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "Google Gemma 2"
+  - name: phi4
+    context: 16384
+    cost_in: 0
+    cost_out: 0
+    desc: "Microsoft Phi-4"
+  - name: codellama
+    context: 16384
+    cost_in: 0
+    cost_out: 0
+    desc: "Code Llama"
+  - name: nomic-embed-text
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "Nomic 嵌入模型"
+  - name: mxbai-embed-large
+    context: 512
+    cost_in: 0
+    cost_out: 0
+    desc: "MXBAI 嵌入模型"
+
+# ═══════════════════════════════════════════
+# LM Studio (本地 OpenAI 兼容)
+# ═══════════════════════════════════════════
+lmstudio:
+  - name: local-model
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "LM Studio 本地模型"
+
+# ═══════════════════════════════════════════
+# vLLM (自托管 OpenAI 兼容)
+# ═══════════════════════════════════════════
+vllm:
+  - name: local-model
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "vLLM 自托管模型"
+
+# ═══════════════════════════════════════════
+# LiteLLM Proxy (自托管)
+# ═══════════════════════════════════════════
+litellm:
+  - name: local-model
+    context: 8192
+    cost_in: 0
+    cost_out: 0
+    desc: "LiteLLM 代理模型"
