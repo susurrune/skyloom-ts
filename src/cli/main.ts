@@ -98,8 +98,8 @@ program.command("chat").argument("[agent]", "agent name", "fog")
   .action(async (a: string, o: { model?: string; classic?: boolean }) => { await chat(a, o.model, o.classic); });
 program.command("task").argument("[goal]", "task goal")
   .action(async (g?: string) => { if (g) await runTask(g); });
-program.command("web").option("-p,--port <p>", "port", "3000")
-  .action((o: { port?: string }) => { import("../web/server").then(m => m.startWebServer(parseInt(o.port || "3000"))); });
+program.command("web").option("-p,--port <p>", "port", "7777")
+  .action((o: { port?: string }) => { import("../web/server").then(m => m.startWebServer(parseInt(o.port || "7777"))); });
 program.command("mcp").action(() => { import("../core/mcp_server").then(m => m.startMCPServer()); });
 program.command("config").action(() => { const c = loadConfig(); process.stdout.write(chalk.cyan("\nConfig: ") + USER_CONFIG_DIR + "\n"); for (const [n, a] of Object.entries(c.agents || {})) process.stdout.write(`  ${chalk.bold(n)}: ${(a as any).model || "default"}\n`); });
 program.command("init").action(() => { if (!fs.existsSync(USER_CONFIG_DIR)) fs.mkdirSync(USER_CONFIG_DIR, { recursive: true }); process.stdout.write(chalk.green("✓ ") + USER_CONFIG_DIR + "\n"); });
