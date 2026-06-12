@@ -27,6 +27,7 @@ import { getModelInfo } from './catalog';
 import { estimateTokens } from './estimate';
 import { LoopGuard } from './agent/guard';
 import { Tracer, type Trace } from './trace';
+import { mapBounded, resolveConcurrency } from './concurrency';
 
 const log = getLogger('agent');
 
@@ -560,11 +561,13 @@ export class BaseAgent {
       onStatus?: (label: string) => void;
       suppressedTools?: Set<string>;     // Tools to mark as suppressed on error
       ephemeral?: boolean;               // Don't persist tool messages
+      signal?: AbortSignal;              // Cooperative cancel: skip queued tools on Ctrl-C
     }
   ): Promise<Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>> {
     const suppressed = options?.suppressedTools;
     const ephemeral = options?.ephemeral ?? false;
     const onStatus = options?.onStatus;
+    const signal = options?.signal;
 
     // Phase A: Parse all tool calls and resolve tools
     const parsed = toolCalls.map((tc) => {
@@ -618,13 +621,22 @@ export class BaseAgent {
       execPlan.push({ idx: i, prep: p, isDuplicate: false });
     }
 
-    // Phase C: Execute all unique tool calls in parallel
+    // Phase C: Execute all unique tool calls with bounded concurrency.
+    // Unbounded Promise.all let one LLM round saturate sockets/FDs/CPU; the cap
+    // bounds in-flight work. `signal` enables cooperative cancel: once the user
+    // interrupts, queued (not-yet-started) tools short-circuit to [cancelled]
+    // instead of running — in-flight tools are left to settle.
     const results = new Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null>(parsed.length).fill(null);
-    const uniqueExecutions = execPlan
-      .filter(e => !e.isDuplicate)
-      .map(async ({ idx, prep }) => {
+    const uniquePlan = execPlan.filter(e => !e.isDuplicate);
+    const concurrency = resolveConcurrency((this.config as any)?.llm?.tool_concurrency);
+    const completed = await mapBounded(
+      uniquePlan,
+      async ({ idx, prep }, _i, aborted) => {
         const p = prep;
 
+        if (aborted) {
+          return { idx, result: { tc: p.tc, result: `[cancelled] '${p.toolName}' skipped — interrupted before execution`, success: false, toolName: p.toolName } };
+        }
         if (p.parseError) {
           return { idx, result: { tc: p.tc, result: p.parseError, success: false, toolName: p.toolName } };
         }
@@ -680,9 +692,9 @@ export class BaseAgent {
           span.end('error', { error: String(e).slice(0, 120) });
           return { idx, result: { tc: p.tc, result: `Tool '${p.toolName}' execution failed: ${e}`, success: false, toolName: p.toolName } };
         }
-      });
-
-    const completed = await Promise.all(uniqueExecutions);
+      },
+      { concurrency, signal },
+    );
     for (const { idx, result } of completed) {
       results[idx] = result;
     }
@@ -1020,6 +1032,7 @@ export class BaseAgent {
         const execResults = await this.executeToolCalls(toolCallsReceived, {
           dedupCacheable: true,
           suppressedTools,
+          signal,
         });
 
         // ── Record results with streaming ──
