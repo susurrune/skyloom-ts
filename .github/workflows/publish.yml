@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+    # Continuous delivery from master: every push runs the workflow, the
+    # version check below makes it a no-op unless package.json declares a
+    # version that is not yet on npm. Needed because some environments
+    # (remote agent sessions) can push branches but not tags, and the
+    # API token cannot dispatch workflows either.
+    branches:
+      - master
   # Manual trigger: publishes whatever version master's package.json declares,
   # then creates the matching v* tag. Needed because some environments (e.g.
   # remote agent sessions) can push branches but not tags.
@@ -47,9 +54,10 @@ jobs:
         if: steps.check.outputs.already == 'false'
         run: npm publish --access public
 
-      # On manual dispatch, create the release tag the environment couldn't push.
-      - name: Tag release (manual dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      # When publishing from a branch (master push or manual dispatch), create
+      # the release tag the environment couldn't push. Tag pushes skip this.
+      - name: Tag release
+        if: github.ref_type == 'branch'
         run: |
           V="v${{ steps.check.outputs.version }}"
           if git ls-remote --exit-code origin "refs/tags/$V" >/dev/null 2>&1; then
