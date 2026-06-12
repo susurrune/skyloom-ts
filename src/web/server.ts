@@ -9,7 +9,7 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { createSystemContext } from "../core/factory";
 import { getLogger } from "../core/logger";
-import { renderInkWashUI } from "./ui";
+import { renderInkWashUI, SKYLOOM_FAVICON_SVG } from "./ui";
 
 const log = getLogger("web-server");
 
@@ -53,7 +53,10 @@ export async function startWebServer(port: number = 7777): Promise<void> {
     if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
     try {
-      if (url.pathname === "/api/chat" && req.method === "POST") await handleChat(req, res, ctx);
+      if ((url.pathname === "/" || url.pathname === "/index.html") && req.method === "GET") serveUI(res);
+      else if (url.pathname === "/favicon.svg" && req.method === "GET") serveFavicon(res);
+      else if (url.pathname === "/favicon.ico" && req.method === "GET") redirectFavicon(res);
+      else if (url.pathname === "/api/chat" && req.method === "POST") await handleChat(req, res, ctx);
       else if (url.pathname === "/api/agents" && req.method === "GET") handleAgents(res, ctx);
       else if (url.pathname === "/api/status" && req.method === "GET") handleStatus(res, ctx);
       else if (url.pathname.startsWith("/api/")) res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Not found" }));
@@ -114,4 +117,20 @@ function handleStatus(res: ServerResponse, ctx: ReturnType<typeof createSystemCo
 function serveUI(res: ServerResponse): void {
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   res.end(renderInkWashUI());
+}
+
+function serveFavicon(res: ServerResponse): void {
+  res.writeHead(200, {
+    "Content-Type": "image/svg+xml; charset=utf-8",
+    "Cache-Control": "public, max-age=86400",
+  });
+  res.end(SKYLOOM_FAVICON_SVG);
+}
+
+function redirectFavicon(res: ServerResponse): void {
+  res.writeHead(302, {
+    "Location": "/favicon.svg",
+    "Cache-Control": "public, max-age=86400",
+  });
+  res.end();
 }

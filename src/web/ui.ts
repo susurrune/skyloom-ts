@@ -59,6 +59,24 @@ export const AGENTS_META: AgentMeta[] = [
     tips: ['今天有点累，陪我聊聊', '讲一个温柔的小故事', '给我一点出发的勇气'] },
 ];
 
+export const SKYLOOM_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="paper" cx="50%" cy="44%" r="58%">
+      <stop offset="0%" stop-color="#fffaf0"/>
+      <stop offset="72%" stop-color="#f3ead8"/>
+      <stop offset="100%" stop-color="#dfd2b8"/>
+    </radialGradient>
+    <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="1.2" numOctaves="3" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncA type="table" tableValues="0 .12"/></feComponentTransfer></filter>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#paper)" stroke="#4a4a44" stroke-width="1.5"/>
+  <circle cx="32" cy="32" r="30" filter="url(#grain)" opacity=".65"/>
+  <path d="M14 42 Q22 35 31 38 T50 39" fill="none" stroke="#4a4a44" stroke-width="2" stroke-linecap="round" opacity=".55"/>
+  <path d="M18 31 Q24 26 31 28 T45 29" fill="none" stroke="#2a5c8a" stroke-width="1.8" stroke-linecap="round" opacity=".62"/>
+  <path d="M21 47 Q28 43 34 45 T45 46" fill="none" stroke="#3a7a6e" stroke-width="1.2" stroke-linecap="round" opacity=".45"/>
+  <circle cx="46" cy="20" r="5" fill="#b3342d" opacity=".82"/>
+  <text x="31" y="37" text-anchor="middle" font-family="Georgia,'Noto Serif SC',serif" font-size="19" font-weight="700" fill="#4a4a44">織</text>
+</svg>`;
+
 /* ════════════════════════════════════════════════════════════════
    Client application — injected verbatim via toString().
    Everything it needs is nested inside or globally injected.
@@ -541,7 +559,9 @@ export function renderInkWashUI(): string {
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta name="color-scheme" content="light dark">
 <title>水墨气象台 · Skyloom</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3CradialGradient id='g' cx='50%25' cy='45%25' r='50%25'%3E%3Cstop offset='0%25' stop-color='%23f8f4ec'/%3E%3Cstop offset='100%25' stop-color='%23e8e0d0'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='32' cy='32' r='30' fill='url(%23g)' stroke='%234a4a44' stroke-width='1.5'/%3E%3Cpath d='M20 28 Q24 22 32 24 Q40 22 44 28' stroke='%234a4a44' stroke-width='1.2' fill='none' stroke-linecap='round' opacity='.6'/%3E%3Cpath d='M18 34 Q26 30 32 32 Q38 30 46 34' stroke='%234a4a44' stroke-width='1' fill='none' stroke-linecap='round' opacity='.4'/%3E%3Cpath d='M22 40 Q28 37 32 38 Q36 37 42 40' stroke='%234a4a44' stroke-width='.8' fill='none' stroke-linecap='round' opacity='.25'/%3E%3Ccircle cx='22' cy='22' r='2.5' fill='%232a5c8a' opacity='.7'/%3E%3Ccircle cx='42' cy='22' r='2.5' fill='%23b3342d' opacity='.7'/%3E%3Ccircle cx='32' cy='46' r='2.5' fill='%233a7a6e' opacity='.7'/%3E%3Ctext x='32' y='36' text-anchor='middle' font-family='serif' font-size='11' font-weight='600' fill='%234a4a44' opacity='.8'%3E織%3C/text%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="shortcut icon" href="/favicon.ico">
+<meta name="theme-color" content="#f7f3e9">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">

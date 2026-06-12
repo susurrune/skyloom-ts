@@ -138,6 +138,16 @@ describe("web · server", () => {
     const body = await page.text();
     expect(body).toContain("水墨气象台");
     expect(body).toContain("clientMain()");
+    expect(body).toContain('href="/favicon.svg"');
+
+    const icon = await fetch(`http://127.0.0.1:${port}/favicon.svg`);
+    expect(icon.status).toBe(200);
+    expect(icon.headers.get("content-type")).toContain("image/svg+xml");
+    expect(await icon.text()).toContain("<svg");
+
+    const legacyIcon = await fetch(`http://127.0.0.1:${port}/favicon.ico`, { redirect: "manual" });
+    expect(legacyIcon.status).toBe(302);
+    expect(legacyIcon.headers.get("location")).toBe("/favicon.svg");
 
     const agents = await fetch(`http://127.0.0.1:${port}/api/agents`);
     expect(agents.status).toBe(200);
