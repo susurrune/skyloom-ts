@@ -4,6 +4,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import axios from 'axios';
 import type { ToolRegistry } from '../core/tool';
 import { getLogger } from '../core/logger';
 import { registerComputerTools } from './computer';
@@ -27,23 +28,42 @@ interface SearchResult { title: string; url: string; snippet: string }
 
 const SEARCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
-async function fetchHtml(url: string, timeoutMs = 12000): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': SEARCH_UA,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      },
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  } finally {
-    clearTimeout(timer);
+const searchClient = axios.create({
+  timeout: 15000,
+  headers: {
+    'User-Agent': SEARCH_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  },
+  // Allow redirects (search engines use them)
+  maxRedirects: 5,
+  // Validate status (only 2xx is ok)
+  validateStatus: (status) => status >= 200 && status < 300,
+});
+
+async function fetchHtml(url: string, timeoutMs = 15000, retries = 2): Promise<string> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await searchClient.get(url, {
+        timeout: timeoutMs,
+        // Skip SSRF check for known search engines
+        transitional: { clarifyTimeoutError: true },
+      });
+      return res.data;
+    } catch (e: any) {
+      lastError = e;
+      // Don't retry on 4xx (client errors like 403/404)
+      if (e.response && e.response.status >= 400 && e.response.status < 500) {
+        throw new Error(`HTTP ${e.response.status}: ${e.response.statusText || 'Blocked'}`);
+      }
+      // Wait before retry (exponential backoff)
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+      }
+    }
   }
+  throw lastError || new Error('fetch failed');
 }
 
 function decodeHtmlEntities(s: string): string {
