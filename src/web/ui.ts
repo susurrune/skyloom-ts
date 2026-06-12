@@ -75,6 +75,17 @@ function clientMain(): void {
   let aborter: any = null;
   let unread = 0;
 
+  /* ── platform-aware shortcuts ──
+     Apple: ⌘1-6 / ⌘K. Elsewhere: Alt+1-6 (Ctrl+digit is reserved by browsers
+     for tab switching and cannot be intercepted) and Ctrl+K (the industry
+     convention — GitHub/Slack/Linear — and interceptable). The handler accepts
+     every modifier on every platform; only the labels differ. */
+  const nav = window.navigator || {};
+  const isApple = /mac|iphone|ipad|ipod/i.test(
+    String((nav.userAgentData && nav.userAgentData.platform) || nav.platform || nav.userAgent || ''));
+  const AGENT_MOD = isApple ? '⌘' : 'Alt+';
+  const CLEAR_MOD = isApple ? '⌘' : 'Ctrl+';
+
   /* ── tiny helpers ── */
   const $ = (sel: string) => D.querySelector(sel);
   const el = (tag: string, cls?: string, html?: string) => {
@@ -427,6 +438,15 @@ function clientMain(): void {
     } catch { $('#conn-dot').classList.add('off'); }
   }
 
+  /* ── platform-localized shortcut labels ── */
+  function localizeShortcuts() {
+    $('#hint').textContent =
+      'Enter 发送 · Shift+Enter 换行 · Esc 停止 · ' + AGENT_MOD + '1-6 唤灵 · ? 快捷键';
+    $('#kbd-agents').textContent = AGENT_MOD + '1 – ' + AGENT_MOD + '6';
+    $('#kbd-clear').textContent = CLEAR_MOD + 'K';
+    $('#clear-btn').title = '清空当前会话 (' + CLEAR_MOD + 'K)';
+  }
+
   /* ── build static chrome ── */
   function buildSidebar() {
     const list = $('#agents-list');
@@ -485,9 +505,12 @@ function clientMain(): void {
         return;
       }
       const typing = D.activeElement && D.activeElement.tagName === 'TEXTAREA';
-      if ((e.metaKey || e.ctrlKey) && e.key >= '1' && e.key <= '6') {
+      // e.code (physical key) instead of e.key: on macOS Option+digit produces
+      // special characters (¡™£…), and layouts vary — Digit1..6 does not.
+      const digit = e.code && /^Digit[1-6]$/.test(e.code) ? Number(e.code.slice(5)) : 0;
+      if ((e.metaKey || e.ctrlKey || e.altKey) && digit) {
         e.preventDefault();
-        if (!streaming) applyAgent(AGENTS[Number(e.key) - 1]);
+        if (!streaming) applyAgent(AGENTS[digit - 1]);
         return;
       }
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); clearSession(); return; }
@@ -498,6 +521,7 @@ function clientMain(): void {
   /* ── boot ── */
   buildSidebar();
   wire();
+  localizeShortcuts();
   const savedTheme = store.getItem('skyweb.theme') ||
     (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   setTheme(savedTheme);
@@ -885,7 +909,7 @@ body{
     <span id="strip-pig">松烟墨 · 探索洞察</span>
     <span id="strip-sp"></span>
     <button class="strip-btn" id="export-btn" title="导出会话为 Markdown">导出</button>
-    <button class="strip-btn" id="clear-btn" title="清空当前会话 (⌘K)">清空</button>
+    <button class="strip-btn" id="clear-btn" title="清空当前会话">清空</button>
   </div>
   <div id="messages"></div>
   <button id="scroll-pill" type="button">↓ <span>回到底部</span></button>
@@ -895,7 +919,7 @@ body{
       <span id="char-count"></span>
       <button id="send-btn" type="button" title="发送 (Enter)"><span class="send-ico">➤</span></button>
     </div>
-    <div id="hint">Enter 发送 · Shift+Enter 换行 · Esc 停止 · ⌘1-6 唤灵 · ? 快捷键</div>
+    <div id="hint">Enter 发送 · Shift+Enter 换行 · Esc 停止 · ? 快捷键</div>
   </div>
 </div>
 
@@ -904,8 +928,8 @@ body{
   <div class="key-row"><span>发送</span><kbd>Enter</kbd></div>
   <div class="key-row"><span>换行</span><kbd>Shift + Enter</kbd></div>
   <div class="key-row"><span>停止生成</span><kbd>Esc</kbd></div>
-  <div class="key-row"><span>切换灵</span><kbd>⌘ / Ctrl + 1–6</kbd></div>
-  <div class="key-row"><span>清空会话</span><kbd>⌘ / Ctrl + K</kbd></div>
+  <div class="key-row"><span>切换灵</span><kbd id="kbd-agents"></kbd></div>
+  <div class="key-row"><span>清空会话</span><kbd id="kbd-clear"></kbd></div>
   <div class="key-row"><span>本面板</span><kbd>?</kbd></div>
 </div></div>
 
