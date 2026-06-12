@@ -96,6 +96,21 @@ describe("web · page", () => {
     expect(html).toContain("prefers-reduced-motion");
   });
 
+  it("shortcut labels are OS-aware, not hardcoded to macOS", () => {
+    // no ⌘ baked into the static HTML/hint — labels are filled at boot
+    const staticHtml = html.replace(/<script>[\s\S]*?<\/script>/, "");
+    expect(staticHtml).not.toContain("⌘");
+    // the client detects Apple platforms and picks per-platform modifiers:
+    // ⌘ on Apple; Alt+digit (Ctrl+digit is browser-reserved) and Ctrl+K elsewhere
+    expect(script).toContain("isApple");
+    expect(script).toMatch(/isApple \? .⌘. : .Alt\+./);
+    expect(script).toMatch(/isApple \? .⌘. : .Ctrl\+./);
+    expect(script).toContain("localizeShortcuts");
+    // physical-key matching so macOS Option+digit (¡™£…) still works
+    expect(script).toContain("Digit[1-6]");
+    expect(script).toContain("e.altKey");
+  });
+
   it("includes all six agents with light+dark pigments and suggestions", () => {
     expect(AGENTS_META).toHaveLength(6);
     for (const a of AGENTS_META) {
