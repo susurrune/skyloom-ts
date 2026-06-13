@@ -609,8 +609,12 @@ export class BaseAgent {
 
     for (let i = 0; i < parsed.length; i++) {
       const p = parsed[i];
-      // Dedup: only for cacheable, non-dangerous tools with identical args
-      if (options?.dedupCacheable && p.toolArgs && p.tool && (p.tool as ToolDefinition).cacheable && !(p.tool as ToolDefinition).dangerous) {
+      // Dedup identical calls within this round for read-only tools (idempotent
+      // or cacheable, never dangerous): the model often emits the same
+      // read_file / web_search twice in one parallel batch — run it once and
+      // share the result. Safe because one round observes one world state.
+      const td = p.tool as ToolDefinition | undefined;
+      if (options?.dedupCacheable && p.toolArgs && td && (td.idempotent || td.cacheable) && !td.dangerous) {
         const key = `${p.toolName}:${JSON.stringify(p.toolArgs, Object.keys(p.toolArgs).sort())}`;
         if (seenDedupKeys.has(key)) {
           execPlan.push({ idx: i, prep: p, isDuplicate: true });
@@ -629,6 +633,11 @@ export class BaseAgent {
     const results = new Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null>(parsed.length).fill(null);
     const uniquePlan = execPlan.filter(e => !e.isDuplicate);
     const concurrency = resolveConcurrency((this.config as any)?.llm?.tool_concurrency);
+    // Enter ACTING once for the whole batch rather than per-tool (each parallel
+    // worker re-setting the same state was a redundant async no-op).
+    if (uniquePlan.some(e => e.prep.tool && !e.prep.parseError && !e.prep.denied)) {
+      await this.setState(AgentState.ACTING);
+    }
     const completed = await mapBounded(
       uniquePlan,
       async ({ idx, prep }, _i, aborted) => {
@@ -651,7 +660,6 @@ export class BaseAgent {
         }
 
         if (onStatus) onStatus(p.label);
-        await this.setState(AgentState.ACTING);
 
         // File checkpoint: snapshot the target before any mutating file tool
         // runs, so /rewind can restore the pre-turn state.
@@ -1393,7 +1401,7 @@ export class BaseAgent {
         });
 
         // ── Execute all tools via shared pipeline ──
-        await this.executeToolCalls(response.toolCalls, { onStatus: onStatus ?? undefined, ephemeral });
+        await this.executeToolCalls(response.toolCalls, { dedupCacheable: true, onStatus: onStatus ?? undefined, ephemeral });
         await this.setState(AgentState.THINKING);
       }
 

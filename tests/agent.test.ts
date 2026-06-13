@@ -40,9 +40,9 @@ class MockLLM {
   setLogger() { /* noop */ }
 }
 
-function makeAgent(turns: Turn[], tools: { name: string; handler: (a: any) => Promise<string> }[] = []) {
+function makeAgent(turns: Turn[], tools: { name: string; handler: (a: any) => Promise<string>; idempotent?: boolean }[] = []) {
   const reg = new ToolRegistry();
-  for (const t of tools) reg.register({ name: t.name, description: t.name, handler: t.handler });
+  for (const t of tools) reg.register({ name: t.name, description: t.name, handler: t.handler, idempotent: t.idempotent });
   const config = { agents: { fog: {} }, llm: { language: "zh" }, memory: { shortTermLimit: 100, dbPath: "/tmp/sky-test" } };
   const agent = new FogAgent(config as any, new MockLLM(turns) as any, new MessageBus(), reg, new SkillRegistry());
   return agent;
@@ -207,5 +207,38 @@ describe("agent · run tracing", () => {
 
     // every span is closed once the turn ends
     expect(trace!.spans.every((s: any) => s.endMs !== null)).toBe(true);
+  });
+});
+
+describe("agent · within-round dedup of read-only tools", () => {
+  it("runs an idempotent tool once when the model emits it twice with identical args", async () => {
+    let runs = 0;
+    const agent = makeAgent(
+      [{ content: "looking", toolCalls: [{ name: "rd", args: { p: "x" } }, { name: "rd", args: { p: "x" } }] }, { content: "done" }],
+      [{ name: "rd", idempotent: true, handler: async () => { runs++; return "content-x"; } }],
+    );
+    const evs = await collect(agent.chatStream("go"));
+    expect(runs).toBe(1); // deduped — handler ran once
+    // both tool calls still get a result (the duplicate shares the original's)
+    const done = evs.filter((e) => e.type === "tool_done" && e.tool_name === "rd");
+    expect(done.length).toBe(2);
+    expect(done.every((e) => e.success)).toBe(true);
+  });
+
+  it("does NOT dedup different args, nor non-idempotent tools", async () => {
+    let rdRuns = 0, wrRuns = 0;
+    const agent = makeAgent(
+      [{ content: "x", toolCalls: [
+        { name: "rd", args: { p: "a" } }, { name: "rd", args: { p: "b" } }, // different args → both run
+        { name: "wr", args: { p: "a" } }, { name: "wr", args: { p: "a" } }, // not idempotent → both run
+      ] }, { content: "done" }],
+      [
+        { name: "rd", idempotent: true, handler: async () => { rdRuns++; return "r"; } },
+        { name: "wr", handler: async () => { wrRuns++; return "w"; } },
+      ],
+    );
+    await collect(agent.chatStream("go"));
+    expect(rdRuns).toBe(2);
+    expect(wrRuns).toBe(2);
   });
 });

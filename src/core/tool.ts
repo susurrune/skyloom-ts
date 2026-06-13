@@ -37,7 +37,24 @@ export interface ToolDefinition {
   retryDelay?: number;
   dangerous?: boolean;
   cacheable?: boolean;
+  /**
+   * Pure read-only tool with no side effects: two identical calls in the same
+   * round always return the same thing. Enables within-round dedup (the second
+   * identical call is skipped and shares the first result), which avoids
+   * duplicate file reads / network searches the model often emits in parallel.
+   * Unlike `cacheable`, it does NOT cache across rounds (the world may change).
+   */
+  idempotent?: boolean;
   timeout?: number;
+}
+
+/** Order-stable JSON key so {a,b} and {b,a} hash to the same cache/dedup key. */
+export function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_k, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.keys(v).sort().reduce((acc: Record<string, unknown>, key) => { acc[key] = v[key]; return acc; }, {})
+      : v,
+  );
 }
 
 /**
@@ -301,7 +318,7 @@ export class ToolRegistry extends EventEmitter {
 
     // Check cache
     if (tool.cacheable) {
-      const cacheKey = JSON.stringify(params);
+      const cacheKey = stableStringify(params);
       const cached = resultStore.get(toolName, cacheKey);
       if (cached) {
         log.debug("Tool cache hit", { tool: toolName });
@@ -343,19 +360,26 @@ export class ToolRegistry extends EventEmitter {
 
         const startTime = Date.now();
 
-        // Execute with timeout
-        const promise = tool.handler(params);
-        const timeoutPromise = new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error("Tool execution timeout")), timeout)
-        );
-
-        const result = await Promise.race([promise, timeoutPromise]);
+        // Execute with a timeout that we always clear. The previous
+        // Promise.race left the timeout's setTimeout pending whenever the
+        // handler won — a dangling 30s timer per tool call that kept the event
+        // loop alive (delaying process exit) and accumulated under load.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<string>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Tool execution timeout")), timeout);
+        });
+        let result: string;
+        try {
+          result = await Promise.race([tool.handler(params), timeoutPromise]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
 
         const duration = Date.now() - startTime;
 
         // Cache result
         if (tool.cacheable) {
-          const cacheKey = JSON.stringify(params);
+          const cacheKey = stableStringify(params);
           resultStore.set(toolName, cacheKey, result);
         }
 
