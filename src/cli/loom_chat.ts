@@ -320,6 +320,39 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
   let customCommands = loadCustomCommands();
   ui.extraCommands = customCommands.map((c) => ["/" + c.name, c.description] as [string, string]);
 
+  // Pre-load the session list so the /resume wizard has choices from the start.
+  try { lastSessions = await agent.memory.listSessions(); } catch { /* best-effort */ }
+
+  // Guided argument wizard for structured commands (/model · /apikey · /connect · /resume):
+  // pick a provider/model/session from a ↑↓ list, paste a key — no syntax to memorize.
+  ui.wizardStep = (command, prior) => {
+    try {
+      const { nextWizardStep } = require("./command_args");
+      const { listProviders, modelsFor, providerLabel, allModels } = require("../core/catalog");
+      const { loadConfig } = require("../core/config");
+      const cfg = loadConfig();
+      const configured = (p: string): boolean => {
+        const meta = PROVIDER_META[p];
+        if (meta?.envVar && process.env[meta.envVar]) return true;
+        if (cfg?.api_keys?.[p]) return true;
+        const models = modelsFor(p);
+        return models.length > 0 && models.every((m: any) => m.local); // local providers need no key
+      };
+      const providers = listProviders().map((p: string) => ({
+        id: p, label: providerLabel(p), configured: configured(p), envVar: PROVIDER_META[p]?.envVar,
+      }));
+      const models = allModels().map((m: any) => ({
+        id: m.id, provider: m.provider, label: m.id,
+        hint: m.local ? "本地/免费" : (m.costIn != null ? `$${m.costIn}/$${m.costOut}` : undefined),
+      }));
+      const sessions = lastSessions.map((s: any) => ({
+        id: String(s.id),
+        label: (s.preview || "(空)").replace(/\s+/g, " ").slice(0, 40),
+      }));
+      return nextWizardStep(command, prior, { providers, models, sessions });
+    } catch { return null; }
+  };
+
   try {
     while (true) {
       const inp = await ui.readInput();

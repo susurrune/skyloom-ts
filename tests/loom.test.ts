@@ -247,6 +247,80 @@ describe("palette ↑↓ navigation + Enter execution", () => {
   });
 });
 
+describe("argument wizard (cascading ↑↓ selection)", () => {
+  function key(ui: any, name: string, opts: Record<string, any> = {}) { ui.onKey(opts.str ?? "", { name, ...opts }); }
+  function type(ui: any, text: string) { for (const ch of text) ui.onKey(ch, { name: ch }); }
+
+  // A two-level /apikey wizard: pick a provider, then paste a key.
+  function wireApikeyWizard(ui: any) {
+    ui.wizardStep = (command: string, prior: string[]) => {
+      if (!/apikey/.test(command)) return null;
+      if (prior.length === 0) return {
+        kind: "choice", title: "选择 Provider", allowFreeform: true,
+        choices: [
+          { value: "deepseek", label: "DeepSeek", hint: "未配置" },
+          { value: "openai", label: "OpenAI", hint: "✓ 已配置" },
+        ],
+      };
+      if (prior.length === 1) return { kind: "freeform", title: `粘贴 ${prior[0]} key`, choices: [], allowFreeform: true, secret: true };
+      return null;
+    };
+  }
+
+  it("selecting a wizard command opens the wizard and cascades to submit", async () => {
+    const ui = makeUI() as any;
+    wireApikeyWizard(ui);
+    const p = ui.readInput();
+    type(ui, "/apikey");
+    key(ui, "return");          // palette → opens the wizard (input cleared, not submitted)
+    expect(ui.inputGlyphs.length).toBe(0);
+
+    key(ui, "down");            // deepseek → openai
+    key(ui, "return");          // pick provider → advance to the key step
+    type(ui, "sk-secret");
+    key(ui, "return");          // submit
+
+    expect(await p).toBe("/apikey set openai sk-secret");
+  });
+
+  it("typing filters the choice list; Enter picks the filtered match", async () => {
+    const ui = makeUI() as any;
+    wireApikeyWizard(ui);
+    const p = ui.readInput();
+    type(ui, "/apikey");
+    key(ui, "return");
+    type(ui, "deep");          // filters to deepseek
+    key(ui, "return");         // pick it
+    type(ui, "k1");
+    key(ui, "return");
+    expect(await p).toBe("/apikey set deepseek k1");
+  });
+
+  it("backspace at an empty filter steps back a level; Esc cancels", async () => {
+    const ui = makeUI() as any;
+    wireApikeyWizard(ui);
+    ui.readInput();
+    type(ui, "/apikey");
+    key(ui, "return");         // wizard open at provider step
+    key(ui, "return");         // pick deepseek → key step
+    key(ui, "backspace");      // empty typed → back to provider step
+    // still in the wizard, not submitted; Esc closes it entirely
+    key(ui, "escape");
+    expect(ui.inputGlyphs.length).toBe(0);
+    // a frame still renders at full width after cancelling
+    for (const row of ui.paint()) expect(visualWidth(row)).toBe(80);
+  });
+
+  it("a non-wizard command is unaffected (submits directly)", async () => {
+    const ui = makeUI() as any;
+    wireApikeyWizard(ui);                 // only /apikey has a wizard
+    const p = ui.readInput();
+    type(ui, "/status");
+    key(ui, "return");
+    expect(await p).toBe("/status");
+  });
+});
+
 describe("mouse wheel scrolling", () => {
   // Replay an SGR mouse sequence the way Node's keypress parser fragments it:
   // ESC[< as one event, then every remaining char separately.
