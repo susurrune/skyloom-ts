@@ -30,6 +30,7 @@ import * as readline from "readline";
 import chalk from "chalk";
 import { agentTheme, AGENT_ORDER, PALETTE } from "../core/theme";
 import { charWidth, visualWidth, SLASH_COMMANDS } from "./tui";
+import { hasWizard, buildCommandLine, filterChoices, type WizardStep, type ArgChoice } from "./command_args";
 
 /* ════════════════════════════════════════
    ANSI-aware string helpers (pure, tested)
@@ -409,6 +410,14 @@ export class LoomUI {
   modeBadge = "";
   /** User-defined slash commands shown in the palette ([name, description]). */
   extraCommands: [string, string][] = [];
+  /**
+   * Cascading argument wizard, active after a structured slash command is
+   * chosen (e.g. /apikey → pick provider → paste key). Resolved step-by-step
+   * via the wizardStep callback the chat loop wires up.
+   */
+  private wizard: { command: string; values: string[]; step: WizardStep; typed: string; idx: number } | null = null;
+  /** Next-step resolver for the argument wizard (set by the chat loop with runtime context). */
+  wizardStep: ((command: string, prior: string[]) => WizardStep | null) | null = null;
   private keypressHandler: ((str: string, key: any) => void) | null = null;
   private resizeHandler: (() => void) | null = null;
 
@@ -622,6 +631,9 @@ export class LoomUI {
     const name = key?.name;
     if (key?.ctrl && name === "c") { this.handleSigint(); return; }
 
+    // The argument wizard owns all keys while it is open.
+    if (this.wizard && !this.busy) { this.handleWizardKey(str, key); return; }
+
     if (name === "pageup") { this.scrollOff += Math.max(1, this.bodyH() - 2); this.clampScroll(); this.paint(); return; }
     if (name === "pagedown") { this.scrollOff -= Math.max(1, this.bodyH() - 2); this.clampScroll(); this.paint(); return; }
 
@@ -630,15 +642,14 @@ export class LoomUI {
       let text = this.inputGlyphs.join("").trim();
 
       // Palette open: Enter runs the ↑↓-highlighted command (Claude Code
-      // style). Commands that take arguments fill the input instead so the
-      // user can type them.
+      // style). A command with a guided argument wizard opens the wizard;
+      // otherwise an argument-taking command fills the input to wait for input.
       const matches = this.paletteMatches();
       if (matches.length > 0 && text.startsWith("/")) {
         const [cmd] = matches[Math.max(0, Math.min(this.paletteIdx, matches.length - 1))];
+        if (this.startWizard(cmd.trim())) return;
         if (cmd.endsWith(" ")) {
-          // argument-taking command: fill the input and wait for arguments
-          // (the palette closes once the line contains a space; a second
-          // Enter then submits as typed)
+          // argument-taking command without a wizard: fill the input and wait.
           this.inputGlyphs = [...cmd];
           this.cursor = this.inputGlyphs.length;
           this.paletteIdx = 0;
@@ -648,13 +659,7 @@ export class LoomUI {
         text = cmd.trimEnd();
       }
 
-      this.inputGlyphs = []; this.cursor = 0; this.histIdx = -1; this.paletteIdx = 0;
-      this.scrollOff = 0; // submitting a turn snaps back to the tail to watch the reply
-      if (text) { this.history.unshift(text); if (this.history.length > 200) this.history.pop(); }
-      const r = this.pendingResolve;
-      this.pendingResolve = null;
-      this.paint();
-      if (r) r(text);
+      this.submitText(text);
       return;
     }
 
@@ -683,7 +688,10 @@ export class LoomUI {
       if (paletteOpen) {
         const m = this.paletteMatches();
         const pick = m[Math.min(this.paletteIdx, m.length - 1)];
-        if (pick) { this.inputGlyphs = [...pick[0].trimEnd()]; this.cursor = this.inputGlyphs.length; }
+        if (pick) {
+          if (this.startWizard(pick[0].trim())) return;
+          this.inputGlyphs = [...pick[0].trimEnd()]; this.cursor = this.inputGlyphs.length;
+        }
       }
       this.paint(); return;
     }
@@ -743,6 +751,91 @@ export class LoomUI {
   }
 
   private flashHint = "";
+
+  /* ── argument wizard ── */
+
+  /** Submit a turn: clear input, record history, resolve the pending read. */
+  private submitText(text: string) {
+    this.wizard = null;
+    this.inputGlyphs = []; this.cursor = 0; this.histIdx = -1; this.paletteIdx = 0;
+    this.scrollOff = 0; // submitting a turn snaps back to the tail to watch the reply
+    if (text) { this.history.unshift(text); if (this.history.length > 200) this.history.pop(); }
+    const r = this.pendingResolve;
+    this.pendingResolve = null;
+    this.paint();
+    if (r) r(text);
+  }
+
+  /** Choices for the current wizard step, filtered by what the user has typed. */
+  private wizardFiltered(): ArgChoice[] {
+    if (!this.wizard || this.wizard.step.kind !== "choice") return [];
+    return filterChoices(this.wizard.step.choices, this.wizard.typed);
+  }
+
+  /** Open the wizard for `command` (e.g. "/model"). Returns false if it has none. */
+  private startWizard(command: string): boolean {
+    if (!this.wizardStep || !hasWizard(command)) return false;
+    const step = this.wizardStep(command, []);
+    if (!step) return false;
+    this.wizard = { command, values: [], step, typed: "", idx: 0 };
+    this.inputGlyphs = []; this.cursor = 0; this.paletteIdx = 0;
+    this.paint();
+    return true;
+  }
+
+  /** Accept a value for the current step; advance to the next or submit. */
+  private wizardCommit(value: string) {
+    const w = this.wizard!;
+    const values = [...w.values, value];
+    const next = this.wizardStep ? this.wizardStep(w.command, values) : null;
+    if (next) {
+      this.wizard = { command: w.command, values, step: next, typed: "", idx: 0 };
+      this.paint();
+    } else {
+      this.submitText(buildCommandLine(w.command, values));
+    }
+  }
+
+  /** Step back one level (or close the wizard when at the first level). */
+  private wizardBack() {
+    const w = this.wizard!;
+    if (w.values.length === 0 || !this.wizardStep) { this.wizard = null; this.paint(); return; }
+    const values = w.values.slice(0, -1);
+    const step = this.wizardStep(w.command, values);
+    if (!step) { this.wizard = null; this.paint(); return; }
+    this.wizard = { command: w.command, values, step, typed: "", idx: 0 };
+    this.paint();
+  }
+
+  private handleWizardKey(str: string, key: any) {
+    const w = this.wizard!;
+    const name = key?.name;
+    if (name === "escape") { this.wizard = null; this.paint(); return; }
+    if (name === "up") { if (w.step.kind === "choice") w.idx = Math.max(0, w.idx - 1); this.paint(); return; }
+    if (name === "down") {
+      if (w.step.kind === "choice") w.idx = Math.min(Math.max(0, this.wizardFiltered().length - 1), w.idx + 1);
+      this.paint(); return;
+    }
+    if (name === "return" || name === "tab") {
+      if (w.step.kind === "choice") {
+        const filtered = this.wizardFiltered();
+        const pick = filtered[Math.min(w.idx, filtered.length - 1)];
+        if (pick) { this.wizardCommit(pick.value); return; }
+        if (w.step.allowFreeform && w.typed.trim()) { this.wizardCommit(w.typed.trim()); return; }
+        return;
+      }
+      if (w.typed.trim()) this.wizardCommit(w.typed.trim());
+      return;
+    }
+    if (name === "backspace") {
+      if (w.typed.length > 0) { w.typed = w.typed.slice(0, -1); w.idx = 0; this.paint(); return; }
+      this.wizardBack(); return;
+    }
+    if (str && !key?.ctrl && !key?.meta) {
+      const glyphs = [...str].filter((c) => c >= " " || charWidth(c.codePointAt(0)!) > 0);
+      if (glyphs.length) { w.typed += glyphs.join(""); w.idx = 0; this.paint(); }
+    }
+  }
 
   private paletteMatches(): [string, string][] {
     const l = this.inputGlyphs.join("");
@@ -936,6 +1029,13 @@ export class LoomUI {
       if (this.modal) {
         content = " " + chalk.yellow("⚠ ") + cutVisual(this.modal.text, innerW - 14) + chalk.bold(" 允许? ") + chalk.dim("[y/N]");
         cursorPos = { row: rows - 2, col: Math.min(innerW, visualWidth(content) + 1) };
+      } else if (this.wizard) {
+        const w = this.wizard;
+        const crumb = [w.command.replace(/^\//, ""), ...w.values].join(" ");
+        const shownTyped = w.step.secret ? "•".repeat([...w.typed].length) : w.typed;
+        const head = chalk.hex(t.hex)(` ${t.symbol} `) + chalk.hex(PALETTE.inkLight)(crumb + " ▸ ");
+        content = head + cutVisual(shownTyped, innerW - visualWidth(head) - 2);
+        cursorPos = { row: rows - 2, col: Math.min(innerW, visualWidth(content) + 1) };
       } else {
         const promptStr = chalk.hex(t.hex)(` ${t.symbol} `) + chalk.hex(PALETTE.inkLight)("❯ ");
         const promptW = visualWidth(promptStr);
@@ -966,17 +1066,55 @@ export class LoomUI {
       const paletteUp = this.paletteMatches().length > 0 && this.inputGlyphs[0] === "/";
       const hint = this.busy
         ? " Ctrl-C 中断本轮 "
-        : paletteUp
-          ? " ↑↓ 选命令 · Enter 执行 · Tab 补全 · Esc 收起 "
-          : " / 命令 · 滚轮/PgUp 回看 · Shift+Tab 切模式 · Ctrl-C 退出 ";
+        : this.wizard
+          ? (this.wizard.step.kind === "choice"
+              ? " ↑↓ 选择 · Enter 确认 · 输入筛选 · ⌫ 返回 · Esc 取消 "
+              : " 输入后 Enter 确认 · ⌫ 返回上一步 · Esc 取消 ")
+          : paletteUp
+            ? " ↑↓ 选命令 · Enter 执行 · Tab 补全 · Esc 收起 "
+            : " / 命令 · 滚轮/PgUp 回看 · Shift+Tab 切模式 · Ctrl-C 退出 ";
       // └─ hint ───…┘  →  2 + w(hint) + fill + 1 = cols
       const fill = innerW - visualWidth(hint) - 1;
       frame.push(B("└─") + chalk.dim(hint) + B("─".repeat(Math.max(0, fill)) + "┘"));
     }
 
+    // ── argument wizard: overlay the title + selectable choices ──
+    if (this.wizard && !this.modal) {
+      const w = this.wizard;
+      const overlayRow = (row: number, s: string) => {
+        if (row < 1 + SKY_H || row >= 1 + SKY_H + bodyH) return;
+        frame[row] = B("│") + padAnsi(rail[row - 1 - SKY_H] ?? "", RAIL_W) + B("│") + " " + padAnsi(s, this.viewW()) + B("│");
+      };
+      const lines: string[] = [];
+      lines.push(chalk.dim(" " + cutVisual(w.step.title, this.viewW() - 4)));
+      if (w.step.kind === "choice") {
+        const filtered = this.wizardFiltered();
+        const bodyRows = Math.min(7, bodyH - 1);
+        if (!filtered.length) {
+          lines.push("   " + chalk.dim(w.step.allowFreeform ? `直接输入，回车确认` : `无匹配项`));
+        } else {
+          w.idx = Math.max(0, Math.min(w.idx, filtered.length - 1));
+          const start = Math.max(0, Math.min(w.idx - bodyRows + 1, filtered.length - bodyRows));
+          filtered.slice(start, start + bodyRows).forEach((c, i) => {
+            const sel = start + i === w.idx;
+            const mark = sel ? chalk.hex(t.hex)(" ▸ ") : "   ";
+            const group = c.group ? chalk.dim(`${c.group}/`) : "";
+            const label = sel ? chalk.bold.hex(t.hex)(c.label) : chalk.hex(PALETTE.inkLight)(c.label);
+            const hint = c.hint ? chalk.dim("  " + c.hint) : "";
+            const counter = sel && filtered.length > bodyRows ? chalk.dim(`  ${w.idx + 1}/${filtered.length}`) : "";
+            lines.push(mark + group + cutVisual(label + hint, this.viewW() - 8) + counter);
+          });
+        }
+      } else {
+        lines.push("   " + chalk.dim(w.step.placeholder || "输入后回车确认"));
+      }
+      const baseRow = 1 + SKY_H + bodyH - lines.length;
+      lines.forEach((s, i) => overlayRow(baseRow + i, s));
+    }
+
     // ── slash palette: overlay onto the rows just above the divider ──
     const matches = this.paletteMatches();
-    if (matches.length > 0 && this.inputGlyphs[0] === "/" && !this.modal) {
+    if (!this.wizard && matches.length > 0 && this.inputGlyphs[0] === "/" && !this.modal) {
       const maxShow = Math.min(8, bodyH - 1);
       this.paletteIdx = Math.max(0, Math.min(this.paletteIdx, matches.length - 1));
       // scroll window that keeps the ↑↓ selection visible
