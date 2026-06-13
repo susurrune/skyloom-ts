@@ -4,176 +4,17 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import axios from 'axios';
 import type { ToolRegistry } from '../core/tool';
 import { getLogger } from '../core/logger';
 import { registerComputerTools } from './computer';
 import { registerExtraTools } from './extra';
 import { isPrivateIp, assertFetchAllowed, fenceRoot, fenceCheck } from './guards';
+import { webSearch, formatSearchResults, readPage } from './websearch';
 
 // Re-exported so existing importers/tests keep resolving these from builtin.
 export { isPrivateIp, assertFetchAllowed, fenceRoot, fenceCheck };
 
 const log = getLogger('builtin-tools');
-
-
-/* ── Web search helpers ───────────────────────────────────────────────────
-   Multi-engine fallback. DuckDuckGo's Instant Answer JSON API only returns
-   "abstracts" and is blank for ~90% of real queries; HTML scraping is what
-   actually works. In CN networks, DDG/Bing may be unreachable — Baidu/Sogou
-   serve as fallbacks. Each parser is intentionally tolerant: HTML changes
-   over time, so we extract loosely and let the engine list provide redundancy.
-   ────────────────────────────────────────────────────────────────────────── */
-interface SearchResult { title: string; url: string; snippet: string }
-
-const SEARCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-
-const searchClient = axios.create({
-  timeout: 15000,
-  headers: {
-    'User-Agent': SEARCH_UA,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-  },
-  // Allow redirects (search engines use them)
-  maxRedirects: 5,
-  // Validate status (only 2xx is ok)
-  validateStatus: (status) => status >= 200 && status < 300,
-});
-
-async function fetchHtml(url: string, timeoutMs = 15000, retries = 2): Promise<string> {
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const res = await searchClient.get(url, {
-        timeout: timeoutMs,
-        // Skip SSRF check for known search engines
-        transitional: { clarifyTimeoutError: true },
-      });
-      return res.data;
-    } catch (e: any) {
-      lastError = e;
-      // Don't retry on 4xx (client errors like 403/404)
-      if (e.response && e.response.status >= 400 && e.response.status < 500) {
-        throw new Error(`HTTP ${e.response.status}: ${e.response.statusText || 'Blocked'}`);
-      }
-      // Wait before retry (exponential backoff)
-      if (attempt < retries) {
-        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-      }
-    }
-  }
-  throw lastError || new Error('fetch failed');
-}
-
-function decodeHtmlEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
-}
-
-function stripTags(s: string): string {
-  return decodeHtmlEntities(s.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
-}
-
-function unwrapDdgRedirect(href: string): string {
-  // DuckDuckGo HTML wraps results in /l/?uddg=<encoded-url>
-  const m = href.match(/[?&]uddg=([^&]+)/);
-  if (m) { try { return decodeURIComponent(m[1]); } catch { /* fall through */ } }
-  if (href.startsWith('//')) return 'https:' + href;
-  return href;
-}
-
-function unwrapBaiduRedirect(href: string): string {
-  // Baidu uses opaque /link?url=... redirects; we can't resolve without another request.
-  // Return as-is; consumer can still click through.
-  return href;
-}
-
-async function searchDuckDuckGo(query: string, max: number): Promise<SearchResult[]> {
-  const html = await fetchHtml(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
-  const results: SearchResult[] = [];
-  const re = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) && results.length < max) {
-    results.push({ url: unwrapDdgRedirect(m[1]), title: stripTags(m[2]), snippet: stripTags(m[3]) });
-  }
-  return results;
-}
-
-async function searchBing(query: string, max: number): Promise<SearchResult[]> {
-  const html = await fetchHtml(`https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-cn`);
-  const results: SearchResult[] = [];
-  const liRe = /<li class="b_algo"[\s\S]*?<\/li>/gi;
-  const items = html.match(liRe) || [];
-  for (const item of items) {
-    if (results.length >= max) break;
-    const a = item.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!a) continue;
-    const snipMatch =
-      item.match(/<p class="b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/i) ||
-      item.match(/<div class="b_caption"[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i) ||
-      item.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    results.push({ url: a[1], title: stripTags(a[2]), snippet: snipMatch ? stripTags(snipMatch[1]) : '' });
-  }
-  return results;
-}
-
-async function searchBaidu(query: string, max: number): Promise<SearchResult[]> {
-  const html = await fetchHtml(`https://www.baidu.com/s?wd=${encodeURIComponent(query)}`);
-  const results: SearchResult[] = [];
-  // Baidu nests divs aggressively; anchor on <h3> ... <a href>...</a> and look
-  // for the nearest abstract block following.
-  const re = /<h3[^>]*>[\s\S]{0,500}?<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) && results.length < max) {
-    const url = unwrapBaiduRedirect(m[1]);
-    const title = stripTags(m[2]);
-    if (!title || !/^https?:\/\//.test(url)) continue;
-    const after = html.slice(re.lastIndex, re.lastIndex + 4000);
-    const snipMatch =
-      after.match(/<span class="content-right[^"]*"[^>]*>([\s\S]*?)<\/span>/i) ||
-      after.match(/<div class="c-abstract[^"]*"[^>]*>([\s\S]*?)<\/div>/i) ||
-      after.match(/<span[^>]*content[^"]*"[^>]*>([\s\S]{20,400}?)<\/span>/i) ||
-      after.match(/<p[^>]*>([\s\S]{20,400}?)<\/p>/i);
-    results.push({ url, title, snippet: snipMatch ? stripTags(snipMatch[1]) : '' });
-  }
-  return results;
-}
-
-async function searchSogou(query: string, max: number): Promise<SearchResult[]> {
-  const html = await fetchHtml(`https://www.sogou.com/web?query=${encodeURIComponent(query)}`);
-  const results: SearchResult[] = [];
-  const divRe = /<div[^>]+class="vrwrap"[\s\S]*?(?=<div[^>]+class="vrwrap"|$)/gi;
-  const items = html.match(divRe) || [];
-  for (const item of items) {
-    if (results.length >= max) break;
-    const a = item.match(/<h3[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!a) continue;
-    let url = a[1];
-    if (url.startsWith('/link?')) url = 'https://www.sogou.com' + url;
-    const snipMatch =
-      item.match(/<div[^>]+class="(?:str_info|fz-mid|space-txt)[^"]*"[^>]*>([\s\S]*?)<\/div>/i) ||
-      item.match(/<p[^>]*>([\s\S]{20,400}?)<\/p>/i);
-    results.push({ url, title: stripTags(a[2]), snippet: snipMatch ? stripTags(snipMatch[1]) : '' });
-  }
-  return results;
-}
-
-async function runSearchEngine(engine: string, query: string, max: number): Promise<SearchResult[]> {
-  let results: SearchResult[];
-  switch (engine) {
-    case 'duckduckgo': case 'ddg': results = await searchDuckDuckGo(query, max); break;
-    case 'bing': results = await searchBing(query, max); break;
-    case 'baidu': results = await searchBaidu(query, max); break;
-    case 'sogou': results = await searchSogou(query, max); break;
-    default: throw new Error(`unknown search engine: ${engine}`);
-  }
-  // Drop placeholder/JS-anchor entries from inline answer cards.
-  return results.filter((r) => r.title && /^https?:\/\//i.test(r.url));
-}
 
 /**
  * Register all built-in tools into the given registry.
@@ -383,43 +224,50 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'web_search',
-    description: 'Search the web for information. Returns search results with titles, URLs and snippets.',
+    description:
+      'Search the live web and return titles, URLs, and snippets (plus a direct answer when available). ' +
+      'USE THIS whenever the answer depends on current or real-time information — today\'s news and hot topics, ' +
+      'recent events, latest releases/versions, prices, weather, scores, or anything that may have changed since your ' +
+      'training cutoff. Do NOT answer such questions from memory and do NOT claim you cannot access the internet — ' +
+      'search first, then answer with the findings and cite the source URLs. Follow up with read_url to read a result in full.',
     parameters: [
-      { name: 'query', type: 'string', description: 'Search query', required: true },
-      { name: 'engine', type: 'string', description: 'Optional engine: duckduckgo|bing|baidu|sogou. Default: auto (tries each until one returns results)', required: false },
+      { name: 'query', type: 'string', description: 'Search query. Be specific; include the year/date for time-sensitive queries.', required: true },
+      { name: 'engine', type: 'string', description: 'Optional provider: tavily|brave|serper|searxng|jina|duckduckgo|bing|baidu|sogou. Default: auto (uses a configured API key if present, else the keyless Jina endpoint, else scraping).', required: false },
       { name: 'max_results', type: 'number', description: 'Max results to return (default 8, capped at 20)', required: false },
     ],
     handler: async (params) => {
       const query = String(params.query || '').trim();
       if (!query) return 'Error: query is required';
-      const max = Math.max(1, Math.min(20, Math.floor(Number(params.max_results) || 8)));
-      const explicit = String(params.engine || '').trim().toLowerCase();
-      const envEngine = String(process.env.SKYLOOM_SEARCH_ENGINE || '').trim().toLowerCase();
-      const order = explicit
-        ? [explicit]
-        : envEngine
-        ? [envEngine, 'duckduckgo', 'bing', 'baidu', 'sogou']
-        : ['duckduckgo', 'bing', 'baidu', 'sogou'];
-      const seen = new Set<string>();
-      const tried: string[] = [];
-      for (const eng of order) {
-        if (seen.has(eng)) continue;
-        seen.add(eng);
-        tried.push(eng);
-        try {
-          const results = await runSearchEngine(eng, query, max);
-          if (results && results.length > 0) {
-            const head = `Search results (${eng}, ${results.length}):`;
-            const body = results
-              .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`)
-              .join('\n');
-            return `${head}\n${body}`;
-          }
-        } catch (e: any) {
-          log.warn('web_search_engine_failed', { engine: eng, error: String(e?.message || e) });
-        }
+      try {
+        const res = await webSearch(query, {
+          max: Number(params.max_results) || 8,
+          engine: String(params.engine || '').trim().toLowerCase() || undefined,
+          onProviderError: (provider, error) => log.warn('web_search_provider_failed', { provider, error }),
+        });
+        return formatSearchResults(res);
+      } catch (e: any) {
+        return `Error: ${String(e?.message || e)}`;
       }
-      return `No search results found (tried: ${tried.join(', ')}). Set SKYLOOM_SEARCH_ENGINE to pin an engine, or try a different query.`;
+    },
+  });
+
+  registry.register({
+    name: 'read_url',
+    description:
+      'Fetch a web page as clean, readable text (markdown), with boilerplate (nav/ads) stripped. ' +
+      'Use after web_search to read a result in full, or to read any known URL. Prefer this over http_get for articles/pages.',
+    parameters: [
+      { name: 'url', type: 'string', description: 'The http(s) URL to read', required: true },
+      { name: 'max_chars', type: 'number', description: 'Max characters to return (default 12000)', required: false },
+    ],
+    handler: async (params) => {
+      const url = String(params.url || '').trim();
+      if (!url) return 'Error: url is required';
+      try {
+        return await readPage(url, { maxChars: Number(params.max_chars) || 12000 });
+      } catch (e: any) {
+        return `Error reading page: ${String(e?.message || e)}`;
+      }
     },
   });
 

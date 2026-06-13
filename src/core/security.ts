@@ -89,6 +89,7 @@ const TOOL_DANGER_MAP: Record<string, DangerLevel> = {
   git_branch: DangerLevel.LOW,
   http_get: DangerLevel.LOW,
   fetch_page: DangerLevel.LOW,
+  read_url: DangerLevel.LOW,
   web_search: DangerLevel.LOW,
   remember_fact: DangerLevel.LOW,
   use_skill: DangerLevel.LOW,

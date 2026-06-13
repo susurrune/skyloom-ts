@@ -53,6 +53,21 @@ describe('selectRelevantTools', () => {
     expect(selected).toContain('read_file');
   });
 
+  it('surfaces web_search for current-events queries among many tools', () => {
+    // Regression: "今日热点新闻" used to score 0 for web_search, so with a large
+    // tool catalog it never made the shortlist and the LLM couldn't use it.
+    const r = makeRegistry([
+      ['web_search', 'search the live web'],
+      ['read_url', 'read a web page as text'],
+      ...Array.from({ length: 30 }, (_, i): [string, string] => [`tool_${i}`, `unrelated capability ${i}`]),
+    ]);
+    const names = r.listNames();
+    for (const q of ['今日热点新闻', '最新的事件', "today's latest news", '查一下现在的天气']) {
+      const selected = selectRelevantTools(r, names, q, { topK: 8 });
+      expect(selected, `query: ${q}`).toContain('web_search');
+    }
+  });
+
   it('mustInclude always present', () => {
     const r = makeRegistry(Array.from({ length: 20 }, (_, i) => [`random_${i}`, `unrelated tool ${i}`]));
     r.register({

@@ -101,9 +101,17 @@ function scoreTool(tool: ToolDefinition, queryTokens: Set<string>, queryLc: stri
     ['git', 'commit', 'diff', 'branch', '提交', '分支', '差异'].some(k => queryLc.includes(k))) {
     score += 4;
   }
-  if (['web_search', 'fetch_page', 'http_get'].includes(name) &&
-    ['web', 'url', 'http', 'research', '搜索', '网页', '联网', '资料'].some(k => queryLc.includes(k))) {
-    score += 4;
+  if (['web_search', 'read_url', 'fetch_page', 'http_get'].includes(name) &&
+    [
+      // explicit web/search intent
+      'web', 'url', 'http', 'research', '搜索', '搜', '网页', '联网', '上网', '资料', '查询', '查一下', '查查',
+      // time-sensitive / current-events intent — the reason "今日热点新闻" used to
+      // miss web_search entirely (it scored 0 and never made the tool shortlist)
+      'news', 'today', 'latest', 'current', 'recent', 'now', 'breaking', 'trending', 'weather', 'price', 'stock',
+      '新闻', '今日', '今天', '最新', '近期', '实时', '热点', '热搜', '头条', '动态', '行情', '股价', '汇率', '天气', '比分', '发布',
+      '2024', '2025', '2026',
+    ].some(k => queryLc.includes(k))) {
+    score += 5;
   }
   if (['list_skills', 'use_skill'].includes(name) &&
     ['skill', '能力', '技能', 'ppt', 'pdf', 'excel', 'xlsx', 'docx'].some(k => queryLc.includes(k))) {
