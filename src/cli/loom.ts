@@ -401,7 +401,7 @@ export class LoomUI {
   private scrollOff = 0; // 0 = follow tail
   private paletteIdx = 0;
   private pendingResolve: ((s: string) => void) | null = null;
-  private modal: { text: string; resolve: (ok: boolean) => void } | null = null;
+  private modal: { text: string; choices: { key: string; label: string }[]; defaultKey: string; resolve: (key: string) => void } | null = null;
   private sigintAt = 0;
   onInterrupt: (() => void) | null = null;
   /** Shift+Tab cycles interactive modes (default/plan/auto); wired by the chat loop. */
@@ -566,9 +566,31 @@ export class LoomUI {
     return new Promise((resolve) => { this.pendingResolve = resolve; });
   }
 
-  /** Modal y/N confirmation (tool approval). */
+  /**
+   * Single-key modal prompt. Resolves with the chosen choice key, the
+   * `defaultKey` on Enter, or '' on Esc. The building block for confirm and the
+   * tool-approval prompt.
+   */
+  promptChoice(text: string, choices: { key: string; label: string }[], defaultKey = ""): Promise<string> {
+    return new Promise((resolve) => { this.modal = { text, choices, defaultKey, resolve }; this.paint(); });
+  }
+
+  /** Modal y/N confirmation. */
   confirm(text: string): Promise<boolean> {
-    return new Promise((resolve) => { this.modal = { text, resolve }; this.paint(); });
+    return this.promptChoice(text, [{ key: "y", label: "允许" }, { key: "n", label: "拒绝" }], "n").then((k) => k === "y");
+  }
+
+  /**
+   * Tool-approval prompt with an "always allow this tool (this session)" option,
+   * the enterprise affordance that stops re-prompting for a trusted tool.
+   * Returns 'once' (approve this call), 'always' (approve + remember), or 'deny'.
+   */
+  confirmApproval(text: string): Promise<"once" | "always" | "deny"> {
+    return this.promptChoice(
+      text,
+      [{ key: "y", label: "允许一次" }, { key: "a", label: "本会话总是" }, { key: "n", label: "拒绝" }],
+      "n",
+    ).then((k) => (k === "a" ? "always" : k === "y" ? "once" : "deny"));
   }
 
   setHistory(h: string[]) { this.history = h.slice(); }
@@ -619,10 +641,13 @@ export class LoomUI {
     if (key?.sequence === "\x1b[<" || str === "\x1b[<") { this.mouseBuf = ""; return; }
 
     if (this.modal) {
+      const m = this.modal;
       const k = (str || "").toLowerCase();
-      if (k === "y") { const m = this.modal; this.modal = null; m.resolve(true); }
-      else if (k === "n" || key?.name === "return" || key?.name === "escape") {
-        const m = this.modal; this.modal = null; m.resolve(false);
+      if (key?.name === "escape") { this.modal = null; m.resolve(""); }
+      else if (key?.name === "return") { this.modal = null; m.resolve(m.defaultKey); }
+      else {
+        const hit = m.choices.find((c) => c.key === k);
+        if (hit) { this.modal = null; m.resolve(hit.key); }
       }
       this.paint();
       return;
@@ -1027,7 +1052,11 @@ export class LoomUI {
     {
       let content: string;
       if (this.modal) {
-        content = " " + chalk.yellow("⚠ ") + cutVisual(this.modal.text, innerW - 14) + chalk.bold(" 允许? ") + chalk.dim("[y/N]");
+        const hints = this.modal.choices
+          .map((c) => chalk.bold(c.key === this.modal!.defaultKey ? `[${c.key.toUpperCase()}]` : `[${c.key}]`) + chalk.dim(" " + c.label))
+          .join("  ");
+        const hintsW = visualWidth(hints) + 2;
+        content = " " + chalk.yellow("⚠ ") + cutVisual(this.modal.text, innerW - hintsW - 5) + "  " + hints;
         cursorPos = { row: rows - 2, col: Math.min(innerW, visualWidth(content) + 1) };
       } else if (this.wizard) {
         const w = this.wizard;

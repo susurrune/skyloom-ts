@@ -297,7 +297,9 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
   ui.onModeCycle = () => { mode.cycle(); applyMode(); };
 
   // Tool approval becomes a loom-native modal instead of a raw readline prompt.
-  // AUTO mode approves automatically (with a visible trace line).
+  // AUTO mode approves automatically; "本会话总是" adds a tool to a per-session
+  // trust set so it never prompts again this session (reset by /new).
+  const sessionTrust = new Set<string>();
   try {
     const { getSecurity } = require("../core/security");
     getSecurity().setApprovalCallback(async (tool: string, args: Record<string, any>, level: number) => {
@@ -305,8 +307,18 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         ui.line(chalk.dim(` ⚡ 自动批准 ${tool} (危险等级 ${level})`));
         return true;
       }
+      if (sessionTrust.has(tool)) {
+        ui.line(chalk.dim(` ✓ 已信任 ${tool}（本会话）`));
+        return true;
+      }
       const summary = `${tool} (危险等级 ${level}) ${JSON.stringify(args).slice(0, 48)}`;
-      return ui.confirm(summary);
+      const choice = await ui.confirmApproval(summary);
+      if (choice === "always") {
+        sessionTrust.add(tool);
+        ui.line(chalk.dim(` · 本会话起将自动批准 ${tool}`));
+        return true;
+      }
+      return choice === "once";
     });
   } catch { /* security module optional */ }
 
@@ -391,7 +403,21 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       if (switched) continue;
 
       if (cmdL === "/clear") { ui.clearViewport(); continue; }
-      if (cmdL === "/" || cmdL === "/help") { dim("输入 / 后键入字母筛选命令，Tab 补全，↑↓ 选择，Shift+Tab 切模式。"); continue; }
+      if (cmdL === "/" || cmdL === "/help") {
+        const ht = agentTheme(agent.name);
+        ui.blank();
+        say(" " + chalk.bold.hex(ht.hex)(`${ht.symbol} 命令一览`));
+        try {
+          const { registry } = require("../core/commands");
+          for (const line of registry.renderHelp("zh")) {
+            if (line.startsWith("§")) say(" " + chalk.bold.hex(ht.hex)(line.slice(2)));
+            else dim(line);
+          }
+        } catch { dim("（命令注册中心不可用）"); }
+        dim("输入 / 筛选 · ↑↓ 选择 · Enter 执行/进入向导 · Tab 补全 · Shift+Tab 切模式");
+        ui.blank();
+        continue;
+      }
       if (cmdL === "/plan" || cmdL === "/auto" || cmdL === "/default") {
         mode.set(cmdL === "/plan" ? InteractiveMode.PLAN : cmdL === "/auto" ? InteractiveMode.AUTO : InteractiveMode.DEFAULT);
         applyMode();
@@ -566,6 +592,7 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       if (cmdL === "/new") {
         await agent.memory.clearShortTerm();
         agent._baseSystemPrompt = ''; agent.reinitLanguage();
+        sessionTrust.clear(); // a fresh session starts from zero tool trust
         const id = await agent.memory.createSession();
         say(" " + chalk.hex(OK_HEX)("✦ 新会话已开始") + chalk.dim(` · ${String(id).slice(0, 8)}`));
         continue;
