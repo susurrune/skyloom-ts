@@ -53,6 +53,26 @@ export interface ToolResult {
 
 const CACHE_MAXSIZE = 128;
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
+
+/**
+ * Deterministic JSON with recursively sorted object keys.
+ *
+ * Two tool calls with identical arguments in a different key order must map to
+ * the same cache/dedup key. Plain `JSON.stringify` is order-sensitive, and the
+ * `JSON.stringify(obj, keys.sort())` replacer-array trick only sorts the top
+ * level *and silently drops nested keys* — so we recurse explicitly.
+ */
+export function stableStringify(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
+}
+
+function canonicalize(value: any): any {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(canonicalize);
+  const out: Record<string, any> = {};
+  for (const k of Object.keys(value).sort()) out[k] = canonicalize(value[k]);
+  return out;
+}
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 0.5; // seconds
 
@@ -301,7 +321,7 @@ export class ToolRegistry extends EventEmitter {
 
     // Check cache
     if (tool.cacheable) {
-      const cacheKey = JSON.stringify(params);
+      const cacheKey = stableStringify(params);
       const cached = resultStore.get(toolName, cacheKey);
       if (cached) {
         log.debug("Tool cache hit", { tool: toolName });
@@ -355,7 +375,7 @@ export class ToolRegistry extends EventEmitter {
 
         // Cache result
         if (tool.cacheable) {
-          const cacheKey = JSON.stringify(params);
+          const cacheKey = stableStringify(params);
           resultStore.set(toolName, cacheKey, result);
         }
 

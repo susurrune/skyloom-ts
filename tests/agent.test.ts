@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { FogAgent } from "../src/agents/fog";
+import { Task } from "../src/core/agent";
 import { MessageBus } from "../src/core/bus";
 import { ToolRegistry } from "../src/core/tool";
 import { SkillRegistry } from "../src/core/skill";
@@ -180,6 +181,103 @@ describe("agent · interrupt (Ctrl-C)", () => {
     expect(cancelled.length).toBe(2);
     // And the turn stopped instead of running round 2.
     expect(evs.some((e) => e.type === "interrupted")).toBe(true);
+  });
+});
+
+describe("agent · per-turn recall memoization", () => {
+  it("calls recallForInjection at most once across a multi-round tool turn", async () => {
+    const agent = makeAgent(
+      [{ toolCalls: [{ name: "echo", args: { text: "hi" } }] }, { content: "完成" }],
+      [{ name: "echo", handler: async () => "ok" }],
+    );
+    const spy = vi.fn(async () => [{ key: "k", value: "v", category: "c" }]);
+    (agent.memory as any).recallForInjection = spy;
+
+    await collect(agent.chatStream("帮我查一下我的项目配置"));
+    // Two LLM rounds (tool round + final), but recall runs once for the turn.
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-runs recall when a new turn brings a new query", async () => {
+    const agent = makeAgent([{ content: "答一" }, { content: "答二" }]);
+    const spy = vi.fn(async () => [{ key: "k", value: "v", category: "c" }]);
+    (agent.memory as any).recallForInjection = spy;
+
+    await collect(agent.chatStream("第一个不一样的问题内容"));
+    await collect(agent.chatStream("第二个完全不同的问题内容"));
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("agent · task context", () => {
+  it("appends non-goal metadata to the task prompt sent to the model", async () => {
+    const agent = makeAgent([{ content: "done" }]);
+    let captured: any[] = [];
+    (agent as any).llm.complete = async (msgs: any[]) => {
+      captured = msgs;
+      return { content: "done", toolCalls: [], model: "mock", usage: { promptTokens: 1, completionTokens: 1 }, cost: 0, truncated: false };
+    };
+
+    const task = new Task({ id: "t1", description: "做点事", assignedTo: "fog", metadata: { goal: "ignored", ticket: "ABC-123" } });
+    await agent.executeTask(task);
+
+    const text = captured.map((m) => String(m.content || "")).join("\n");
+    expect(text).toContain("ABC-123");   // metadata reached the model (regression: was dropped)
+    expect(text).not.toContain("ignored"); // goal is intentionally excluded
+  });
+});
+
+describe("agent · executeTask truncation", () => {
+  it("propagates the llmLoop truncated flag onto the TaskResult (so the orchestrator can retry)", async () => {
+    // Model keeps requesting a tool forever; with a tiny round cap the loop
+    // truncates. The flag must reach the returned TaskResult.
+    const turns: Turn[] = Array.from({ length: 10 }, () => ({ toolCalls: [{ name: "spin", args: {} }] }));
+    const agent = makeAgent(turns, [{ name: "spin", handler: async () => "again" }]);
+    (agent as any)._maxToolRounds = 2;
+    (agent as any)._maxToolRoundsHardCap = 2;
+
+    const res = await agent.executeTask(new Task({ id: "1", description: "loop forever", assignedTo: "fog" }));
+    expect((res as any).truncated).toBe(true);
+  }, 15000);
+
+  it("does not mark a normal completion as truncated", async () => {
+    const agent = makeAgent([{ content: "all done, here is the deliverable" }]);
+    const res = await agent.executeTask(new Task({ id: "1", description: "easy", assignedTo: "fog" }));
+    expect((res as any).truncated).toBe(false);
+    expect(res.success).toBe(true);
+  });
+});
+
+describe("agent · compaction", () => {
+  it("caps digest output tokens and honors llm.compact_model", async () => {
+    const agent = makeAgent([{ content: "x" }]);
+    (agent as any).config.llm.compact_model = "claude-haiku-4-5";
+    let captured: any = null;
+    (agent as any).llm.complete = async (_m: any, _n: any, _t: any, _s: any, overrides: any) => {
+      captured = overrides;
+      return { content: "digest", toolCalls: [], model: "mock", usage: { promptTokens: 1, completionTokens: 1 }, cost: 0, truncated: false };
+    };
+    // Need > keepRecent + 4 (=16) non-system messages for compact to run.
+    for (let i = 0; i < 20; i++) agent.memory.addMessage(i % 2 ? "assistant" : "user", "message " + i);
+
+    await agent.compact();
+    expect(captured).toBeTruthy();
+    expect(captured.maxTokens).toBe(700);              // bounded — digest is sliced to 800 chars anyway
+    expect(captured.model).toBe("claude-haiku-4-5");   // routed to the configured small model
+  });
+
+  it("leaves the model unset when compact_model is not configured", async () => {
+    const agent = makeAgent([{ content: "x" }]);
+    let captured: any = null;
+    (agent as any).llm.complete = async (_m: any, _n: any, _t: any, _s: any, overrides: any) => {
+      captured = overrides;
+      return { content: "digest", toolCalls: [], model: "mock", usage: { promptTokens: 1, completionTokens: 1 }, cost: 0, truncated: false };
+    };
+    for (let i = 0; i < 20; i++) agent.memory.addMessage(i % 2 ? "assistant" : "user", "message " + i);
+
+    await agent.compact();
+    expect(captured.maxTokens).toBe(700);
+    expect(captured.model).toBeUndefined();            // default model path unchanged
   });
 });
 

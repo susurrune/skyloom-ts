@@ -45,12 +45,14 @@ describe("Task domain model", () => {
     expect(t2.allDeps.sort()).toEqual(["2", "9"]);
   });
 
-  it("TaskResult carries success/content/data", () => {
+  it("TaskResult carries success/content/data and a truncated flag", () => {
     const ok = new TaskResult(true, "done", { x: 1 });
     expect(ok.success).toBe(true);
     expect(ok.content).toBe("done");
     expect(ok.data).toEqual({ x: 1 });
+    expect(ok.truncated).toBe(false);                       // defaults false
     expect(new TaskResult(false, "oops").data).toEqual({});
+    expect(new TaskResult(true, "partial", undefined, true).truncated).toBe(true);
   });
 
   it("re-export from ../core/agent stays identical", () => {

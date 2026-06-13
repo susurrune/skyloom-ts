@@ -65,12 +65,32 @@ function tokenize(text: string): Set<string> {
   return tokens;
 }
 
+/**
+ * A tool's name/description tokens depend only on the (static) tool, not the
+ * query, but scoreTool runs for every candidate on every turn. Cache the
+ * tokenization weakly so a registered tool is tokenized once, not once per turn.
+ */
+const toolTokenCache = new WeakMap<object, { nameTokens: Set<string>; descTokens: Set<string> }>();
+
+function toolTokens(tool: ToolDefinition): { nameTokens: Set<string>; descTokens: Set<string> } {
+  let cached = toolTokenCache.get(tool);
+  if (!cached) {
+    cached = {
+      nameTokens: tokenize(tool.name.replace(/_/g, ' ')),
+      descTokens: tokenize(tool.description),
+    };
+    toolTokenCache.set(tool, cached);
+  }
+  return cached;
+}
+
 function scoreTool(tool: ToolDefinition, queryTokens: Set<string>, queryLc: string): number {
   if (queryTokens.size === 0) return 0;
   let score = 0;
 
+  const { nameTokens, descTokens } = toolTokens(tool);
+
   // Tool name tokens carry the strongest signal
-  const nameTokens = tokenize(tool.name.replace(/_/g, ' '));
   for (const qt of queryTokens) {
     if (nameTokens.has(qt)) {
       score += 5;
@@ -80,7 +100,6 @@ function scoreTool(tool: ToolDefinition, queryTokens: Set<string>, queryLc: stri
   }
 
   // Description tokens are weaker
-  const descTokens = tokenize(tool.description);
   for (const qt of queryTokens) {
     if (descTokens.has(qt)) {
       score += 1;

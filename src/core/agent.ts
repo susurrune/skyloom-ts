@@ -11,7 +11,7 @@ import { LLMClient, type LLMResponse, type ToolCall } from './llm';
 import { getLogger } from './logger';
 import { Memory, Message } from './memory';
 import { Skill, SkillRegistry } from './skill';
-import { type ToolDefinition, ToolRegistry } from './tool';
+import { type ToolDefinition, ToolRegistry, stableStringify } from './tool';
 import {
   parseToolArgs,
   extractFilePathsFromMessages,
@@ -66,6 +66,17 @@ export { AgentState, TaskState, Task, TaskResult };
 // Re-export Message type from memory for convenience
 export type { Message };
 
+/** One executed tool call. `toolArgs`/`label` are computed once and carried
+ *  through so consumers (the streaming loop) don't re-parse arguments. */
+export interface ToolExecResult {
+  tc: ToolCall;
+  result: string;
+  success: boolean;
+  toolName: string;
+  toolArgs: Record<string, any> | null;
+  label: string;
+}
+
 export class BaseAgent {
   name: string = '';
   displayName: string = '';
@@ -105,6 +116,8 @@ export class BaseAgent {
   protected _turnLock: Promise<void> = Promise.resolve();
   private _turnLockCounter: number = 0;
   private _turnLockResolve: (() => void) | null = null;
+  /** Per-turn memo for fact recall — keyed by the (fixed) user query of the turn. */
+  private _recallCache: { query: string; block: string | null } | null = null;
 
   // Time-tag cache (shared across all instances, 30s TTL)
   private static _timeTag: string | null = null;
@@ -563,7 +576,7 @@ export class BaseAgent {
       ephemeral?: boolean;               // Don't persist tool messages
       signal?: AbortSignal;              // Cooperative cancel: skip queued tools on Ctrl-C
     }
-  ): Promise<Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>> {
+  ): Promise<ToolExecResult[]> {
     const suppressed = options?.suppressedTools;
     const ephemeral = options?.ephemeral ?? false;
     const onStatus = options?.onStatus;
@@ -611,7 +624,7 @@ export class BaseAgent {
       const p = parsed[i];
       // Dedup: only for cacheable, non-dangerous tools with identical args
       if (options?.dedupCacheable && p.toolArgs && p.tool && (p.tool as ToolDefinition).cacheable && !(p.tool as ToolDefinition).dangerous) {
-        const key = `${p.toolName}:${JSON.stringify(p.toolArgs, Object.keys(p.toolArgs).sort())}`;
+        const key = `${p.toolName}:${stableStringify(p.toolArgs)}`;
         if (seenDedupKeys.has(key)) {
           execPlan.push({ idx: i, prep: p, isDuplicate: true });
           continue;
@@ -626,7 +639,7 @@ export class BaseAgent {
     // bounds in-flight work. `signal` enables cooperative cancel: once the user
     // interrupts, queued (not-yet-started) tools short-circuit to [cancelled]
     // instead of running — in-flight tools are left to settle.
-    const results = new Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null>(parsed.length).fill(null);
+    const results = new Array<ToolExecResult | null>(parsed.length).fill(null);
     const uniquePlan = execPlan.filter(e => !e.isDuplicate);
     const concurrency = resolveConcurrency((this.config as any)?.llm?.tool_concurrency);
     const completed = await mapBounded(
@@ -635,19 +648,19 @@ export class BaseAgent {
         const p = prep;
 
         if (aborted) {
-          return { idx, result: { tc: p.tc, result: `[cancelled] '${p.toolName}' skipped — interrupted before execution`, success: false, toolName: p.toolName } };
+          return { idx, result: { tc: p.tc, result: `[cancelled] '${p.toolName}' skipped — interrupted before execution`, success: false, toolName: p.toolName, toolArgs: p.toolArgs, label: p.label } };
         }
         if (p.parseError) {
-          return { idx, result: { tc: p.tc, result: p.parseError, success: false, toolName: p.toolName } };
+          return { idx, result: { tc: p.tc, result: p.parseError, success: false, toolName: p.toolName, toolArgs: p.toolArgs, label: p.label } };
         }
         if (p.denied) {
-          return { idx, result: { tc: p.tc, result: `[denied] dangerous tool '${p.toolName}' blocked`, success: false, toolName: p.toolName } };
+          return { idx, result: { tc: p.tc, result: `[denied] dangerous tool '${p.toolName}' blocked`, success: false, toolName: p.toolName, toolArgs: p.toolArgs, label: p.label } };
         }
         if (!p.tool) {
           if (suppressed) suppressed.add(p.toolName);
           const suggestions = suggestToolNames(p.toolName, this.toolRegistry);
           const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
-          return { idx, result: { tc: p.tc, result: `Error: Tool '${p.toolName}' does not exist.${hint}`, success: false, toolName: p.toolName } };
+          return { idx, result: { tc: p.tc, result: `Error: Tool '${p.toolName}' does not exist.${hint}`, success: false, toolName: p.toolName, toolArgs: p.toolArgs, label: p.label } };
         }
 
         if (onStatus) onStatus(p.label);
@@ -669,7 +682,7 @@ export class BaseAgent {
             const { runPreToolHooks } = require('./hooks');
             const pre = runPreToolHooks(hooks, p.toolName, p.toolArgs || {}, this.name);
             if (!pre.allowed) {
-              return { idx, result: { tc: p.tc, result: `[blocked by pre_tool hook] ${pre.reason}`, success: false, toolName: p.toolName } };
+              return { idx, result: { tc: p.tc, result: `[blocked by pre_tool hook] ${pre.reason}`, success: false, toolName: p.toolName, toolArgs: p.toolArgs, label: p.label } };
             }
           } catch { /* hook machinery must never break tool execution */ }
         }
@@ -687,10 +700,10 @@ export class BaseAgent {
             } catch { /* best-effort */ }
           }
           span.end(toolResult.success ? 'ok' : 'error', toolResult.success ? undefined : { error: (toolResult.error || resultStr).slice(0, 120) });
-          return { idx, result: { tc: p.tc, result: resultStr, success: toolResult.success, toolName: p.toolName } };
+          return { idx, result: { tc: p.tc, result: resultStr, success: toolResult.success, toolName: p.toolName, toolArgs: p.toolArgs, label: p.label } };
         } catch (e) {
           span.end('error', { error: String(e).slice(0, 120) });
-          return { idx, result: { tc: p.tc, result: `Tool '${p.toolName}' execution failed: ${e}`, success: false, toolName: p.toolName } };
+          return { idx, result: { tc: p.tc, result: `Tool '${p.toolName}' execution failed: ${e}`, success: false, toolName: p.toolName, toolArgs: p.toolArgs, label: p.label } };
         }
       },
       { concurrency, signal },
@@ -702,7 +715,7 @@ export class BaseAgent {
     // Fill in dedup results from originals
     for (const e of execPlan) {
       if (e.isDuplicate && e.prep.toolArgs) {
-        const dedupKey = `${e.prep.toolName}:${JSON.stringify(e.prep.toolArgs, Object.keys(e.prep.toolArgs).sort())}`;
+        const dedupKey = `${e.prep.toolName}:${stableStringify(e.prep.toolArgs)}`;
         const originalIdx = seenDedupKeys.get(dedupKey);
         if (originalIdx !== undefined && results[originalIdx]) {
           results[e.idx] = { ...results[originalIdx]!, tc: e.prep.tc };
@@ -727,7 +740,7 @@ export class BaseAgent {
       });
     }
 
-    return results.filter(Boolean) as Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>;
+    return results.filter(Boolean) as ToolExecResult[];
   }
 
   async close(): Promise<void> {
@@ -1038,11 +1051,10 @@ export class BaseAgent {
         // ── Record results with streaming ──
         let taskCompleted = false;
         for (const r of execResults) {
+          // Args were parsed once in executeToolCalls and carried on r — reuse them.
+          const args = r.toolArgs;
           if (r.toolName === 'task_done' && r.result === TASK_DONE_SENTINEL) {
             taskCompleted = true;
-            const tc = toolCallsReceived.find(t => t.id === r.tc.id);
-            const rawArgs = tc?.function?.arguments;
-            const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
             const summary = (args?.summary as string) || '';
             const displayResult = summary ? `[Task completed: ${summary}]` : '[Task completed]';
             this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
@@ -1050,12 +1062,8 @@ export class BaseAgent {
             continue;
           }
 
-          const tc = toolCallsReceived.find(t => t.id === r.tc.id);
-          const rawArgs = tc?.function?.arguments;
-          const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
-          const label = args ? toolStatusLabel(r.toolName, args) : r.toolName;
           const truncated = (r.result || '').slice(0, 800);
-          yield { type: 'tool_done', label, success: r.success, tool_name: r.toolName, result: truncated };
+          yield { type: 'tool_done', label: r.label, success: r.success, tool_name: r.toolName, result: truncated };
           if (r.toolName === 'delegate_to') {
             const target = (args?.agent as string) || '?';
             delegations.push([target, r.success]);
@@ -1141,12 +1149,21 @@ export class BaseAgent {
       return `[${m.role}] ${content}`;
     }).join('\n');
 
+    // Compaction blocks the user's turn (it runs before the LLM loop when the
+    // context crosses the auto-compact threshold), yet the digest is just a
+    // cheap summary that we hard-cap at 800 chars below. So bound the output
+    // tokens unconditionally, and let `llm.compact_model` (opt-in) route it to a
+    // small/fast model — both cut the latency the user waits through. Unset
+    // model leaves the default behavior unchanged.
+    const compactModel = (this.config as any)?.llm?.compact_model || (this.config as any)?.llm?.compactModel;
+    const overrides: Record<string, any> = { ...this.getSkillConfigOverrides(), maxTokens: 700 };
+    if (compactModel) overrides.model = compactModel;
     const resp = await this.llm.complete(
       [{ role: 'user', content: `Produce a TERSE factual digest. Bullet points only. Max 12 bullets. Preserve directives. \n\n${text}` }],
       this.name,
       undefined,
       false,
-      Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined
+      overrides
     );
     const summary = resp.content.trim().slice(0, 800);
 
@@ -1321,13 +1338,24 @@ export class BaseAgent {
     const stripped = query.trim();
     if (stripped.length < 4) return messages;
 
-    try {
-      const facts = await this.memory.recallForInjection(query, 3);
-      if (!facts.length) return messages;
-      const block = Memory.formatFactsBlock(facts);
-      if (!block) return messages;
-      messages.splice(lastUserIdx, 0, { role: 'system', content: block });
-    } catch { /* ignore */ }
+    // The recall query is the latest user message — fixed for the whole
+    // multi-round tool loop of a turn. recallForInjection runs two SQLite scans
+    // plus a semantic rank over ~200 rows, so re-running it every round is pure
+    // waste. Memoize the formatted block per query; a new turn brings a new user
+    // message, which changes the query and naturally invalidates the cache.
+    let block: string | null;
+    if (this._recallCache && this._recallCache.query === query) {
+      block = this._recallCache.block;
+    } else {
+      block = null;
+      try {
+        const facts = await this.memory.recallForInjection(query, 3);
+        if (facts.length) block = Memory.formatFactsBlock(facts) || null;
+      } catch { /* recall is best-effort */ }
+      this._recallCache = { query, block };
+    }
+
+    if (block) messages.splice(lastUserIdx, 0, { role: 'system', content: block });
     return messages;
   }
 
@@ -1423,14 +1451,14 @@ export class BaseAgent {
     task.transitionTo(TaskState.RUNNING);
     this.memory.setWorking('current_task', task);
 
-    const prompt = `Complete this task NOW using your available tools. Then write the actual deliverable content in your final reply.\n\nTask: ${task.description}`;
+    let prompt = `Complete this task NOW using your available tools. Then write the actual deliverable content in your final reply.\n\nTask: ${task.description}`;
     if (task.metadata) {
       const ctxData: Record<string, any> = {};
       for (const [k, v] of Object.entries(task.metadata)) {
         if (k !== 'goal') ctxData[k] = v;
       }
       if (Object.keys(ctxData).length > 0) {
-        prompt + `\nContext: ${JSON.stringify(ctxData)}`;
+        prompt += `\nContext: ${JSON.stringify(ctxData)}`;
       }
     }
 
@@ -1491,7 +1519,7 @@ export class BaseAgent {
       task.transitionTo(TaskState.COMPLETED);
       task.result = enriched;
       await this.setState(AgentState.IDLE);
-      return new TaskResult(true, enriched);
+      return new TaskResult(true, enriched, undefined, response.truncated === true);
     } catch (e) {
       task.transitionTo(TaskState.FAILED);
       task.result = String(e);

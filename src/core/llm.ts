@@ -753,7 +753,7 @@ export class LLMClient {
     const body: Record<string, unknown> = { model: m, messages, temperature: temp ?? 0.7, max_tokens: maxTok ?? 4096 };
     if (tools?.length) {
       const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
-      if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters || []) } }));
+      if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters) } }));
     }
     const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body) });
     if (!resp.ok) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
@@ -770,7 +770,7 @@ export class LLMClient {
     const sys = messages.find(msg => msg.role === "system"); if (sys) body.system = sys.content;
     if (tools?.length) {
       const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
-      if (defs.length) body.tools = defs.map(t => ({ name: t.name, description: t.description, input_schema: this.paramsToSchema(t.parameters || []) }));
+      if (defs.length) body.tools = defs.map(t => ({ name: t.name, description: t.description, input_schema: this.paramsToSchema(t.parameters) }));
     }
     const resp = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" }, body: JSON.stringify(body) });
     if (!resp.ok) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
@@ -779,11 +779,23 @@ export class LLMClient {
     return { content, toolCalls, usage: { promptTokens: data.usage?.input_tokens || 0, completionTokens: data.usage?.output_tokens || 0 } };
   }
 
-  private paramsToSchema(params: any[]): Record<string, any> {
+  /** Frozen schema for the (common) zero-parameter tool — shared, never mutated. */
+  private static readonly EMPTY_SCHEMA: Record<string, any> = Object.freeze({ type: "object", properties: {} });
+  /** Tool param schemas are rebuilt on every LLM call; a tool's `parameters`
+   *  array is a stable reference once registered, so memoize by it. Keyed
+   *  weakly so re-registered/unregistered tools don't leak. */
+  private _schemaCache: WeakMap<object, Record<string, any>> = new WeakMap();
+
+  private paramsToSchema(params?: any[]): Record<string, any> {
+    if (!params || params.length === 0) return LLMClient.EMPTY_SCHEMA;
+    const cached = this._schemaCache.get(params);
+    if (cached) return cached;
     const props: Record<string, any> = {};
     for (const p of params) props[p.name] = { type: p.type === "integer" ? "integer" : p.type === "number" ? "number" : p.type === "boolean" ? "boolean" : "string", description: p.description };
     const required = params.filter(p => p.required).map(p => p.name);
-    return { type: "object", properties: props, ...(required.length > 0 ? { required } : {}) };
+    const schema = { type: "object", properties: props, ...(required.length > 0 ? { required } : {}) };
+    this._schemaCache.set(params, schema);
+    return schema;
   }
 
   private getApiKey(model: string, agentName?: string): string {
@@ -875,7 +887,7 @@ export class LLMClient {
     };
     if (tools?.length) {
       const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
-      if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters || []) } }));
+      if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters) } }));
     }
     const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body), signal });
     if (!resp.ok || !resp.body) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
