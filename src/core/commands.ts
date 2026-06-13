@@ -625,6 +625,27 @@ export class CommandRegistry {
   }
 
   /**
+   * Category-grouped help lines for `/help`. Section headers are prefixed with
+   * "§ "; command lines are indented. Hidden (unwired) commands are omitted.
+   */
+  renderHelp(lang: 'zh' | 'en' = 'zh'): string[] {
+    const order: CommandCategory[] = ['agent', 'session', 'model', 'config', 'workflow', 'context', 'memory', 'file', 'ui', 'system'];
+    const groups = this.listByCategory();
+    const lines: string[] = [];
+    for (const cat of order) {
+      const cmds = (groups.get(cat) || []).filter((c) => !c.hidden);
+      if (!cmds.length) continue;
+      lines.push(`§ ${CommandRegistry.categoryLabel(cat)}`);
+      for (const c of cmds) {
+        const name = '/' + c.name + (c.argRequired ? ' …' : '');
+        const desc = lang === 'zh' ? (c.label ?? c.description) : c.description;
+        lines.push(`  ${name.padEnd(12)} ${desc}`);
+      }
+    }
+    return lines;
+  }
+
+  /**
    * Build the `[token, label]` pairs the TUI palette + tab-completer consume.
    *
    * - Hidden (catalogued-but-unwired) commands are omitted so the palette only

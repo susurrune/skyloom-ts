@@ -321,6 +321,48 @@ describe("argument wizard (cascading ↑↓ selection)", () => {
   });
 });
 
+describe("approval modal (allow once / always / deny)", () => {
+  function key(ui: any, name: string, opts: Record<string, any> = {}) { ui.onKey(opts.str ?? "", { name, ...opts }); }
+
+  it("confirmApproval resolves 'once' / 'always' / 'deny' by key", async () => {
+    for (const [k, expected] of [["y", "once"], ["a", "always"], ["n", "deny"]] as const) {
+      const ui = makeUI() as any;
+      const p = ui.confirmApproval("run_bash (危险等级 3)");
+      ui.onKey(k, { name: k, str: k });
+      expect(await p).toBe(expected);
+    }
+  });
+
+  it("Enter takes the safe default (deny); Esc cancels (deny)", async () => {
+    const ui = makeUI() as any;
+    const p1 = ui.confirmApproval("x");
+    key(ui, "return");
+    expect(await p1).toBe("deny");
+
+    const p2 = ui.confirmApproval("x");
+    key(ui, "escape");
+    expect(await p2).toBe("deny");
+  });
+
+  it("confirm() stays a boolean y/N", async () => {
+    const uiY = makeUI() as any; const py = uiY.confirm("ok?"); uiY.onKey("y", { name: "y", str: "y" });
+    expect(await py).toBe(true);
+    const uiN = makeUI() as any; const pn = uiN.confirm("ok?"); key(uiN, "return"); // default n
+    expect(await pn).toBe(false);
+  });
+
+  it("renders the choice keys and keeps the frame full width", () => {
+    const ui = makeUI() as any;
+    ui.confirmApproval("delete_file (危险等级 4)");
+    const frame = ui.paint();
+    const text = frame.map((r: string) => r.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+    expect(text).toContain("允许一次");
+    expect(text).toContain("本会话总是");
+    expect(text).toContain("拒绝");
+    for (const row of frame) expect(visualWidth(row)).toBe(80);
+  });
+});
+
 describe("mouse wheel scrolling", () => {
   // Replay an SGR mouse sequence the way Node's keypress parser fragments it:
   // ESC[< as one event, then every remaining char separately.

@@ -88,6 +88,29 @@ describe("registry ↔ TUI wiring", () => {
   });
 });
 
+describe("registry renderHelp", () => {
+  const lines = registry.renderHelp("zh");
+  const text = lines.join("\n");
+
+  it("groups commands under category section headers", () => {
+    expect(lines.some((l) => l.startsWith("§"))).toBe(true);
+    expect(text).toContain("§ Agent 切换");
+    expect(text).toContain("§ 系统");
+  });
+
+  it("lists real commands with their zh labels and omits hidden ones", () => {
+    expect(text).toContain("/trace");
+    expect(text).toContain("/apikey");
+    expect(text).not.toContain("/share");   // hidden
+    expect(text).not.toContain("/unshare");
+  });
+
+  it("marks argument-required commands", () => {
+    expect(lines.some((l) => l.includes("/resume …"))).toBe(true);
+    expect(lines.some((l) => l.includes("/task …"))).toBe(true);
+  });
+});
+
 describe("registry search / listing", () => {
   it("search matches on name, label, and alias", () => {
     expect(registry.search("trace").some(c => c.name === "trace")).toBe(true);
