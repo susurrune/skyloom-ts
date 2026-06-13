@@ -91,10 +91,14 @@ export class TaskResult {
   success: boolean;
   content: string;
   data: Record<string, any> = {};
+  /** True when the underlying LLM loop hit its round cap before finishing.
+   *  The orchestrator retries on this (see factory.executeWithRetry). */
+  truncated: boolean;
 
-  constructor(success: boolean, content: string, data?: Record<string, any>) {
+  constructor(success: boolean, content: string, data?: Record<string, any>, truncated: boolean = false) {
     this.success = success;
     this.content = content;
     this.data = data || {};
+    this.truncated = truncated;
   }
 }

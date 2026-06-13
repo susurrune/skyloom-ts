@@ -2,7 +2,7 @@
  * Tests for tool system.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { ToolRegistry, type ToolDefinition } from '../src/core/tool';
+import { ToolRegistry, stableStringify, type ToolDefinition } from '../src/core/tool';
 
 function makeTool(overrides: Partial<ToolDefinition> & { name: string }): ToolDefinition {
   return {
@@ -104,5 +104,32 @@ describe('ToolRegistry', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('required');
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('cacheable tool hits cache regardless of argument key order', async () => {
+    const handler = vi.fn().mockResolvedValue('cached-result');
+    registry.register(makeTool({ name: 'cq', cacheable: true, handler }));
+    await registry.execute('cq', { a: 1, b: { y: 2, x: 1 } });
+    const second = await registry.execute('cq', { b: { x: 1, y: 2 }, a: 1 }); // reordered, nested too
+    expect(second.result).toBe('cached-result');
+    expect(handler).toHaveBeenCalledTimes(1); // second call served from cache
+  });
+});
+
+describe('stableStringify', () => {
+  it('is insensitive to key order at every nesting level', () => {
+    expect(stableStringify({ a: 1, b: 2 })).toBe(stableStringify({ b: 2, a: 1 }));
+    expect(stableStringify({ o: { y: 1, x: 2 } })).toBe(stableStringify({ o: { x: 2, y: 1 } }));
+  });
+
+  it('preserves nested values (does not drop nested keys like the replacer-array trick)', () => {
+    // The old `JSON.stringify(obj, Object.keys(obj).sort())` form dropped nested
+    // keys, collapsing these two distinct args to the same string.
+    expect(stableStringify({ opts: { x: 1 } })).not.toBe(stableStringify({ opts: { x: 2 } }));
+    expect(stableStringify({ opts: { x: 1 } })).toContain('1');
+  });
+
+  it('preserves array order', () => {
+    expect(stableStringify([3, 1, 2])).toBe('[3,1,2]');
   });
 });
