@@ -199,10 +199,10 @@ export class BaseAgent {
     const lang = (this.config as any).llm?.language || 'zh';
     if (lang === 'en') {
       return prompt +
-        `\n\n## Thinking Protocol\nBefore acting, briefly weigh: (1) **What** is the actual need? (2) **How** sure am I? If <80%, flag with [uncertain] and ask.\nIf stuck, admit it — propose a partial answer or ask the user. Never fabricate.\n\n## Behavior\n- Act, don't narrate. No "I will..." before tool calls.\n- Stay in scope. Do what's asked, then stop.\n- Batch independent tool calls in one response.\n- For tasks with 3+ steps, plan with todo_write first and update item status as you go.\n- Verify writes: read back, report verified state.\n- Call list_skills when the task needs specialized capabilities.`;
+        `\n\n## Thinking Protocol\nBefore acting, briefly weigh: (1) **What** is the actual need? (2) **How** sure am I? If <80%, flag with [uncertain] and ask.\nIf stuck, admit it — propose a partial answer or ask the user. Never fabricate.\n\n## Behavior\n- Act, don't narrate. No "I will..." before tool calls.\n- Stay in scope. Do what's asked, then stop.\n- Batch independent tool calls in one response.\n- For tasks with 3+ steps, plan with todo_write first and update item status as you go.\n- Verify writes: read back, report verified state.\n- For anything current or real-time (today's news/hot topics, recent events, latest versions, prices, weather), call web_search FIRST, then read_url for detail. Never answer from memory or claim you can't go online.\n- Call list_skills when the task needs specialized capabilities.`;
     }
     return prompt +
-      `\n\n## 思考协议\n行动前快速判断：(1) 用户真实需求是什么？(2) 我有多大把握？低于80%标注 [不确定] 并主动询问。\n卡住时承认，给出部分答案或请求用户指导。绝不编造。\n\n## 行为守则\n- 直接行动,不预告。不说「我将要...」,直接调用工具\n- 不擅自扩大范围。用户要什么做什么,核心完成即止\n- 独立的工具调用一次发出,并行执行\n- 3 步以上的任务先用 todo_write 列任务清单,开工/完成时逐项更新状态\n- 写入后回读验证,汇报已验证状态而非仅尝试\n- 任务涉及专业能力时（PPT/Excel/PDF/网页设计/代码审查等），先调 list_skills 查看可用技能，再用 use_skill 激活`;
+      `\n\n## 思考协议\n行动前快速判断：(1) 用户真实需求是什么？(2) 我有多大把握？低于80%标注 [不确定] 并主动询问。\n卡住时承认，给出部分答案或请求用户指导。绝不编造。\n\n## 行为守则\n- 直接行动,不预告。不说「我将要...」,直接调用工具\n- 不擅自扩大范围。用户要什么做什么,核心完成即止\n- 独立的工具调用一次发出,并行执行\n- 3 步以上的任务先用 todo_write 列任务清单,开工/完成时逐项更新状态\n- 写入后回读验证,汇报已验证状态而非仅尝试\n- 凡涉及最新/实时信息（今日新闻热点、近期事件、最新版本、价格、天气等）一律先调 web_search 联网核实，再用 read_url 读全文；绝不凭记忆作答，也不要声称无法联网\n- 任务涉及专业能力时（PPT/Excel/PDF/网页设计/代码审查等），先调 list_skills 查看可用技能，再用 use_skill 激活`;
   }
 
   protected injectProgrammingWisdom(prompt: string): string {
