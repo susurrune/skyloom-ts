@@ -12,6 +12,7 @@ function makeTool(overrides: Partial<ToolDefinition> & { name: string }): ToolDe
     handler: overrides.handler ?? vi.fn().mockResolvedValue('ok'),
     dangerous: overrides.dangerous,
     cacheable: overrides.cacheable,
+    idempotent: overrides.idempotent,
     maxRetries: overrides.maxRetries,
     retryDelay: overrides.retryDelay,
     timeout: overrides.timeout,
@@ -104,5 +105,44 @@ describe('ToolRegistry', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('required');
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('stableStringify', () => {
+  it('produces an order-independent key for objects', async () => {
+    const { stableStringify } = await import('../src/core/tool');
+    expect(stableStringify({ a: 1, b: 2 })).toBe(stableStringify({ b: 2, a: 1 }));
+    expect(stableStringify({ a: { y: 1, x: 2 } })).toBe(stableStringify({ a: { x: 2, y: 1 } }));
+    expect(stableStringify([3, 1, 2])).toBe('[3,1,2]'); // arrays keep order
+  });
+});
+
+describe('execute · timeout timer is always cleared (no leak)', () => {
+  it('clears the timeout timer when the handler resolves first', async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new ToolRegistry();
+      registry.register(makeTool({ name: 'fast', handler: async () => 'done' }));
+      const before = vi.getTimerCount();
+      const res = await registry.execute('fast', {});
+      expect(res.success).toBe(true);
+      // The only timer execute() arms is the timeout guard; it must be cleared.
+      expect(vi.getTimerCount()).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still enforces the timeout when a handler hangs', async () => {
+    const registry = new ToolRegistry();
+    registry.register(makeTool({
+      name: 'slow',
+      timeout: 20,
+      maxRetries: 0,
+      handler: () => new Promise<string>(() => { /* never resolves */ }),
+    }));
+    const res = await registry.execute('slow', {});
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('timeout');
   });
 });

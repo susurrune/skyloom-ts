@@ -27,6 +27,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'read_file',
+    idempotent: true,
     description: 'Read the contents of a file. Large files are paged: pass offset (1-based start line) and limit (line count) to read further sections; use grep to locate the right offset first.',
     parameters: [
       { name: 'path', type: 'string', description: 'Absolute or relative path to the file', required: true },
@@ -123,6 +124,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'list_directory',
+    idempotent: true,
     description: 'List files and directories at the given path.',
     parameters: [
       { name: 'path', type: 'string', description: 'Path to list', required: true },
@@ -145,6 +147,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'file_search',
+    idempotent: true,
     description: 'Search for files matching a glob pattern.',
     parameters: [
       { name: 'pattern', type: 'string', description: 'Glob pattern to match (e.g. "**/*.ts")', required: true },
@@ -190,6 +193,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'http_get',
+    idempotent: true,
     description: 'Make an HTTP GET request to a URL.',
     parameters: [
       { name: 'url', type: 'string', description: 'URL to fetch', required: true },
@@ -224,6 +228,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'web_search',
+    idempotent: true,
     description:
       'Search the live web and return titles, URLs, and snippets (plus a direct answer when available). ' +
       'USE THIS whenever the answer depends on current or real-time information — today\'s news and hot topics, ' +
@@ -253,6 +258,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'read_url',
+    idempotent: true,
     description:
       'Fetch a web page as clean, readable text (markdown), with boilerplate (nav/ads) stripped. ' +
       'Use after web_search to read a result in full, or to read any known URL. Prefer this over http_get for articles/pages.',
@@ -372,6 +378,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'grep',
+    idempotent: true,
     description: 'Search for a pattern in files using ripgrep or grep.',
     parameters: [
       { name: 'pattern', type: 'string', description: 'Regex pattern to search for', required: true },
@@ -406,6 +413,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'tree',
+    idempotent: true,
     description: 'Display directory tree structure.',
     parameters: [
       { name: 'directory', type: 'string', description: 'Directory to show tree for', required: false },
