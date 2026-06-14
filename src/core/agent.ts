@@ -218,10 +218,12 @@ export class BaseAgent {
 
   protected injectProgrammingWisdom(prompt: string): string {
     const lang = (this.config as any).llm?.language || 'zh';
-    if (lang === 'en') {
-      return prompt + `\n\n## Engineering\nTop-tier engineer: type-safe code, real error handling, debugging by root cause, reviewing for security & perf.`;
+    try {
+      const { engineeringProtocol } = require('./protocol');
+      return prompt + '\n\n' + engineeringProtocol(lang);
+    } catch {
+      return prompt;
     }
-    return prompt + `\n\n## 工程能力\n顶级工程师:类型安全、真实的错误处理、按根因调试、按安全与性能审查。你可以阅读和修改 Skyloom 自身源码。`;
   }
 
   /** Layered SKY.md / CLAUDE.md / AGENTS.md project memory (see core/skymd). */
