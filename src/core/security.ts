@@ -77,6 +77,7 @@ const TOOL_DANGER_MAP: Record<string, DangerLevel> = {
 
   write_file: DangerLevel.LOW,
   edit_file: DangerLevel.LOW,
+  apply_patch: DangerLevel.LOW,
   copy_file: DangerLevel.LOW,
   move_file: DangerLevel.LOW,
   make_directory: DangerLevel.LOW,
@@ -164,7 +165,7 @@ export const PERMISSION_MODE_ALIASES: Record<string, ApprovalMode> = {
 };
 
 /** Tools that mutate the filesystem — the ones acceptEdits waves through. */
-const EDIT_TOOL_RE = /^(write_|edit_|append_|replace_|create_|make_|copy_|move_|delete_)/;
+const EDIT_TOOL_RE = /^(write_|edit_|append_|replace_|create_|make_|copy_|move_|delete_)|^apply_patch$/;
 export function isEditTool(toolName: string): boolean { return EDIT_TOOL_RE.test(toolName); }
 
 /**

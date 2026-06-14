@@ -13,6 +13,7 @@ import { webSearch, formatSearchResults, readPage } from './websearch';
 import { countOccurrences, unifiedDiff } from '../core/diff';
 import { getDiagnostics, formatDiagnostics } from '../core/diagnostics';
 import { searchCode, formatSearchResult } from '../core/search';
+import { applyPatch } from '../core/patch';
 
 // Re-exported so existing importers/tests keep resolving these from builtin.
 export { isPrivateIp, assertFetchAllowed, fenceRoot, fenceCheck };
@@ -139,6 +140,30 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
         return formatDiagnostics(path.relative(process.cwd(), filePath) || filePath, result);
       } catch (e) {
         return `Error getting diagnostics: ${e}`;
+      }
+    },
+  });
+
+  registry.register({
+    name: 'apply_patch',
+    description: 'Apply an atomic, multi-file edit in one call — ideal for larger refactors touching several places/files. The whole patch is validated before anything is written, so a bad block aborts cleanly with no half-applied changes. Each SEARCH must match the file exactly and uniquely. Format:\n*** Update File: path\n<<<<<<< SEARCH\nold exact text\n=======\nnew text\n>>>>>>> REPLACE\n(repeat blocks; also *** Add File: path / full content, and *** Delete File: path)',
+    parameters: [
+      { name: 'patch', type: 'string', description: 'The patch text in the *** Update/Add/Delete File + SEARCH/REPLACE format', required: true },
+    ],
+    handler: async (params) => {
+      let snapshot: ((abs: string) => void) | undefined;
+      try {
+        const { getFileCheckpoints } = require('../core/file_checkpoint');
+        const cp = getFileCheckpoints();
+        snapshot = (abs: string) => { try { cp.snapshot(abs); } catch { /* best-effort */ } };
+      } catch { /* checkpointing optional */ }
+      try {
+        return applyPatch(String(params.patch || ''), {
+          fenceCheck: (abs: string) => fenceCheck(abs),
+          snapshot,
+        });
+      } catch (e) {
+        return `Error applying patch: ${e}`;
       }
     },
   });

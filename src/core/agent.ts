@@ -32,10 +32,10 @@ import { mapBounded, resolveConcurrency } from './concurrency';
 const log = getLogger('agent');
 
 /** Tools whose success means the filesystem changed (triggers the verify loop). */
-const WRITE_TOOL_RE = /^(write_|edit_|delete_|create_)|^run_bash$|^git_commit$/;
+const WRITE_TOOL_RE = /^(write_|edit_|delete_|create_)|^run_bash$|^git_commit$|^apply_patch$/;
 
 /** Tools with side effects, hidden from the model while in plan mode. */
-const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$/;
+const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$|^apply_patch$/;
 
 /** Default context budget per recorded tool result (chars; ~3k tokens). */
 const TOOL_RESULT_LIMIT = 12000;
