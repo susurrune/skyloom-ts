@@ -46,6 +46,14 @@ export interface ToolDefinition {
    */
   idempotent?: boolean;
   timeout?: number;
+  /**
+   * Optional output guard: inspect the handler's result and return an error
+   * message if it's not valid (else null/undefined). A non-null return makes
+   * the call fail — routed through the same retry + circuit-breaker path as a
+   * thrown error — so a tool/plugin can reject malformed output instead of
+   * passing garbage back to the model as "success".
+   */
+  validateOutput?: (result: string, params: Record<string, unknown>) => string | null | undefined;
 }
 
 /** Order-stable JSON key so {a,b} and {b,a} hash to the same cache/dedup key. */
@@ -428,6 +436,13 @@ export class ToolRegistry extends EventEmitter {
           result = await Promise.race([tool.handler(params), timeoutPromise]);
         } finally {
           if (timer) clearTimeout(timer);
+        }
+
+        // Output guard: a non-null message means the result is invalid. Throw so
+        // it flows through the same retry + breaker path as any other failure.
+        if (tool.validateOutput) {
+          const outErr = tool.validateOutput(result, params);
+          if (outErr) throw new Error(`invalid tool output: ${outErr}`);
         }
 
         const duration = Date.now() - startTime;
