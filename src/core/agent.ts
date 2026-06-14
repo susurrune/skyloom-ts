@@ -32,10 +32,10 @@ import { mapBounded, resolveConcurrency } from './concurrency';
 const log = getLogger('agent');
 
 /** Tools whose success means the filesystem changed (triggers the verify loop). */
-const WRITE_TOOL_RE = /^(write_|edit_|delete_|create_)|^run_bash$|^git_commit$/;
+const WRITE_TOOL_RE = /^(write_|edit_|delete_|create_)|^run_bash$|^git_commit$|^apply_patch$/;
 
 /** Tools with side effects, hidden from the model while in plan mode. */
-const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$/;
+const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$|^apply_patch$/;
 
 /** Default context budget per recorded tool result (chars; ~3k tokens). */
 const TOOL_RESULT_LIMIT = 12000;
@@ -218,10 +218,12 @@ export class BaseAgent {
 
   protected injectProgrammingWisdom(prompt: string): string {
     const lang = (this.config as any).llm?.language || 'zh';
-    if (lang === 'en') {
-      return prompt + `\n\n## Engineering\nTop-tier engineer: type-safe code, real error handling, debugging by root cause, reviewing for security & perf.`;
+    try {
+      const { engineeringProtocol } = require('./protocol');
+      return prompt + '\n\n' + engineeringProtocol(lang);
+    } catch {
+      return prompt;
     }
-    return prompt + `\n\n## 工程能力\n顶级工程师:类型安全、真实的错误处理、按根因调试、按安全与性能审查。你可以阅读和修改 Skyloom 自身源码。`;
   }
 
   /** Layered SKY.md / CLAUDE.md / AGENTS.md project memory (see core/skymd). */

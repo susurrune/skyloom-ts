@@ -16,6 +16,7 @@ function makeTool(overrides: Partial<ToolDefinition> & { name: string }): ToolDe
     maxRetries: overrides.maxRetries,
     retryDelay: overrides.retryDelay,
     timeout: overrides.timeout,
+    validateOutput: overrides.validateOutput,
   };
 }
 
@@ -181,6 +182,49 @@ describe('ToolRegistry · input validation + coercion', () => {
     expect(res.success).toBe(false);
     expect(res.error).toContain('required');
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('ToolRegistry · output validation', () => {
+  let registry: ToolRegistry;
+  beforeEach(() => { registry = new ToolRegistry(); });
+
+  it('fails the call when validateOutput rejects the result', async () => {
+    registry.register(makeTool({
+      name: 'guarded',
+      maxRetries: 0,
+      handler: async () => 'garbage',
+      validateOutput: (r) => (r === 'garbage' ? 'looks like garbage' : null),
+    }));
+    const res = await registry.execute('guarded', {});
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('invalid tool output');
+    expect(res.error).toContain('looks like garbage');
+  });
+
+  it('passes when validateOutput accepts the result', async () => {
+    registry.register(makeTool({
+      name: 'ok',
+      handler: async () => 'fine',
+      validateOutput: () => null,
+    }));
+    const res = await registry.execute('ok', {});
+    expect(res.success).toBe(true);
+    expect(res.result).toBe('fine');
+  });
+
+  it('retries a rejected output through the normal retry path', async () => {
+    let n = 0;
+    registry.register(makeTool({
+      name: 'retryout',
+      maxRetries: 1,
+      retryDelay: 0,
+      handler: async () => `v${++n}`,
+      validateOutput: (r) => (r === 'v1' ? 'first is bad' : null),
+    }));
+    const res = await registry.execute('retryout', {});
+    expect(res.success).toBe(true);
+    expect(res.result).toBe('v2');
   });
 });
 
