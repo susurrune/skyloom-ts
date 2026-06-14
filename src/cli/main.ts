@@ -35,6 +35,9 @@ program.command("task").argument("[goal]", "task goal")
 program.command("web").option("-p,--port <p>", "port", "7777")
   .action((o: { port?: string }) => { import("../web/server").then(m => m.startWebServer(parseInt(o.port || "7777"))); });
 program.command("mcp").action(() => { import("../core/mcp_server").then(m => m.startMCPServer()); });
+program.command("gateway").description("Run the channel gateway (Feishu / WeCom / QQ)")
+  .option("-p,--port <p>", "port", "8848")
+  .action((o: { port?: string }) => { import("../gateway/gateway").then(m => m.startGateway({ port: parseInt(o.port || "8848") })); });
 program.command("config").action(() => { const c = loadConfig(); process.stdout.write(chalk.cyan("\nConfig: ") + USER_CONFIG_DIR + "\n"); for (const [n, a] of Object.entries(c.agents || {})) process.stdout.write(`  ${chalk.bold(n)}: ${(a as any).model || "default"}\n`); });
 program.command("init").action(() => { if (!fs.existsSync(USER_CONFIG_DIR)) fs.mkdirSync(USER_CONFIG_DIR, { recursive: true }); process.stdout.write(chalk.green("✓ ") + USER_CONFIG_DIR + "\n"); });
 program.command("apikey").description("Manage API keys (persisted to ~/.skyloom/config.yaml)")
