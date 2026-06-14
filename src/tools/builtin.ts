@@ -12,6 +12,7 @@ import { isPrivateIp, assertFetchAllowed, fenceRoot, fenceCheck } from './guards
 import { webSearch, formatSearchResults, readPage } from './websearch';
 import { countOccurrences, unifiedDiff } from '../core/diff';
 import { getDiagnostics, formatDiagnostics } from '../core/diagnostics';
+import { searchCode, formatSearchResult } from '../core/search';
 
 // Re-exported so existing importers/tests keep resolving these from builtin.
 export { isPrivateIp, assertFetchAllowed, fenceRoot, fenceCheck };
@@ -471,9 +472,38 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
   // ── Utility Tools ──
 
   registry.register({
+    name: 'code_search',
+    idempotent: true,
+    description: 'Search source code for a regex pattern across files. Returns file:line matches with optional surrounding context. Use this to find where a symbol/string is defined or used. Restrict scope with glob (e.g. "**/*.ts") and add context lines to read around hits.',
+    parameters: [
+      { name: 'pattern', type: 'string', description: 'Regex (or literal if regex=false) to search for', required: true },
+      { name: 'path', type: 'string', description: 'Root directory to search (default: cwd)', required: false },
+      { name: 'glob', type: 'string', description: 'Restrict to files matching this glob, e.g. "**/*.ts"', required: false },
+      { name: 'context', type: 'number', description: 'Lines of context around each match (default 0)', required: false },
+      { name: 'ignore_case', type: 'boolean', description: 'Case-insensitive match (default false)', required: false },
+      { name: 'regex', type: 'boolean', description: 'Treat pattern as regex (default true; false = literal substring)', required: false },
+      { name: 'max_results', type: 'number', description: 'Max matches to return (default 200)', required: false },
+    ],
+    handler: async (params) => {
+      const root = params.path ? path.resolve(params.path as string) : process.cwd();
+      const fenced = fenceCheck(root); if (fenced) return fenced;
+      const res = searchCode({
+        pattern: String(params.pattern || ''),
+        root,
+        glob: params.glob ? String(params.glob) : undefined,
+        context: params.context != null ? Number(params.context) : 0,
+        ignoreCase: params.ignore_case === true,
+        regex: params.regex !== false,
+        maxResults: params.max_results != null ? Number(params.max_results) : 200,
+      });
+      return formatSearchResult(res);
+    },
+  });
+
+  registry.register({
     name: 'grep',
     idempotent: true,
-    description: 'Search for a pattern in files using ripgrep or grep.',
+    description: 'Search for a regex pattern in files using ripgrep/grep, with a built-in fallback when neither is installed. For richer control (glob, context, ignore-case) prefer code_search.',
     parameters: [
       { name: 'pattern', type: 'string', description: 'Regex pattern to search for', required: true },
       { name: 'path', type: 'string', description: 'Directory to search in', required: false },
@@ -496,12 +526,13 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
           const out = execFileSync(bin, args, { encoding: 'utf-8', maxBuffer: 1024 * 1024 });
           return out || 'No matches found.';
         } catch (e: any) {
-          // exit status 1 = ran successfully, zero matches; anything else
-          // (e.g. binary not installed) falls through to the next variant.
+          // exit status 1 = ran successfully, zero matches. Any other failure
+          // (e.g. binary not installed) falls through to the next variant, then
+          // to the pure-JS engine so search works even with no rg/grep.
           if (e?.status === 1) return 'No matches found.';
         }
       }
-      return 'No matches found.';
+      return formatSearchResult(searchCode({ pattern: pat, root: searchDir, maxResults: 200 }));
     },
   });
 
