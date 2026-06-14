@@ -166,6 +166,17 @@ export class BaseAgent {
     }
   }
 
+  /** Consolidated environment snapshot (cwd/platform/git/date) — see envcontext. */
+  protected injectEnvironment(prompt: string): string {
+    try {
+      const { buildEnvBlock } = require('./envcontext');
+      const lang = (this.config as any).llm?.language || 'zh';
+      return prompt + '\n\n' + buildEnvBlock({ lang });
+    } catch {
+      return prompt;
+    }
+  }
+
   /** Always return the live current time — never stale. */
   protected currentTimeTag(): string {
     const date = new Date();
@@ -229,6 +240,7 @@ export class BaseAgent {
     this._baseSystemPrompt = '';
     this._baseSystemPrompt = this.resolveSystemPrompt();
     this._baseSystemPrompt = this.injectWorkspaceInfo(this._baseSystemPrompt);
+    this._baseSystemPrompt = this.injectEnvironment(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectBehaviorRules(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectProgrammingWisdom(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectProjectMemory(this._baseSystemPrompt);
@@ -254,6 +266,7 @@ export class BaseAgent {
 
     this._baseSystemPrompt = this.resolveSystemPrompt();
     this._baseSystemPrompt = this.injectWorkspaceInfo(this._baseSystemPrompt);
+    this._baseSystemPrompt = this.injectEnvironment(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectBehaviorRules(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectProgrammingWisdom(this._baseSystemPrompt);
     this._baseSystemPrompt = this.injectProjectMemory(this._baseSystemPrompt);

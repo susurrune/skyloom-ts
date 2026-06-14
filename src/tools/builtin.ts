@@ -10,6 +10,8 @@ import { registerComputerTools } from './computer';
 import { registerExtraTools } from './extra';
 import { isPrivateIp, assertFetchAllowed, fenceRoot, fenceCheck } from './guards';
 import { webSearch, formatSearchResults, readPage } from './websearch';
+import { countOccurrences, unifiedDiff } from '../core/diff';
+import { getDiagnostics, formatDiagnostics } from '../core/diagnostics';
 
 // Re-exported so existing importers/tests keep resolving these from builtin.
 export { isPrivateIp, assertFetchAllowed, fenceRoot, fenceCheck };
@@ -77,28 +79,65 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'edit_file',
-    description: 'Edit a file by replacing old_text with new_text. Use this for targeted edits.',
+    description: 'Edit a file by replacing an exact occurrence of old_text with new_text. old_text must match the file exactly (including whitespace and indentation) and must be UNIQUE — include enough surrounding context to disambiguate, or set replace_all to change every occurrence. Returns a unified diff of the change.',
     parameters: [
       { name: 'path', type: 'string', description: 'Path to the file to edit', required: true },
-      { name: 'old_text', type: 'string', description: 'Text to search for and replace', required: true },
-      { name: 'new_text', type: 'string', description: 'Text to replace with', required: true },
+      { name: 'old_text', type: 'string', description: 'Exact text to replace (must match the file verbatim, and be unique unless replace_all is set)', required: true },
+      { name: 'new_text', type: 'string', description: 'Replacement text (must differ from old_text)', required: true },
+      { name: 'replace_all', type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false)', required: false },
     ],
     handler: async (params) => {
       const filePath = path.resolve(params.path as string);
       const fenced = fenceCheck(filePath); if (fenced) return fenced;
       if (!fs.existsSync(filePath)) return `Error: File not found: ${filePath}`;
+      const oldText = params.old_text as string;
+      const newText = params.new_text as string;
+      const replaceAll = params.replace_all === true || params.replace_all === 'true';
+      if (oldText === newText) return 'Error: old_text and new_text are identical — nothing to change.';
       try {
-        let content = fs.readFileSync(filePath, 'utf-8');
-        const oldText = params.old_text as string;
-        const newText = params.new_text as string;
-        if (!content.includes(oldText)) {
-          return `Error: old_text not found in file. Searched for: ${oldText.slice(0, 50)}...`;
+        const orig = fs.readFileSync(filePath, 'utf-8');
+        const n = countOccurrences(orig, oldText);
+        if (n === 0) {
+          return `Error: old_text not found in ${filePath}. It must match exactly (including whitespace). Searched for: ${JSON.stringify(oldText.slice(0, 80))}`;
         }
-        content = content.replace(oldText, newText);
-        fs.writeFileSync(filePath, content, 'utf-8');
-        return `Successfully edited ${filePath}`;
+        if (n > 1 && !replaceAll) {
+          return `Error: old_text appears ${n} times in ${filePath} — the edit is ambiguous. Add more surrounding context to make it unique, or set replace_all=true to change all ${n} occurrences.`;
+        }
+        // Literal replacement: split/join (replace_all) and a function replacer
+        // (single) both avoid String.replace interpreting `$&`/`$1` in new_text.
+        const updated = replaceAll
+          ? orig.split(oldText).join(newText)
+          : orig.replace(oldText, () => newText);
+        fs.writeFileSync(filePath, updated, 'utf-8');
+        const rel = path.relative(process.cwd(), filePath) || filePath;
+        const diff = unifiedDiff(orig, updated, { path: rel, context: 3 });
+        const occ = replaceAll ? ` (${n} occurrence${n > 1 ? 's' : ''})` : '';
+        const body = diff.text ? `\n${diff.text}` : '';
+        return `Successfully edited ${filePath}${occ} · +${diff.stat.added} -${diff.stat.removed}${body}`;
       } catch (e) {
         return `Error editing file: ${e}`;
+      }
+    },
+  });
+
+  registry.register({
+    name: 'get_diagnostics',
+    idempotent: true,
+    description: 'Get LSP-style diagnostics (type errors, lint issues with line:col) for a source file. TS/JS work out of the box via the workspace TypeScript; other languages use a configured checker (config.yaml diagnostics map). Call this after editing code to confirm it is error-free, or to locate the root cause of a type error.',
+    parameters: [
+      { name: 'path', type: 'string', description: 'Path to the source file to check', required: true },
+    ],
+    handler: async (params) => {
+      const filePath = path.resolve(params.path as string);
+      const fenced = fenceCheck(filePath); if (fenced) return fenced;
+      let config: any = {};
+      try { const { loadConfig } = require('../core/config'); config = loadConfig(); } catch { /* defaults */ }
+      try {
+        const result = getDiagnostics(filePath, config);
+        if (!Array.isArray(result)) return `[diagnostics unavailable] ${result.unavailable}`;
+        return formatDiagnostics(path.relative(process.cwd(), filePath) || filePath, result);
+      } catch (e) {
+        return `Error getting diagnostics: ${e}`;
       }
     },
   });
@@ -172,13 +211,23 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'run_bash',
-    description: 'Execute a shell command and return its output.',
+    description: 'Execute a shell command and return its output. Set background=true for long-running processes (dev servers, watchers, builds): it returns a job id immediately — read its output later with bash_output, stop it with kill_bash.',
     parameters: [
       { name: 'command', type: 'string', description: 'Command to execute', required: true },
-      { name: 'timeout', type: 'number', description: 'Timeout in milliseconds (default: 30000)', required: false },
+      { name: 'timeout', type: 'number', description: 'Timeout in milliseconds (default: 30000). Ignored when background=true.', required: false },
+      { name: 'background', type: 'boolean', description: 'Run detached in the background and return a job id instead of blocking (default false)', required: false },
     ],
     handler: async (params) => {
       const cmd = params.command as string;
+      const background = params.background === true || params.background === 'true';
+      if (background) {
+        try {
+          const { getBackgroundManager } = require('../core/bgproc');
+          const { id, error } = getBackgroundManager().start(cmd);
+          if (error) return error;
+          return `[background job ${id} started] pid running. Use bash_output("${id}") to read output, kill_bash("${id}") to stop, list_bash to see all jobs.`;
+        } catch (e: any) { return `Error: ${e.message || e}`; }
+      }
       const timeout = (params.timeout as number) || 30000;
       try {
         const { runInSandbox, formatSandboxResult } = require('../core/sandbox');
@@ -187,6 +236,51 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       } catch (e: any) { return `Error: ${e.message || e}`; }
     },
     dangerous: true,
+  });
+
+  registry.register({
+    name: 'bash_output',
+    description: 'Read new output from a background shell job (started by run_bash with background=true) since the last read, plus its current status.',
+    parameters: [
+      { name: 'id', type: 'string', description: 'The background job id', required: true },
+    ],
+    handler: async (params) => {
+      const { getBackgroundManager } = require('../core/bgproc');
+      const r = getBackgroundManager().read(String(params.id || ''));
+      if (!r.ok) return r.error || 'Error reading background job.';
+      const statusLine = `[job ${params.id} · ${r.status}${r.exitCode != null ? ` · exit ${r.exitCode}` : ''}]`;
+      const out = r.text && r.text.length ? r.text : '(no new output)';
+      return `${statusLine}\n${out}`;
+    },
+  });
+
+  registry.register({
+    name: 'list_bash',
+    description: 'List background shell jobs with their status, pid, and runtime.',
+    parameters: [],
+    handler: async () => {
+      const { getBackgroundManager } = require('../core/bgproc');
+      const jobs = getBackgroundManager().list();
+      if (!jobs.length) return 'No background jobs.';
+      return jobs.map((j: any) => {
+        const dur = ((j.endedAt || Date.now()) - j.startedAt) / 1000;
+        const ex = j.exitCode != null ? ` exit ${j.exitCode}` : '';
+        return `${j.id} · ${j.status}${ex} · pid ${j.pid ?? '?'} · ${dur.toFixed(1)}s · ${j.command.slice(0, 60)}`;
+      }).join('\n');
+    },
+  });
+
+  registry.register({
+    name: 'kill_bash',
+    description: 'Terminate a running background shell job.',
+    parameters: [
+      { name: 'id', type: 'string', description: 'The background job id to kill', required: true },
+    ],
+    handler: async (params) => {
+      const { getBackgroundManager } = require('../core/bgproc');
+      const r = getBackgroundManager().kill(String(params.id || ''));
+      return r.ok ? `[job ${params.id} killed]` : (r.error || 'Error killing background job.');
+    },
   });
 
   // ── HTTP Tools ──

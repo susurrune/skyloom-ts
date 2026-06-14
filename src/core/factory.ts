@@ -23,6 +23,7 @@ export class SystemContext {
   workspacePath: string = '';
   mcp: any = null;
   mcpStatus: string[] = [];
+  plugins: any = null;
 
   constructor(opts: {
     config: ReturnType<typeof loadConfig>;
@@ -33,6 +34,7 @@ export class SystemContext {
     workspacePath?: string;
     mcp?: any;
     mcpStatus?: string[];
+    plugins?: any;
   }) {
     this.config = opts.config;
     this.bus = opts.bus;
@@ -42,9 +44,15 @@ export class SystemContext {
     this.workspacePath = opts.workspacePath || '';
     this.mcp = opts.mcp || null;
     this.mcpStatus = opts.mcpStatus || [];
+    this.plugins = opts.plugins || null;
   }
 
   async initAll(): Promise<void> {
+    // Plugin `init` hook — fires once after load, before agents come up.
+    if (this.plugins) {
+      try { await this.plugins.emit('init', { config: this.config }); }
+      catch (e) { log.warn('plugin_init_hook_failed', { error: String(e) }); }
+    }
     if (this.mcp) {
       try {
         this.mcpStatus = await this.mcp.connectAll();
@@ -61,6 +69,11 @@ export class SystemContext {
   }
 
   async closeAll(): Promise<void> {
+    // Terminate any background shell jobs started this session.
+    try {
+      const { getBackgroundManager } = require('./bgproc');
+      getBackgroundManager().killAll();
+    } catch { /* best-effort */ }
     for (const agent of this.agentMap.values()) {
       await agent.close();
     }
@@ -114,10 +127,11 @@ export function createSystemContext(): SystemContext {
     log.warn('skills_not_available', { error: String(e) });
   }
 
-  // Load plugins
+  // Load plugins (ordered hook lifecycle — see plugins/loader)
+  let pluginLoader: any = null;
   try {
     const { PluginLoader } = require('../plugins/loader');
-    const pluginLoader = new PluginLoader(baseToolRegistry);
+    pluginLoader = new PluginLoader(baseToolRegistry, config);
     const pluginConfig = (config as any).plugins;
     const pluginDirs = pluginConfig?.enabled ? (pluginConfig.directories || []) : [];
     pluginLoader.loadFromDirectories(pluginDirs);
@@ -195,6 +209,20 @@ export function createSystemContext(): SystemContext {
         log.warn('delegate_tool_not_available', { agent: name, error: String(e) });
       }
 
+      // Register the spawn_agent tool — isolated-context subagents (Task tool).
+      try {
+        const { createSpawnAgentTool } = require('../tools/spawn');
+        agentRegistry.register(createSpawnAgentTool({
+          config,
+          llm,
+          bus,
+          baseToolRegistry,
+          baseSkillRegistry,
+        }));
+      } catch (e) {
+        log.warn('spawn_tool_not_available', { agent: name, error: String(e) });
+      }
+
       // Register model self-service tools (list_models / set_my_model)
       try {
         const { createModelTools } = require('../tools/model_tool');
@@ -234,6 +262,7 @@ export function createSystemContext(): SystemContext {
     toolRegistry: baseToolRegistry,
     workspacePath,
     mcp: mcpManager,
+    plugins: pluginLoader,
   });
 }
 

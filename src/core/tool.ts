@@ -144,15 +144,22 @@ function coerceValue(value: unknown, targetType: string): [boolean, unknown] {
     return [true, value];
   }
 
+  // string target accepts scalars (number/boolean) by stringifying them —
+  // the model sometimes sends 5 where a string id is expected.
+  if (targetType === "string" && (typeof value === "number" || typeof value === "boolean")) {
+    return [true, String(value)];
+  }
+
   // Lenient coercion from string
   if (typeof value === "string") {
     const stripped = value.trim();
 
     if (targetType === "integer" || targetType === "number") {
-      const num = parseInt(stripped, 10);
-      if (!isNaN(num)) return [true, num];
-      const float = parseFloat(stripped);
-      if (!isNaN(float)) return [true, float];
+      // Number() handles ints and floats uniformly; parseInt truncated floats
+      // ("3.5" -> 3), silently corrupting numeric args.
+      if (stripped === "") return [false, value];
+      const num = Number(stripped);
+      if (!isNaN(num)) return [true, targetType === "integer" ? Math.trunc(num) : num];
       return [false, value];
     }
 
@@ -164,14 +171,33 @@ function coerceValue(value: unknown, targetType: string): [boolean, unknown] {
     }
 
     if (targetType === "array") {
+      // The model often sends a JSON-encoded array string for array params.
+      if (stripped.startsWith("[")) {
+        try { const parsed = JSON.parse(stripped); if (Array.isArray(parsed)) return [true, parsed]; } catch { /* fall through */ }
+      }
       if (stripped.includes(",")) {
         return [true, stripped.split(",").map((s) => s.trim())];
       }
       return [true, [value]];
     }
+
+    if (targetType === "object") {
+      try {
+        const parsed = JSON.parse(stripped);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return [true, parsed];
+      } catch { /* not JSON */ }
+      return [false, value];
+    }
   }
 
   return [false, value];
+}
+
+/** Describe a value's runtime type for an error message. */
+function describeType(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
 }
 
 /**
@@ -265,32 +291,59 @@ export class ToolRegistry extends EventEmitter {
   }
 
   /**
-   * Validate tool parameters
+   * Validate tool inputs against the declared schema AND return coerced args:
+   * required-field presence, per-param type coercion (string<->number/bool,
+   * JSON-string -> array/object), and enum membership. Returning the coerced
+   * params means the handler receives clean, typed values (the model often
+   * sends "5" / "true" / a JSON string), and rejecting malformed input before
+   * execution gives the model a precise, actionable error to retry against.
+   */
+  validateAndCoerce(
+    toolName: string,
+    params: Record<string, unknown>,
+  ): { ok: boolean; error?: string; params?: Record<string, unknown> } {
+    const tool = this.tools.get(toolName);
+    if (!tool) return { ok: false, error: `Tool ${toolName} not found` };
+    if (!tool.parameters || tool.parameters.length === 0) return { ok: true, params };
+
+    const out: Record<string, unknown> = { ...params };
+    for (const param of tool.parameters) {
+      const has = param.name in params && params[param.name] !== null && params[param.name] !== undefined;
+      if (!has) {
+        if (param.required) {
+          return { ok: false, error: `Missing required parameter '${param.name}' (expected ${param.type}).` };
+        }
+        continue;
+      }
+
+      const [valid, coerced] = coerceValue(params[param.name], param.type);
+      if (!valid) {
+        return {
+          ok: false,
+          error: `Invalid type for parameter '${param.name}': expected ${param.type}, got ${describeType(params[param.name])}.`,
+        };
+      }
+
+      if (param.enum && param.enum.length > 0 && !param.enum.includes(String(coerced))) {
+        return {
+          ok: false,
+          error: `Invalid value for parameter '${param.name}': '${String(coerced)}' is not allowed. Valid values: ${param.enum.join(", ")}.`,
+        };
+      }
+
+      out[param.name] = coerced;
+    }
+
+    return { ok: true, params: out };
+  }
+
+  /**
+   * Validate tool parameters (legacy boolean/message form; delegates to
+   * validateAndCoerce).
    */
   validateParameters(toolName: string, params: Record<string, unknown>): [boolean, string] {
-    const tool = this.tools.get(toolName);
-    if (!tool) {
-      return [false, `Tool ${toolName} not found`];
-    }
-
-    if (!tool.parameters) {
-      return [true, ""];
-    }
-
-    for (const param of tool.parameters) {
-      if (param.required && !(param.name in params)) {
-        return [false, `Missing required parameter: ${param.name}`];
-      }
-
-      if (param.name in params) {
-        const [valid] = coerceValue(params[param.name], param.type);
-        if (!valid) {
-          return [false, `Invalid type for parameter ${param.name}: expected ${param.type}`];
-        }
-      }
-    }
-
-    return [true, ""];
+    const r = this.validateAndCoerce(toolName, params);
+    return [r.ok, r.error || ""];
   }
 
   /**
@@ -316,6 +369,18 @@ export class ToolRegistry extends EventEmitter {
       };
     }
 
+    // Validate + coerce inputs against the schema BEFORE cache/execute, so the
+    // handler and the cache key both use clean, typed values.
+    const validated = this.validateAndCoerce(toolName, params);
+    if (!validated.ok) {
+      return {
+        success: false,
+        result: "",
+        error: validated.error,
+      };
+    }
+    params = validated.params!;
+
     // Check cache
     if (tool.cacheable) {
       const cacheKey = stableStringify(params);
@@ -328,16 +393,6 @@ export class ToolRegistry extends EventEmitter {
           result: cached,
         };
       }
-    }
-
-    // Validate parameters
-    const [valid, error] = this.validateParameters(toolName, params);
-    if (!valid) {
-      return {
-        success: false,
-        result: "",
-        error,
-      };
     }
 
     // Execute with retries

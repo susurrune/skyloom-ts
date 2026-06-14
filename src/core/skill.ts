@@ -210,7 +210,7 @@ function parseFrontmatter(text: string): { fm: Record<string, any>; body: string
 /**
  * Normalize a Claude Code tool name into sky's registry name.
  */
-function normalizeClaudeToolName(raw: string): string {
+export function normalizeClaudeToolName(raw: string): string {
   let s = raw.trim();
   if (!s) return s;
   // Strip permission scoping: Bash(ls *) -> Bash

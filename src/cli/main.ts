@@ -303,8 +303,14 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
 
   // Wire up security approval — prompt user for HIGH/CRITICAL operations
   try {
-    const { getSecurity, DangerLevel } = require("../core/security");
+    const { getSecurity, DangerLevel, PERMISSION_MODE_ALIASES } = require("../core/security");
     const sec = getSecurity();
+    // Honor a configured permission mode (config.yaml cli.approvalMode), mapped
+    // through the same aliases as /perm.
+    const cfgMode = (ctx as any).config?.cli?.approvalMode || (ctx as any).config?.cli?.approval_mode;
+    if (cfgMode && PERMISSION_MODE_ALIASES[String(cfgMode).toLowerCase()]) {
+      sec.setMode(PERMISSION_MODE_ALIASES[String(cfgMode).toLowerCase()]);
+    }
     sec.setApprovalCallback(async (tool: string, args: Record<string, any>, level: number) => {
       process.stdout.write(chalk.yellow(`\n  ⚠ ${tool} ( danger level ${level} )\n`));
       process.stdout.write(chalk.dim(`     args: ${JSON.stringify(args).slice(0, 80)}\n`));
@@ -415,6 +421,17 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
       process.stdout.write(chalk.dim(`  模式 → ${MODE.current} · ${MODE.describe()}\n`));
       continue;
     }
+    if (cmdL === "/perm" || cmdL.startsWith("/perm ")) {
+      const { getSecurity, PERMISSION_MODE_ALIASES } = require("../core/security");
+      const sec = getSecurity();
+      const arg = inp.split(/\s+/)[1]?.toLowerCase();
+      if (!arg) { process.stdout.write(chalk.dim(`  权限模式: ${sec.approvalMode} · 可选 default | auto | accept | strict | bypass\n`)); continue; }
+      const m = PERMISSION_MODE_ALIASES[arg];
+      if (!m) { process.stdout.write(chalk.yellow(`  未知权限模式 '${arg}' · 可选 default | auto | accept | strict | bypass\n`)); continue; }
+      sec.setMode(m);
+      process.stdout.write(chalk.green(`  ✓ 权限模式 → ${m}\n`));
+      continue;
+    }
     if (cmdL === "/context") {
       try {
         const d = currentAgent.contextDetail();
@@ -436,6 +453,19 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
         process.stdout.write(chalk.dim(`  ${s.name.padEnd(16)} ${s.calls} 次 · ${s.avgMs}ms${extra}\n`));
       }
       process.stdout.write("\n");
+      continue;
+    }
+    if (cmdL === "/agents") {
+      const { loadSubagentDefinitions } = require("../core/subagent");
+      const defs = loadSubagentDefinitions();
+      process.stdout.write(chalk.bold(`\n  可派生子智能体 · spawn_agent\n`));
+      for (const d of defs.values()) {
+        const scope = d.source === "builtin" ? "内置" : "自定义";
+        const tools = d.tools === null ? "全部工具" : `${d.tools.length} 个工具`;
+        process.stdout.write(chalk.dim(`  ◇ ${String(d.name).padEnd(18)} ${d.description}\n`));
+        process.stdout.write(chalk.dim(`    └ ${scope} · ${tools}${d.model ? ` · ${d.model}` : ""}\n`));
+      }
+      process.stdout.write(chalk.dim(`\n  自定义: 在 .sky/agents/ 或 .claude/agents/ 放 <name>.md (frontmatter: description/tools/model)\n\n`));
       continue;
     }
     if (cmdL === "/trace") {

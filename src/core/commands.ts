@@ -314,6 +314,16 @@ export const BUILTIN_COMMANDS: CommandInfo[] = [
     source: 'builtin',
   },
   {
+    name: 'agents',
+    aliases: [],
+    description: 'List spawnable subagents',
+    label: '可派生子智能体',
+    category: 'context',
+    hints: [],
+    takesArgs: false,
+    source: 'builtin',
+  },
+  {
     name: 'workspace',
     aliases: [],
     description: 'Workspace info',
@@ -426,6 +436,16 @@ export const BUILTIN_COMMANDS: CommandInfo[] = [
     category: 'workflow',
     hints: [],
     takesArgs: false,
+    source: 'builtin',
+  },
+  {
+    name: 'perm',
+    aliases: [],
+    description: 'Set permission mode (default|auto|accept|strict|bypass)',
+    label: '权限模式（default/auto/accept/strict/bypass）',
+    category: 'workflow',
+    hints: ['default', 'auto', 'accept', 'strict', 'bypass'],
+    takesArgs: true,
     source: 'builtin',
   },
 

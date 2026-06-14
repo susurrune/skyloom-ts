@@ -120,13 +120,13 @@
 
 - [x] **P4.1 Session 恢复 + 持久化修复**：新增 CLI `/sessions`（编号列表、标记当前）、`/resume <序号|id>`、`/new`。**并修复了一个严重 bug**：`persistDb()`（唯一写盘的代码）**从未被调用** → sql.js 纯内存 → 会话/长期记忆/工作记忆**重启全丢**（"启动自动恢复最新会话"形同虚设）。改为所有写经 `dbRun` 触发**防抖落盘** + `close()` 同步保存。新增跨实例持久化回归测试。
 - [x] **P4.2 自动压缩（catalog 感知触发）**：`shouldAutoCompact()`/`contextUsage()` 不再硬编码 128K —— 改为按当前模型在 catalog 里的真实 `context` 窗口判断（留 20% 余量给回复）。修复了小窗口模型（deepseek-reasoner 64K、mixtral 32K）长聊时**先于压缩就溢出**的隐患；状态栏 % 与模型名也正确了。压缩本身（摘要 + 保留近 N 条 + 指令保真）已存在并已接线。后续：结构化 checkpoint + 溢出后重试（对标 opencode）。
-- [ ] **P4.3 上下文快照**：环境信息、日期、工作区、激活技能合成一份"系统上下文"，模型可见但与历史分离（轻量版 Context Epoch）。
+- [x] **P4.3 环境上下文快照**（对标 Claude Code `<env>` 块）：[`envcontext.ts`](../src/core/envcontext.ts) 的 `buildEnvBlock` 合成「运行环境」块(工作目录、平台、Node、git 仓库/分支、日期),`gitInfo` 用纯文件读取识别仓库与分支(兼容 worktree 的 `.git` 文件)。`BaseAgent.injectEnvironment` 在 init/reinitLanguage 把它注入系统提示,与对话历史分离。新增 [`tests/envcontext.test.ts`](../tests/envcontext.test.ts) 6 用例。
 
 ### Phase 5 — 工具与插件健壮性｜~1 天
 
-- [ ] **P5.1 工具 IO 校验**：工具定义带 input/output schema，非法输入不执行、非法输出不算成功（对标 opencode `tools.md`）。
-- [ ] **P5.2 权限内聚**：危险操作的 `permission.assert` 由工具自身发起，security 模块只评估策略 + 管理审批，统一 `ask/allow/deny` 语义。
-- [ ] **P5.3 插件 hook**：目录加载器升级为有序 hook（`init` / `tool.register` / `provider.update`），插件在自己的 scope 注册，卸载即移除。
+- [x] **P5.1 工具输入校验 + 强制 coercion**（对标 opencode `tools.md`）：`ToolRegistry.validateAndCoerce` 在 `execute` 里于缓存/执行**之前**校验并归一化入参 —— 必填项缺失即拒、按声明类型 coerce（`"5"`→5、`"true"`→true、JSON 串→array/object）、enum 成员校验，handler 收到的是干净的类型化值，非法输入返回**可操作的**错误供模型重试。修了 `parseInt` 截断浮点(`"3.5"`→3)的隐患。见 [`tests/tool.test.ts`](../tests/tool.test.ts)（+7 用例）。输出校验暂未做。
+- [x] **P5.2 权限模式内聚**（对标 Claude Code 权限模式）：把审批逻辑收敛为一个纯函数 `decideApproval(level, mode, tool) → allow/ask/deny`（[security.ts](../src/core/security.ts)），`checkApproval` 只做红线门禁 + 调用它 + 回调。新增模式 `acceptEdits`（自动放行文件编辑类工具,其余照 default 询问）与 `bypass`（除红线外全放行）;保留 `auto/interactive/strict` 行为不变。`/perm <default|auto|accept|strict|bypass>` 运行时切换(linear + loom),`config.cli.approvalMode` 启动时生效。新增 [`tests/security.test.ts`](../tests/security.test.ts) 11 用例覆盖决策矩阵。后续:让工具自身发起 `permission.assert`(细粒度 scope)。
+- [x] **P5.3 插件 hook 生命周期**（对标 opencode 插件）：[`plugins/loader.ts`](../src/plugins/loader.ts) 从扁平加载器升级为有序 hook 系统。插件导出 `activate(ctx)`,通过 `ctx.registerTool` / `ctx.on(hook, fn)` 在**自己的 scope** 注册;`unload(name)` 精确移除其工具与 hook handler(并调 `deactivate`)。核心 hook:`init`(加载后、agent 起来前由 `SystemContext.initAll` 触发)、`tool.register`、`provider.update`。handler 按注册顺序触发、单个抛错隔离。**保留 legacy `register(registry)`**(diff 注册表追踪其工具以支持卸载)。新增 [`tests/plugins.test.ts`](../tests/plugins.test.ts) 7 用例。后续:`provider.update` 在 model_config 变更处触发。
 
 ### Phase 6 — 测试与质量门禁｜~1.5 天
 
@@ -176,3 +176,20 @@ M5 打磨成品     Phase 7        → 美学工程化 + 品牌资产 + 发布
 | 流式与工具执行交错复杂 | 复用已存在的 `chatStreamImpl` 事件模型，只接线不重写 |
 | Catalog 迁移漏模型 | 以 `config/models.yaml` 为真值源迁移，向导/README 派生 |
 | 美学改动破坏现有观感 | 设计 token 抽取为"提取"非"重画"，先快照对比 |
+
+---
+
+## 6. Phase 8 — Claude Code / opencode 能力对齐 ✅ 已完成
+
+四项核心能力补齐,全部 `tsc --noEmit` 绿 + 单测覆盖(351 → 387 用例,+36):
+
+- [x] **P8.1 通用可定义子智能体**(对标 Claude Code `Task` 工具)
+  [`src/core/subagent.ts`](../src/core/subagent.ts) + [`src/tools/spawn.ts`](../src/tools/spawn.ts):`spawn_agent` 工具派生**隔离上下文**的子智能体(独立临时记忆,用完即删),只回传最终报告。内置 `general-purpose` / `explore`;支持 `.sky/agents/*.md` 与 `.claude/agents/*.md` 自定义(frontmatter 兼容 Claude Code,工具名自动映射)。子智能体永不持有 `spawn_agent`(无递归)。`/agents` 列举。新增 [`tests/subagent.test.ts`](../tests/subagent.test.ts) 13 用例。
+- [x] **P8.2 精确编辑 + diff**(对标 Claude Code `Edit`)
+  [`src/core/diff.ts`](../src/core/diff.ts) + 升级 `edit_file`:强制**唯一匹配**(歧义即拒)、`replace_all`、no-op 检测、返回统一 diff(+/- 统计)。并修复旧实现 `String.replace` 把 `$&`/`$1` 当替换模式的隐患。新增 [`tests/edit_diff.test.ts`](../tests/edit_diff.test.ts) 10 用例。
+- [x] **P8.3 后台任务 / 长进程**(对标 Claude Code Bash `run_in_background`)
+  [`src/core/bgproc.ts`](../src/core/bgproc.ts):`run_bash` 加 `background=true` 派后台子进程,`bash_output`(增量读)/`list_bash`/`kill_bash` 控制。复用沙箱红线预检;滚动输出上限;会话退出 `killAll`(无孤儿)。新增 [`tests/bgproc.test.ts`](../tests/bgproc.test.ts) 5 用例。
+- [x] **P8.4 诊断(LSP 关键能力)**(对标 opencode LSP)
+  [`src/core/diagnostics.ts`](../src/core/diagnostics.ts) + `get_diagnostics` 工具:TS/JS 经**工作区** TypeScript 编译器 API 取真实语义诊断(行:列 + TS 码),零额外安装;其他语言走 `config.diagnostics` 配置的外部 checker(解析 `file:line:col` 输出)。新增 [`tests/diagnostics.test.ts`](../tests/diagnostics.test.ts) 8 用例。
+
+> 这是把"完整的多 Agent 终端"推进到**与 Claude Code / opencode 同代能力面**的一步:可派生子智能体、精确可审计的编辑、后台进程、按文件诊断闭环。
