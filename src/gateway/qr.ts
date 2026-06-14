@@ -5,7 +5,6 @@
  */
 
 // qrcode-terminal ships no types; declare the tiny surface we use.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const qrcode: { generate: (text: string, opts: { small?: boolean }, cb: (s: string) => void) => void } =
   require('qrcode-terminal');
 

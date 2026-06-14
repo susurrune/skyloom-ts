@@ -5,11 +5,11 @@
  * processes and services, and install/uninstall software.
  */
 
-import { execSync, execFileSync, spawn } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { ToolRegistry, ToolDefinition } from '../core/tool';
+import type { ToolRegistry } from '../core/tool';
 
 const MAX_OUT = 8000;
 

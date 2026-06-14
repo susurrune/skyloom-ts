@@ -60,7 +60,6 @@ export function unifiedDiff(oldStr: string, newStr: string, opts: DiffOptions = 
   // Context window bounds.
   const ctxStart = Math.max(0, pre - context);
   const oldCtxAfterStart = oldLines.length - suf;
-  const newCtxAfterStart = newLines.length - suf;
   const oldCtxAfter = oldLines.slice(oldCtxAfterStart, oldCtxAfterStart + context);
   const leading = oldLines.slice(ctxStart, pre);
 

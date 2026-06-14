@@ -8,10 +8,7 @@
 
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { createSystemContext } from "../core/factory";
-import { getLogger } from "../core/logger";
 import { renderInkWashUI, SKYLOOM_FAVICON_SVG } from "./ui";
-
-const log = getLogger("web-server");
 
 /* ──────────────────────────────────────────────
    Server

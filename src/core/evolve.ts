@@ -121,12 +121,6 @@ export function analyzeFailures(
     }
   }
 
-  // General rule: if failure rate > 20%, suggest self-review
-  const recentExperiences = recent.filter(e => {
-    try { return new Date(e.lastSeen).getTime() > Date.now() - 3 * 86400000; }
-    catch { return false; }
-  });
-
   // Deduplicate suggestions
   const seen = new Set<string>();
   const uniqueDiffs = suggestedDiffs.filter(d => {

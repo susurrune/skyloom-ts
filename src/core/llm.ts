@@ -355,37 +355,6 @@ const FALLBACK_CHAINS: Map<string, string[]> = new Map([
 /**
  * HTTP status codes that are considered transient errors (worth retrying).
  */
-const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
-
-/**
- * Check if an exception is worth retrying.
- */
-function isTransientError(err: unknown): boolean {
-  if (err instanceof Error) {
-    const status =
-      (err as any).status_code || (err as any).http_status || 0;
-    if (status && RETRYABLE_STATUSES.has(status)) {
-      return true;
-    }
-
-    if (err.name === "TimeoutError") {
-      return true;
-    }
-
-    const errName = err.constructor.name.toLowerCase();
-    return [
-      "ratelimiterror",
-      "apitimeouterror",
-      "apiconnectionerror",
-      "serviceunavailableerror",
-      "internalservererror",
-      "timeout",
-    ].includes(errName);
-  }
-
-  return false;
-}
-
 /**
  * Estimate cost for LLM API call.
  */
@@ -704,7 +673,7 @@ export class LLMClient {
     messages: Record<string, unknown>[],
     agentName?: string,
     tools?: string[],
-    stream: boolean = false,
+    _stream: boolean = false,
     overrides?: Record<string, unknown>
   ): Promise<LLMResponse> {
     const temperature = (overrides?.temperature as number) ?? 0.7;
@@ -867,7 +836,9 @@ export class LLMClient {
   private async *callOpenAIStream(
     m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, signal?: AbortSignal, agentName?: string
   ): AsyncGenerator<StreamEvent> {
-    const apiKey = this.getApiKey(m);
+    // Honor a per-agent API key override (agents.<name>.api_key) on the
+    // streaming path too — previously only the non-streaming path passed it.
+    const apiKey = this.getApiKey(m, agentName);
     const baseUrl = this.getBaseUrl(m);
     const body: Record<string, unknown> = {
       model: m, messages, temperature: temp ?? 0.7, max_tokens: maxTok ?? 4096,

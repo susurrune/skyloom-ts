@@ -140,7 +140,7 @@ const RELATION_PATTERNS: Array<[RegExp, string]> = [
   [/(\w+) (?:file|path|文件|路径) (?:在|为|at) (.+?)(?:[。，,.\n]|$)/gi, "located_at"],
 ];
 
-export function extractFacts(text: string, agent: string): Array<[string, string, string]> {
+export function extractFacts(text: string, _agent: string): Array<[string, string, string]> {
   const facts: Array<[string, string, string]> = [];
   for (const [pattern, pred] of RELATION_PATTERNS) {
     let match;

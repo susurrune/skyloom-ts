@@ -79,30 +79,6 @@ export interface MessageSchema {
 }
 
 /**
- * Coerce a value to a target type with best-effort conversion
- */
-function coerceType(value: unknown, targetType: string): unknown {
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  switch (targetType) {
-    case "string":
-      return String(value);
-    case "number":
-      return Number(value);
-    case "boolean":
-      return Boolean(value);
-    case "array":
-      return Array.isArray(value) ? value : [];
-    case "object":
-      return typeof value === "object" ? value : {};
-    default:
-      return value;
-  }
-}
-
-/**
  * Extract JSON object/array from a potentially malformed string
  */
 function extractJSON(text: string): string {
@@ -170,7 +146,7 @@ function repairJSON(text: string): string {
  */
 export function parseSchema<T extends Record<string, unknown>>(
   raw: string,
-  schemaType?: new () => T
+  _schemaType?: new () => T
 ): T {
   if (!raw || !raw.trim()) {
     throw new SchemaValidationError("empty response", raw);
