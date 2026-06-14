@@ -71,6 +71,7 @@ sky
 | `sky task "写一个CLI"` | 多 Agent DAG 编排 |
 | `sky web` | 启动 Web UI → `http://localhost:3000` |
 | `sky mcp` | 启动 MCP Server（供 Claude Desktop 等调用） |
+| `sky gateway` | 启动渠道网关（飞书 / 企业微信 / QQ 机器人接入） |
 | `sky apikey set <provider> <key>` | 保存 API Key |
 | `sky -p "问题" [--agent fog] [--json]` | Headless 模式（CI / 管道 / 外部编排） |
 
@@ -380,6 +381,47 @@ hooks:
 
 - **Client**：连接外部 MCP Server（stdio / SSE 传输），扩展工具集。兼容 `.mcp.json`（Claude Code 同款 schema）
 - **Server**：`sky mcp` 启动，将 Skyloom Agent 暴露为工具供 Claude Desktop / Zed / Continue 等调用
+
+### 渠道网关 — 接入聊天软件
+
+`sky gateway` 启动一个统一网关,把 **飞书 / 企业微信 / QQ** 的机器人消息桥接给 Skyloom Agent。架构借鉴 OpenClaw 的渠道模型,但精简为一套干净契约:
+
+```
+平台 → POST /webhook/<channel> → 适配器(验签+解密+标准化) → Agent.chatStream → 适配器回发
+```
+
+每个渠道自行处理**签名校验**与平台的 **URL 验证握手**,网关核心保持平台无关。回复在 ack webhook 后异步投递(三家平台都要求快速 200)。
+
+在 `~/.skyloom/config.yaml` 配置(或用对应环境变量):
+
+```yaml
+channels:
+  feishu:                       # 飞书 / Lark
+    appId: cli_xxx              # 或环境变量 FEISHU_APP_ID
+    appSecret: { source: env, id: FEISHU_APP_SECRET }
+    encryptKey: ""             # 可选(开启加密时)· FEISHU_ENCRYPT_KEY
+    verificationToken: ""      # 可选 · FEISHU_VERIFICATION_TOKEN
+    agent: fair                # 该渠道路由到哪个灵(默认 fair)
+  wecom:                        # 企业微信
+    corpId: ww_xxx             # WECOM_CORP_ID
+    corpSecret: { source: env, id: WECOM_CORP_SECRET }
+    token: xxx                 # WECOM_TOKEN
+    encodingAesKey: xxx        # WECOM_AES_KEY(43 位)
+    agentId: 1000002           # WECOM_AGENT_ID
+  qq:                           # QQ 官方机器人(webhook 模式)
+    appId: "102xxxxxx"         # QQ_BOT_APPID
+    secret: { source: env, id: QQ_BOT_SECRET }
+```
+
+把平台后台的事件回调 URL 指向 `http(s)://<你的域名>:8848/webhook/feishu`(企业微信 `/webhook/wecom`、QQ `/webhook/qq`)。`secretInput` 支持字面量或 `{ source: env, id: 环境变量名 }`,与 OpenClaw 同构。`/health` 可查已启用渠道。
+
+| 渠道 | 入站(收) | 鉴权/加密 |
+|------|----------|-----------|
+| 飞书 Feishu | 事件订阅 webhook(`im.message.receive_v1`) | verification token + 可选 AES-256-CBC 解密 + URL challenge |
+| 企业微信 WeCom | 应用回调(XML) | msg_signature(SHA1) + AES(PKCS7) + GET echostr 验证 |
+| QQ Bot | 官方 webhook(群/私聊/频道 @) | Ed25519 验签 + op=13 validation 握手 |
+
+> ⚠️ 网关接收外部平台回调,默认绑定 `0.0.0.0`。请放在反向代理/HTTPS 之后,并妥善保管密钥(建议走环境变量 / `secretInput`)。
 
 ---
 
