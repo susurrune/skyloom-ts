@@ -31,6 +31,7 @@ import chalk from "chalk";
 import { agentTheme, AGENT_ORDER, PALETTE } from "../core/theme";
 import { charWidth, visualWidth, SLASH_COMMANDS } from "./tui";
 import { hasWizard, buildCommandLine, filterChoices, type WizardStep, type ArgChoice } from "./command_args";
+import { styleLine, newRenderState } from "./md_render";
 
 /* ════════════════════════════════════════
    ANSI-aware string helpers (pure, tested)
@@ -918,19 +919,28 @@ export class LoomUI {
         b.cache = { width: w, version: b.version, lines: wrapped };
       }
       const style = b.style ?? ((s: string) => s);
+      // Streaming text blocks get markdown styling (bold/italic/headings/…);
+      // the code-fence state carries across lines within the same block.
+      const isTextBlock = !b.style; // user-styled blocks keep their own style
+      const md = isTextBlock ? newRenderState() : null;
       b.cache.lines.forEach((ln, i) => {
         const head = b.head ? (i === 0 ? b.head : " ".repeat(visualWidth(b.head))) : "";
-        let body = style(ln);
+        let body: string;
         if (b.open && i === b.cache!.lines.length - 1) {
-          // ink-bleed: the freshest glyphs render faint, "drying" into full ink
+          // ink-bleed: freshest glyphs render faint, "drying" into full ink.
+          // Apply to the raw line first, then style each half — the bleed
+          // boundary may briefly cut a markdown span, but the next frame
+          // resolves it (12 chars max, so it's imperceptible).
           const glyphs = [...ln];
           const bleed = Math.min(this.bleedLen, glyphs.length);
-          if (bleed > 0) {
-            const headPart = glyphs.slice(0, glyphs.length - bleed).join("");
-            const tailPart = glyphs.slice(glyphs.length - bleed).join("");
-            body = style(headPart) + chalk.hex(PALETTE.inkLight)(tailPart);
-          }
+          const headPart = glyphs.slice(0, glyphs.length - bleed).join("");
+          const tailPart = glyphs.slice(glyphs.length - bleed).join("");
+          const headStyled = md ? styleLine(headPart, md) : style(headPart);
+          const tailStyled = chalk.hex(PALETTE.inkLight)(tailPart);
+          body = headStyled + tailStyled;
           body += this.tick % 8 < 4 ? chalk.hex(agentTheme(this.agentName).hex)("▍") : chalk.dim("▏");
+        } else {
+          body = md ? styleLine(ln, md) : style(ln);
         }
         lines.push(head + body);
       });
