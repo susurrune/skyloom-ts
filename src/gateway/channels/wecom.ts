@@ -18,7 +18,7 @@
 import * as crypto from 'crypto';
 import { getLogger } from '../../core/logger';
 import { resolveSecret, postJson, getJson, TokenCache } from '../helpers';
-import type { ChannelAdapter, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
+import type { ChannelAdapter, MediaAttachment, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-wecom');
 
@@ -108,17 +108,26 @@ export function createWecomAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAda
       const msgType = xmlField(inner, 'MsgType');
       const fromUser = xmlField(inner, 'FromUserName');
       let text = '';
-      if (msgType === 'text') text = xmlField(inner, 'Content').trim();
-      else text = `[${msgType} 消息]`;
+      const media: MediaAttachment[] = [];
+      switch (msgType) {
+        case 'text': text = xmlField(inner, 'Content').trim(); break;
+        case 'image': media.push({ kind: 'image', ref: xmlField(inner, 'MediaId'), url: xmlField(inner, 'PicUrl') || undefined }); break;
+        case 'voice': media.push({ kind: 'audio', ref: xmlField(inner, 'MediaId'), filename: xmlField(inner, 'MediaId') + '.' + (xmlField(inner, 'Format') || 'amr') }); break;
+        case 'video': media.push({ kind: 'video', ref: xmlField(inner, 'MediaId') }); break;
+        case 'file': media.push({ kind: 'file', ref: xmlField(inner, 'MediaId'), filename: xmlField(inner, 'FileName') || undefined }); break;
+        case 'location': text = `[位置] ${xmlField(inner, 'Label')} (${xmlField(inner, 'Location_X')},${xmlField(inner, 'Location_Y')})`; break;
+        default: text = `[${msgType} 消息]`;
+      }
 
       // Ack the callback immediately (empty 200); reply is pushed via the API.
       return {
         response: { status: 200, body: '' },
-        message: text ? {
+        message: (text || media.length) ? {
           channel: 'wecom',
           conversationId: fromUser,
           userId: fromUser,
           text,
+          media: media.length ? media : undefined,
           replyTo: { channel: 'wecom', toUser: fromUser },
           raw: inner,
         } : undefined,

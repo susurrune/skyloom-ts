@@ -16,6 +16,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { getLogger } from '../core/logger';
 import { createSystemContext } from '../core/factory';
 import { buildAdapters } from './registry';
+import { describeMedia } from './types';
 import type { ChannelAdapter, InboundMessage, RawRequest } from './types';
 
 const log = getLogger('gateway');
@@ -39,9 +40,15 @@ async function runAgent(
   if (!agent) throw new Error('no agent available');
 
   await agent.init();
+  // Fold any media attachments into the prompt as a readable description so the
+  // agent knows what was sent even when it can't fetch the binary itself.
+  const mediaDesc = describeMedia(msg.media);
+  const prompt = mediaDesc
+    ? (msg.text ? `${msg.text}\n\n(用户还发送了媒体: ${mediaDesc})` : `用户发送了媒体: ${mediaDesc}`)
+    : msg.text;
   let text = '';
   try {
-    for await (const ev of agent.chatStream(msg.text)) {
+    for await (const ev of agent.chatStream(prompt)) {
       if ((ev as any).type === 'content') text += (ev as any).text;
     }
   } catch (e) {

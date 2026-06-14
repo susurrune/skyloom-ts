@@ -16,7 +16,7 @@
 import * as crypto from 'crypto';
 import { getLogger } from '../../core/logger';
 import { resolveSecret, postJson, TokenCache } from '../helpers';
-import type { ChannelAdapter, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
+import type { ChannelAdapter, MediaAttachment, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-feishu');
 
@@ -103,12 +103,45 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
       const chatId = message.chat_id as string;
       const msgType = message.message_type as string;
       let text = '';
-      if (msgType === 'text') {
-        try { text = JSON.parse(message.content || '{}').text || ''; } catch { text = ''; }
-        // Strip @mentions like "@_user_1 ".
-        text = text.replace(/@_user_\d+/g, '').trim();
-      } else {
-        text = `[${msgType} 消息]`;
+      const media: MediaAttachment[] = [];
+      let content: any = {};
+      try { content = JSON.parse(message.content || '{}'); } catch { /* ignore */ }
+      switch (msgType) {
+        case 'text':
+          text = (content.text || '').replace(/@_user_\d+/g, '').trim(); // strip @mentions
+          break;
+        case 'image':
+          media.push({ kind: 'image', ref: content.image_key });
+          break;
+        case 'audio':
+          media.push({ kind: 'audio', ref: content.file_key });
+          break;
+        case 'media': // short video
+          media.push({ kind: 'video', ref: content.file_key, filename: content.file_name });
+          break;
+        case 'file':
+          media.push({ kind: 'file', ref: content.file_key, filename: content.file_name });
+          break;
+        case 'sticker':
+          media.push({ kind: 'sticker', ref: content.file_key });
+          break;
+        case 'post': { // rich text: pull plain text + embedded images
+          const blocks = content?.content;
+          if (Array.isArray(blocks)) {
+            for (const row of blocks) {
+              for (const el of row || []) {
+                if (el?.tag === 'text' && el.text) text += el.text;
+                else if (el?.tag === 'a' && el.text) text += el.text;
+                else if (el?.tag === 'img' && el.image_key) media.push({ kind: 'image', ref: el.image_key });
+              }
+              text += '\n';
+            }
+          }
+          text = text.trim();
+          break;
+        }
+        default:
+          text = `[${msgType} 消息]`;
       }
       const senderId = payload.event?.sender?.sender_id?.open_id || payload.event?.sender?.sender_id?.user_id || 'unknown';
 
@@ -118,6 +151,7 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
           conversationId: chatId || senderId,
           userId: senderId,
           text,
+          media: media.length ? media : undefined,
           replyTo: { channel: 'feishu', chatId },
           raw: payload,
         },
