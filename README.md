@@ -71,6 +71,7 @@ sky
 | `sky task "写一个CLI"` | 多 Agent DAG 编排 |
 | `sky web` | 启动 Web UI → `http://localhost:3000` |
 | `sky mcp` | 启动 MCP Server（供 Claude Desktop 等调用） |
+| `sky channels` | 渠道接入向导（选软件 → 扫码进后台 → 填密钥 → 回调 URL 二维码） |
 | `sky gateway` | 启动渠道网关（飞书 / 企业微信 / QQ 机器人接入） |
 | `sky apikey set <provider> <key>` | 保存 API Key |
 | `sky -p "问题" [--agent fog] [--json]` | Headless 模式（CI / 管道 / 外部编排） |
@@ -392,7 +393,11 @@ hooks:
 
 每个渠道自行处理**签名校验**与平台的 **URL 验证握手**,网关核心保持平台无关。回复在 ack webhook 后异步投递(三家平台都要求快速 200)。
 
-在 `~/.skyloom/config.yaml` 配置(或用对应环境变量):
+**最快上手:`sky channels` 配置向导**(也可在对话里 `/channels`):选聊天软件 → 终端渲染**二维码直达该平台的 bot 管理后台**(手机扫码打开创建 bot)→ 按提示逐项填密钥(带"在哪找"提示)→ 自动存盘 → 再把**回调 URL 也渲成二维码**(扫了贴进后台事件配置)。配完运行 `sky gateway` 即可。
+
+> 说明:飞书/企业微信/QQ 都是**官方机器人 API**,凭据需在各平台开发者后台创建(不存在个人微信那种"扫码登录")。所以二维码是"快捷直达后台 + 回调 URL"的便利,而非免凭据登录。
+
+也可手动在 `~/.skyloom/config.yaml` 配置(或用对应环境变量):
 
 ```yaml
 channels:

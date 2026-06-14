@@ -483,6 +483,16 @@ export const BUILTIN_COMMANDS: CommandInfo[] = [
     source: 'builtin',
   },
   {
+    name: 'channels',
+    aliases: [],
+    description: 'Configure a chat channel (Feishu / WeCom / QQ) with QR shortcuts',
+    label: '渠道接入向导（飞书/企业微信/QQ · 含二维码）',
+    category: 'config',
+    hints: [],
+    takesArgs: false,
+    source: 'builtin',
+  },
+  {
     name: 'apikey',
     aliases: [],
     description: 'Manage API keys',
