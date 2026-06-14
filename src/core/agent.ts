@@ -90,8 +90,12 @@ export class BaseAgent {
   protected _skillTools: Map<string, string[]> = new Map();
   protected _skillConfigOverrides: Map<string, Record<string, any>> = new Map();
   protected _baseSystemPrompt: string = '';
+  /** @deprecated stopping is progress-based now; kept for back-compat only. */
   protected _maxToolRounds: number = 50;
-  protected _maxToolRoundsHardCap: number = 200;
+  /** Last-resort backstop against runaway; not the normal stop path. */
+  protected _maxToolRoundsHardCap: number = 1000;
+  /** Stop after this many consecutive rounds with no progress (see chatStreamImpl). */
+  protected _maxNoProgressRounds: number = 6;
   protected _userTurnsSinceExtract: number = 0;
   protected _pendingExtracts: Set<Promise<any>> = new Set();
   protected _pendingRequests: Map<string, { resolve: (value: string) => void; reject: (err: Error) => void }> = new Map();
@@ -132,27 +136,28 @@ export class BaseAgent {
       maxPersistedMessages: mc.maxPersistedMessages || mc.max_persisted_messages,
     }, this.name);
 
-    // Tool-round budget. The LoopGuard is the real safety net (it stops genuine
-    // loops — repeated signatures, all-failing calls, search storms — at any
-    // round count), so this cap exists only as a last-resort ceiling against
-    // pathological cases the guard misses. Defaults are generous so normal long
-    // tasks (big refactors across many files) never hit it; configurable via
-    // config.llm.max_tool_rounds / max_tool_rounds_hard_cap. Setting
-    // max_tool_rounds to 0 (or negative) means "unlimited" — a very high ceiling
-    // so a guard-less runaway still can't burn tokens forever.
+    // Stopping is PROGRESS-based, not round-count based (OpenClaw-style): a task
+    // runs as long as it keeps making progress. The agent stops when it makes no
+    // progress for `_maxNoProgressRounds` rounds in a row, or when the LoopGuard
+    // detects a genuine loop. `_maxToolRoundsHardCap` is only a last-resort
+    // backstop against pathological runaway and is set very high so normal long
+    // tasks never reach it. All three are configurable under config.llm.
     const lc: any = (config as any).llm || {};
-    const soft = Number(lc.max_tool_rounds ?? lc.maxToolRounds);
     const hard = Number(lc.max_tool_rounds_hard_cap ?? lc.maxToolRoundsHardCap);
-    const UNLIMITED = 100000;
-    if (Number.isFinite(soft) && soft <= 0) {
-      // Unlimited: rely entirely on the LoopGuard + Ctrl-C + context compaction.
-      this._maxToolRounds = UNLIMITED;
-      this._maxToolRoundsHardCap = UNLIMITED;
-    } else {
-      this._maxToolRounds = Number.isFinite(soft) && soft > 0 ? Math.floor(soft) : 50;
-      this._maxToolRoundsHardCap = Number.isFinite(hard) && hard > 0
-        ? Math.max(Math.floor(hard), this._maxToolRounds)
-        : Math.max(200, this._maxToolRounds);
+    const noProg = Number(lc.max_no_progress_rounds ?? lc.maxNoProgressRounds);
+    if (Number.isFinite(hard) && hard <= 0) {
+      this._maxToolRoundsHardCap = 1_000_000; // effectively unlimited
+    } else if (Number.isFinite(hard) && hard > 0) {
+      this._maxToolRoundsHardCap = Math.floor(hard);
+    } // else keep the generous default (1000)
+    if (Number.isFinite(noProg) && noProg > 0) {
+      this._maxNoProgressRounds = Math.floor(noProg);
+    }
+    // Back-compat: max_tool_rounds is no longer a hard stop, but if someone set
+    // it we honor it as the hard cap so existing configs still bound the run.
+    const legacySoft = Number(lc.max_tool_rounds ?? lc.maxToolRounds);
+    if (Number.isFinite(legacySoft) && legacySoft > 0) {
+      this._maxToolRoundsHardCap = Math.max(this._maxToolRoundsHardCap, Math.floor(legacySoft));
     }
   }
 
@@ -359,22 +364,9 @@ export class BaseAgent {
       },
     });
 
-    this.toolRegistry.register({
-      name: 'extend_rounds',
-      description: 'Extend the tool-call budget for the current turn.',
-      parameters: [{
-        name: 'n',
-        type: 'number',
-        description: 'Number of additional rounds to add (default 10)',
-        required: false,
-      }],
-      handler: async (kwargs: Record<string, any>) => {
-        const n = (kwargs.n as number) || 10;
-        const old = this._maxToolRounds;
-        this._maxToolRounds += n;
-        return `✓ Tool-round limit extended by ${n} (was ${old}, now ${this._maxToolRounds}).`;
-      },
-    });
+    // Note: the old `extend_rounds` tool was removed — stopping is now
+    // progress-based (see chatStreamImpl), so there is no per-turn round budget
+    // to extend. A productive task simply keeps running.
 
     // ── Self-evolve tool: analyze failures and suggest prompt improvements ──
     this.toolRegistry.register({
@@ -967,8 +959,13 @@ export class BaseAgent {
 
     try {
       let fullContent = '';
-      let roundLimit = this._maxToolRounds;
       let roundCount = 0;
+      // Progress-based stopping (OpenClaw-style): we don't cap by round count —
+      // a long task that keeps making progress runs as long as it needs. We
+      // stop when the agent makes no progress for several rounds in a row (pure
+      // spinning), or when the LoopGuard detects a genuine loop. The hard round
+      // cap is only a last-resort backstop against pathological runaway.
+      let consecutiveNoProgress = 0;
 
       while (true) {
         // User interrupt between rounds (Ctrl-C): stop before another LLM call.
@@ -984,16 +981,10 @@ export class BaseAgent {
           yield { type: 'done' };
           return;
         }
-        if (roundCount >= roundLimit) {
-          if (roundLimit >= this._maxToolRoundsHardCap) break;
-          const extendBy = Math.min(15, this._maxToolRoundsHardCap - roundLimit);
-          roundLimit += extendBy;
-          this._maxToolRounds = roundLimit;
-          this.memory.addMessage('system', `[Auto-extended tool-round limit by ${extendBy} to ${roundLimit}. Continue working.]`);
-          continue;
-        }
+        // Last-resort backstop: only trips in pathological cases the progress
+        // detector and LoopGuard both miss. Normal long tasks never reach it.
+        if (roundCount >= this._maxToolRoundsHardCap) break;
         roundCount++;
-        roundLimit = Math.max(roundLimit, this._maxToolRounds);
 
         const messages = await this.messagesWithRecall();
         const toolNames = resolveToolNames();
@@ -1124,9 +1115,38 @@ export class BaseAgent {
           yield { type: 'done' };
           return;
         }
+
+        // ── Progress-based stopping ──
+        // A round made progress if at least one tool call SUCCEEDED (state
+        // advanced) or the model produced new text this round. Pure spinning —
+        // no successful tool, no text — increments the no-progress counter; any
+        // progress resets it. Stop only after several no-progress rounds in a
+        // row, so a long, productive task is never cut off by a round count.
+        const madeProgress =
+          execResults.some(r => r.success && r.toolName !== 'task_done') ||
+          roundContent.trim().length > 0;
+        if (madeProgress) {
+          consecutiveNoProgress = 0;
+        } else {
+          consecutiveNoProgress++;
+          if (consecutiveNoProgress === this._maxNoProgressRounds - 1) {
+            this.memory.addMessage('system',
+              '[No progress] Your recent rounds produced no successful tool result and no text. Either take a concrete next action, output the final answer, or call task_done. One more empty round will end the turn.');
+          }
+          if (consecutiveNoProgress >= this._maxNoProgressRounds) {
+            if (!assistantStored && fullContent.trim()) {
+              this.memory.addMessage('assistant', fullContent);
+              assistantStored = true;
+            }
+            await this.setState(AgentState.IDLE);
+            yield { type: 'content', text: `\n\n[stalled] ${consecutiveNoProgress} rounds without progress — stopping.` };
+            yield { type: 'done' };
+            return;
+          }
+        }
       }
 
-      // Max iterations reached
+      // Hard-cap backstop reached (pathological runaway only).
       if (!assistantStored) this.popLastUserMessage();
       await this.setState(AgentState.IDLE);
       if (!fullContent.trim() && delegations.length > 0) {
@@ -1136,7 +1156,7 @@ export class BaseAgent {
       }
       yield {
         type: 'truncated',
-        reason: `safety ceiling of ${this._maxToolRoundsHardCap} tool rounds reached — the task may be unfinished. Send "continue" to resume, or raise llm.max_tool_rounds in config (0 = unlimited).`,
+        reason: `safety ceiling of ${this._maxToolRoundsHardCap} tool rounds reached — the task may be unfinished. Send "continue" to resume, or raise llm.max_tool_rounds_hard_cap in config.`,
       };
       yield { type: 'done' };
     } catch (e: any) {
@@ -1380,11 +1400,9 @@ export class BaseAgent {
   }
 
   protected async llmLoop(options?: {
-    maxIterations?: number;
     onStatus?: ((status: string) => void) | null;
     ephemeral?: boolean;
   }): Promise<LLMResponse> {
-    const maxIterations = options?.maxIterations ?? this._maxToolRounds;
     const ephemeral = options?.ephemeral ?? false;
     const onStatus = options?.onStatus ?? null;
 
@@ -1403,19 +1421,14 @@ export class BaseAgent {
     );
 
     try {
-      let limit = maxIterations;
+      // Progress-based stopping (mirrors chatStreamImpl): no round-count limit —
+      // run while making progress, stop after _maxNoProgressRounds empty rounds.
+      // The hard cap is only a last-resort backstop against runaway.
       let rounds = 0;
+      let consecutiveNoProgress = 0;
       while (true) {
-        if (rounds >= limit) {
-          if (limit >= this._maxToolRoundsHardCap) break;
-          const extendBy = Math.min(15, this._maxToolRoundsHardCap - limit);
-          limit += extendBy;
-          this._maxToolRounds = limit;
-          this.memory.addMessage('system', `[Auto-extended limit by ${extendBy} to ${limit}.]`);
-          continue;
-        }
+        if (rounds >= this._maxToolRoundsHardCap) break;
         rounds++;
-        limit = Math.max(limit, this._maxToolRounds);
 
         const messages = await this.messagesWithRecall();
         if (onStatus) onStatus('thinking...');
@@ -1441,13 +1454,21 @@ export class BaseAgent {
         });
 
         // ── Execute all tools via shared pipeline ──
-        await this.executeToolCalls(response.toolCalls, { dedupCacheable: true, onStatus: onStatus ?? undefined, ephemeral });
+        const execResults = await this.executeToolCalls(response.toolCalls, { dedupCacheable: true, onStatus: onStatus ?? undefined, ephemeral });
         await this.setState(AgentState.THINKING);
+
+        // Progress check: any successful tool or produced text resets the
+        // counter; otherwise count an empty round and stop after the threshold.
+        const madeProgress =
+          execResults.some(r => r.success && r.toolName !== 'task_done') ||
+          (response.content || '').trim().length > 0;
+        consecutiveNoProgress = madeProgress ? 0 : consecutiveNoProgress + 1;
+        if (consecutiveNoProgress >= this._maxNoProgressRounds) break;
       }
 
       response.truncated = true;
       if (!response.content) {
-        response.content = `[truncated] max tool rounds (${maxIterations}) reached.`;
+        response.content = `[stopped] no progress for ${this._maxNoProgressRounds} rounds (or backstop reached).`;
       }
       return response;
     } catch (e) {
