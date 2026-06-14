@@ -360,6 +360,9 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'engine', type: 'string', description: 'Optional provider: tavily|brave|serper|searxng|jina|duckduckgo|bing|baidu|sogou. Default: auto (uses a configured API key if present, else the keyless Jina endpoint, else scraping).', required: false },
       { name: 'max_results', type: 'number', description: 'Max results to return (default 8, capped at 20)', required: false },
     ],
+    // Larger than webSearch's internal budget (~22s) so the waterfall returns a
+    // clear "no results" message rather than being cut off as a generic timeout.
+    timeout: 45000,
     handler: async (params) => {
       const query = String(params.query || '').trim();
       if (!query) return 'Error: query is required';

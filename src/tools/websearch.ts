@@ -44,7 +44,9 @@ export interface WebHttp {
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-const DEFAULT_TIMEOUT = 15000;
+// Per-request timeout. Kept short so a dead/slow provider fails fast and the
+// waterfall moves on quickly rather than burning 15s each across five providers.
+const DEFAULT_TIMEOUT = 8000;
 
 /** Default HTTP client backed by axios. */
 export const defaultHttp: WebHttp = {
@@ -294,40 +296,54 @@ export interface WebSearchOptions {
   env?: EnvMap;              // defaults to process.env
   http?: WebHttp;           // defaults to axios-backed client
   onProviderError?: (provider: string, error: string) => void;
+  /** Total wall-clock budget for the waterfall; stop trying once exceeded. */
+  budgetMs?: number;
 }
 
 /**
  * Run a web search through the provider waterfall. Returns the first provider
  * that yields results, or a response with an empty result set + the list of
- * providers that were tried.
+ * providers that were tried. A total time budget caps the waterfall so the tool
+ * returns a clear "no results" message instead of being killed by an outer
+ * timeout (which would surface as an opaque "Tool execution timeout").
  */
-export async function webSearch(query: string, opts: WebSearchOptions = {}): Promise<SearchResponse & { tried: string[] }> {
+export async function webSearch(query: string, opts: WebSearchOptions = {}): Promise<SearchResponse & { tried: string[]; errors?: number }> {
   const q = (query || '').trim();
   if (!q) throw new Error('query is required');
   const max = Math.max(1, Math.min(20, Math.floor(opts.max ?? 8)));
   const env = opts.env ?? (process.env as EnvMap);
   const http = opts.http ?? defaultHttp;
   const pinned = (opts.engine || env.SKYLOOM_SEARCH_ENGINE || '').trim();
+  const budgetMs = opts.budgetMs ?? 22000;
+  const start = Date.now();
 
   const providers = resolveProviders(env, pinned);
   const tried: string[] = [];
+  let errors = 0;
   for (const provider of providers) {
+    // Out of time: stop the waterfall and return what we have (a clear empty
+    // result), rather than letting a slow tail provider blow the tool timeout.
+    if (tried.length > 0 && Date.now() - start > budgetMs) break;
     tried.push(provider.id);
     try {
       const res = await provider.run(http, env, q, max);
       if (res.results.length > 0 || res.answer) return { ...res, tried };
     } catch (e: any) {
+      errors++;
       opts.onProviderError?.(provider.id, String(e?.message || e));
     }
   }
-  return { provider: 'none', results: [], tried };
+  return { provider: 'none', results: [], tried, errors };
 }
 
 /** Format a SearchResponse as compact text for an LLM tool result. */
-export function formatSearchResults(res: SearchResponse & { tried?: string[] }): string {
+export function formatSearchResults(res: SearchResponse & { tried?: string[]; errors?: number }): string {
   if (!res.results.length && !res.answer) {
     const tried = res.tried?.length ? ` (tried: ${res.tried.join(', ')})` : '';
-    return `No search results found${tried}. Try a simpler query, or set a search API key (TAVILY_API_KEY / BRAVE_API_KEY / SERPER_API_KEY) for more reliable results.`;
+    const note = res.errors && res.errors > 0
+      ? ' Every provider errored or timed out — likely no/blocked network connectivity or rate limiting in this environment.'
+      : '';
+    return `No search results found${tried}.${note} Try a simpler query, or set a search API key (TAVILY_API_KEY / BRAVE_API_KEY / SERPER_API_KEY) for more reliable results.`;
   }
   const parts: string[] = [];
   if (res.answer) parts.push(`Answer: ${res.answer}\n`);

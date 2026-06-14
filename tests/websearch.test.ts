@@ -140,6 +140,30 @@ describe("websearch · waterfall", () => {
     expect(formatSearchResults(res)).toContain("No search results");
   });
 
+  it("flags that all providers errored/timed out for a clear message", async () => {
+    const http = stubHttp([
+      { match: "s.jina.ai", throws: "timeout" },
+      { match: "duckduckgo", throws: "timeout" }, { match: "bing", throws: "timeout" },
+      { match: "baidu", throws: "timeout" }, { match: "sogou", throws: "timeout" },
+    ]);
+    const res = await webSearch("q", { env: {}, http });
+    expect(res.errors).toBeGreaterThan(0);
+    expect(formatSearchResults(res)).toMatch(/errored or timed out/);
+  });
+
+  it("stops the waterfall once the time budget is exceeded", async () => {
+    // jina resolves (empty) but slowly; the budget then cuts off the scrapers.
+    const http = {
+      calls: [] as string[],
+      async getJson(url: string) { this.calls.push(url); await new Promise((r) => setTimeout(r, 30)); return { data: [] }; },
+      async getText(url: string) { this.calls.push(url); return ""; },
+      async postJson(url: string) { this.calls.push(url); return {}; },
+    };
+    const res = await webSearch("q", { env: {}, http: http as any, budgetMs: 5 });
+    expect(res.provider).toBe("none");
+    expect(res.tried).toEqual(["jina"]); // scrapers skipped — out of budget
+  });
+
   it("rejects an empty query", async () => {
     await expect(webSearch("   ", {})).rejects.toThrow(/query/);
   });
