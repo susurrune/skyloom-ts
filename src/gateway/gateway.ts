@@ -18,7 +18,9 @@ import { createSystemContext } from '../core/factory';
 import { buildAdapters } from './registry';
 import { describeMedia, parseReply } from './types';
 import { isSendableSrc } from './helpers';
+import { describeImages } from './vision';
 import type { ChannelAdapter, InboundMessage, RawRequest } from './types';
+import type { LoadedMedia } from './helpers';
 
 const log = getLogger('gateway');
 
@@ -30,16 +32,44 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 /** Run an agent turn for an inbound message and collect the final text reply. */
-/** Build the agent prompt from an inbound message (text + media description). */
-function buildPrompt(msg: InboundMessage, canSendMedia: boolean): string {
+/** Build the agent prompt: text + media description + any vision result. */
+function buildPrompt(msg: InboundMessage, canSendMedia: boolean, visionText?: string | null): string {
   const parts: string[] = [];
   const mediaDesc = describeMedia(msg.media);
   if (msg.text) parts.push(msg.text);
   if (mediaDesc) parts.push(`(用户发送了媒体: ${mediaDesc})`);
+  if (visionText) parts.push(`(图片内容识别: ${visionText})`);
   if (canSendMedia) {
     parts.push('(若需回发图片或文件,在回复中用 Markdown 图片 ![说明](路径或URL) 或 [[file:路径或URL]] 表示,路径可为本地文件或 http(s) 链接。)');
   }
   return parts.join('\n\n') || msg.text;
+}
+
+/** Download inbound images and run vision over them. Returns null if disabled. */
+async function visionForMessage(
+  ctx: ReturnType<typeof createSystemContext>,
+  adapter: ChannelAdapter,
+  msg: InboundMessage,
+): Promise<string | null> {
+  const chCfg = ((ctx.config as any).channels || {})[adapter.id] || {};
+  const llmCfg = (ctx.config as any).llm || {};
+  if (chCfg.vision === false) return null;
+  const model = chCfg.visionModel || llmCfg.vision_model || llmCfg.visionModel;
+  if (!model) return null; // vision is opt-in: requires a configured model
+  const images = (msg.media || []).filter((m) => m.kind === 'image');
+  if (!images.length || !adapter.fetchMedia) return null;
+
+  const loaded: LoadedMedia[] = [];
+  for (const att of images.slice(0, 4)) {
+    try {
+      const got = await adapter.fetchMedia(att, msg);
+      if (got) loaded.push({ data: got.data, filename: att.filename || 'image', contentType: got.contentType });
+    } catch (e) {
+      log.warn('vision_fetch_failed', { channel: adapter.id, error: String(e) });
+    }
+  }
+  if (!loaded.length) return null;
+  return describeImages(loaded, { model });
 }
 
 /** Resolve the agent for a channel message. */
@@ -58,7 +88,8 @@ async function dispatch(
   const agent = resolveAgent(ctx, adapter);
   if (!agent) throw new Error('no agent available');
   await agent.init();
-  const prompt = buildPrompt(msg, !!adapter.sendMedia);
+  const visionText = await visionForMessage(ctx, adapter, msg);
+  const prompt = buildPrompt(msg, !!adapter.sendMedia, visionText);
 
   // Streaming path: stream content chunks straight to the adapter (e.g. a Feishu
   // card patched as text arrives). Falls back to collect-then-send otherwise.

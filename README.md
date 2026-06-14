@@ -423,6 +423,8 @@ channels:
 
 **媒体消息**:入站的图片/语音/文件等会被标准化为 `[image: …] [file: …]` 之类的可读描述拼进 prompt,Agent 即使不下载二进制也知道用户发了什么。
 
+**多模态读图(可选)**:配置一个视觉模型后,入站图片会被**下载并送入视觉模型识别**,识别结果(物体/文字/场景)拼进 prompt,Agent 真正"看懂"用户发的图。`channels.<id>.visionModel` 或 `llm.vision_model` 指定模型(如 `gpt-4o-mini` / `gemini-2.5-flash` / `qwen-vl-max`),用对应 provider 的环境变量鉴权;未配置则跳过(只给描述行)。`channels.<id>.vision: false` 可单独关闭。
+
 **飞书卡片 + 流式**:飞书默认以**交互卡片**回复,并在生成过程中**逐步 patch 卡片内容**(节流 ≥600ms),呈现打字机式流式效果。`channels.feishu.renderMode: raw` 可改回纯文本,`streaming: false` 可关流式(改为一次性发送)。
 
 **出站发图/文件**:Agent 在回复里用 `![说明](路径或URL)`(图片)或 `[[file:路径或URL]]` / `[[image:src|说明]]` 表达媒体,网关会自动**上传并发送**,同时从文本里剥离这些标记。`src` 可为**本地文件路径或 http(s) 链接**。飞书/企业微信支持本地与 URL(走素材上传 API);QQ 官方 API 只接受 **URL**(平台自行抓取)。

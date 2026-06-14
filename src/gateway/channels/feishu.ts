@@ -14,9 +14,10 @@
  */
 
 import * as crypto from 'crypto';
+import axios from 'axios';
 import { getLogger } from '../../core/logger';
 import { resolveSecret, postJson, postMultipart, loadMedia, TokenCache } from '../helpers';
-import type { ChannelAdapter, MediaAttachment, OutboundMedia, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
+import type { ChannelAdapter, InboundMessage, MediaAttachment, OutboundMedia, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-feishu');
 
@@ -271,6 +272,18 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
         { receive_id: chatId, msg_type: 'file', content: JSON.stringify({ file_key: fileKey }) },
         { headers });
       if (send.code !== 0) { onTokenError(send.code); throw new Error(`feishu file send ${send.code}: ${send.msg}`); }
+    },
+
+    async fetchMedia(att: MediaAttachment, msg: InboundMessage): Promise<{ data: Buffer; contentType?: string } | null> {
+      const messageId = (msg.raw as any)?.event?.message?.message_id;
+      if (!messageId || !att.ref) return null;
+      const token = await tokenCache.get();
+      const res = await axios.get(
+        `${base}/open-apis/im/v1/messages/${messageId}/resources/${att.ref}?type=${att.kind === 'image' ? 'image' : 'file'}`,
+        { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer', timeout: 30000, validateStatus: (s) => s >= 200 && s < 300 },
+      );
+      const ct = res.headers['content-type'];
+      return { data: Buffer.from(res.data), contentType: typeof ct === 'string' ? ct : undefined };
     },
   };
 }

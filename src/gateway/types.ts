@@ -170,6 +170,13 @@ export interface ChannelAdapter {
    * media reference in the text.
    */
   sendMedia?(target: ReplyTarget, item: OutboundMedia): Promise<void>;
+
+  /**
+   * Optional: download an inbound media attachment's bytes so the gateway can
+   * run vision over an image. `att` is one entry from InboundMessage.media.
+   * Returns the binary or null if it can't be fetched.
+   */
+  fetchMedia?(att: MediaAttachment, msg: InboundMessage): Promise<{ data: Buffer; contentType?: string } | null>;
 }
 
 /** Factory signature: build an adapter from its config block (or null if disabled/misconfigured). */

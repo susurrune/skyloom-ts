@@ -3,6 +3,7 @@ import * as crypto from "crypto";
 import { resolveSecret, TokenCache } from "../src/gateway/helpers";
 import { describeMedia, parseReply } from "../src/gateway/types";
 import { isSendableSrc } from "../src/gateway/helpers";
+import { describeImages } from "../src/gateway/vision";
 import { buildAdapters, SUPPORTED_CHANNELS } from "../src/gateway/registry";
 import { decryptFeishu, createFeishuAdapter } from "../src/gateway/channels/feishu";
 import { wecomSignature, decryptWecom, createWecomAdapter } from "../src/gateway/channels/wecom";
@@ -134,6 +135,32 @@ describe("gateway · sendMedia capability", () => {
     const q = createQQAdapter({ appId: "1", secret: "supersecretseedvalue" }, {})!;
     await expect(q.sendMedia!({ channel: "qq", kind: "group", groupOpenid: "g" }, { kind: "image", src: "/local/file.png" }))
       .rejects.toThrow(/http\(s\) URL/);
+  });
+});
+
+describe("gateway · vision (multimodal read)", () => {
+  it("describeImages returns null with no images", async () => {
+    expect(await describeImages([], { model: "gpt-4o-mini", env: {} })).toBeNull();
+  });
+  it("returns null when no API key is available (skips silently)", async () => {
+    const img = { data: Buffer.from("x"), filename: "a.png", contentType: "image/png" };
+    expect(await describeImages([img], { model: "gpt-4o-mini", env: {} })).toBeNull();
+  });
+  it("skips Anthropic models (not OpenAI-chat-shaped here)", async () => {
+    const img = { data: Buffer.from("x"), filename: "a.png" };
+    expect(await describeImages([img], { model: "claude-sonnet-4-6", env: { ANTHROPIC_API_KEY: "k" } })).toBeNull();
+  });
+  it("all three adapters expose fetchMedia", () => {
+    const f = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const w = createWecomAdapter({ corpId: "c", corpSecret: "s", token: "t", encodingAesKey: "k".repeat(43), agentId: 1 }, {})!;
+    const q = createQQAdapter({ appId: "1", secret: "supersecretseedvalue" }, {})!;
+    expect(typeof f.fetchMedia).toBe("function");
+    expect(typeof w.fetchMedia).toBe("function");
+    expect(typeof q.fetchMedia).toBe("function");
+  });
+  it("qq fetchMedia returns null without a url", async () => {
+    const q = createQQAdapter({ appId: "1", secret: "supersecretseedvalue" }, {})!;
+    expect(await q.fetchMedia!({ kind: "image" } as any, {} as any)).toBeNull();
   });
 });
 

@@ -17,7 +17,7 @@
 
 import * as crypto from 'crypto';
 import { getLogger } from '../../core/logger';
-import { resolveSecret, postJson, TokenCache } from '../helpers';
+import { resolveSecret, postJson, loadMedia, TokenCache } from '../helpers';
 import type { ChannelAdapter, MediaAttachment, OutboundMedia, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-qq');
@@ -175,6 +175,18 @@ export function createQQAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAdapte
       const payload: any = { msg_type: 7, media: { file_info: fileInfo } };
       if (target.msgId) payload.msg_id = target.msgId;
       await postJson(`${base}/messages`, payload, { headers });
+    },
+
+    async fetchMedia(att: MediaAttachment): Promise<{ data: Buffer; contentType?: string } | null> {
+      // QQ delivers attachments with a direct URL — just download it.
+      if (!att.url) return null;
+      try {
+        const loaded = await loadMedia(att.url);
+        return { data: loaded.data, contentType: loaded.contentType || att.mimeType };
+      } catch (e) {
+        log.warn('qq_media_fetch_failed', { error: String(e) });
+        return null;
+      }
     },
   };
 }
