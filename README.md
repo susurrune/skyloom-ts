@@ -157,6 +157,7 @@ sky web
 | **信息** | `/status` `/cost` `/memory` `/workspace` `/version` | 查看系统状态 |
 | **会话** | `/sessions` · `/resume <id>` · `/new` | 会话列表、恢复、新建 |
 | **操作** | `/compact` `/retry` `/clear` `/task <goal>` | 压缩上下文、重试、编排 |
+| **权限** | `/plan` `/auto` `/default` `/perm <模式>` | 计划/自动/默认；`/perm default\|auto\|accept\|strict\|bypass` 切权限模式 |
 | **诊断** | `/context` `/tools` `/trace` `/agents` | Token 分布、工具统计、运行追踪、可派生子智能体清单 |
 | **版本控制** | `/rewind [n]` | 文件检查点回退（不依赖 git） |
 | **退出** | `/quit` `/exit` | 退出对话 |

@@ -125,7 +125,7 @@
 ### Phase 5 — 工具与插件健壮性｜~1 天
 
 - [x] **P5.1 工具输入校验 + 强制 coercion**（对标 opencode `tools.md`）：`ToolRegistry.validateAndCoerce` 在 `execute` 里于缓存/执行**之前**校验并归一化入参 —— 必填项缺失即拒、按声明类型 coerce（`"5"`→5、`"true"`→true、JSON 串→array/object）、enum 成员校验，handler 收到的是干净的类型化值，非法输入返回**可操作的**错误供模型重试。修了 `parseInt` 截断浮点(`"3.5"`→3)的隐患。见 [`tests/tool.test.ts`](../tests/tool.test.ts)（+7 用例）。输出校验暂未做。
-- [ ] **P5.2 权限内聚**：危险操作的 `permission.assert` 由工具自身发起，security 模块只评估策略 + 管理审批，统一 `ask/allow/deny` 语义。
+- [x] **P5.2 权限模式内聚**（对标 Claude Code 权限模式）：把审批逻辑收敛为一个纯函数 `decideApproval(level, mode, tool) → allow/ask/deny`（[security.ts](../src/core/security.ts)），`checkApproval` 只做红线门禁 + 调用它 + 回调。新增模式 `acceptEdits`（自动放行文件编辑类工具,其余照 default 询问）与 `bypass`（除红线外全放行）;保留 `auto/interactive/strict` 行为不变。`/perm <default|auto|accept|strict|bypass>` 运行时切换(linear + loom),`config.cli.approvalMode` 启动时生效。新增 [`tests/security.test.ts`](../tests/security.test.ts) 11 用例覆盖决策矩阵。后续:让工具自身发起 `permission.assert`(细粒度 scope)。
 - [ ] **P5.3 插件 hook**：目录加载器升级为有序 hook（`init` / `tool.register` / `provider.update`），插件在自己的 scope 注册，卸载即移除。
 
 ### Phase 6 — 测试与质量门禁｜~1.5 天

@@ -303,8 +303,14 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
 
   // Wire up security approval — prompt user for HIGH/CRITICAL operations
   try {
-    const { getSecurity, DangerLevel } = require("../core/security");
+    const { getSecurity, DangerLevel, PERMISSION_MODE_ALIASES } = require("../core/security");
     const sec = getSecurity();
+    // Honor a configured permission mode (config.yaml cli.approvalMode), mapped
+    // through the same aliases as /perm.
+    const cfgMode = (ctx as any).config?.cli?.approvalMode || (ctx as any).config?.cli?.approval_mode;
+    if (cfgMode && PERMISSION_MODE_ALIASES[String(cfgMode).toLowerCase()]) {
+      sec.setMode(PERMISSION_MODE_ALIASES[String(cfgMode).toLowerCase()]);
+    }
     sec.setApprovalCallback(async (tool: string, args: Record<string, any>, level: number) => {
       process.stdout.write(chalk.yellow(`\n  ⚠ ${tool} ( danger level ${level} )\n`));
       process.stdout.write(chalk.dim(`     args: ${JSON.stringify(args).slice(0, 80)}\n`));
@@ -413,6 +419,17 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
       MODE.set(cmdL === "/plan" ? InteractiveMode.PLAN : cmdL === "/auto" ? InteractiveMode.AUTO : InteractiveMode.DEFAULT);
       currentAgent.planMode = MODE.current === InteractiveMode.PLAN;
       process.stdout.write(chalk.dim(`  模式 → ${MODE.current} · ${MODE.describe()}\n`));
+      continue;
+    }
+    if (cmdL === "/perm" || cmdL.startsWith("/perm ")) {
+      const { getSecurity, PERMISSION_MODE_ALIASES } = require("../core/security");
+      const sec = getSecurity();
+      const arg = inp.split(/\s+/)[1]?.toLowerCase();
+      if (!arg) { process.stdout.write(chalk.dim(`  权限模式: ${sec.approvalMode} · 可选 default | auto | accept | strict | bypass\n`)); continue; }
+      const m = PERMISSION_MODE_ALIASES[arg];
+      if (!m) { process.stdout.write(chalk.yellow(`  未知权限模式 '${arg}' · 可选 default | auto | accept | strict | bypass\n`)); continue; }
+      sec.setMode(m);
+      process.stdout.write(chalk.green(`  ✓ 权限模式 → ${m}\n`));
       continue;
     }
     if (cmdL === "/context") {

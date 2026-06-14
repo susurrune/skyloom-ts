@@ -137,19 +137,74 @@ export interface AuditEntry {
 /* ═══════════════════════════════════════
    Security context — per-session security state
    ═══════════════════════════════════════ */
+/**
+ * Permission modes (Claude Code parity):
+ *  - strict       deny every non-SAFE tool (read-only-ish lockdown)
+ *  - interactive  ask before every non-SAFE tool ("default")
+ *  - auto         allow LOW, ask MEDIUM/HIGH, deny CRITICAL
+ *  - acceptEdits  auto-accept file-edit tools, otherwise behave like auto
+ *  - bypass       allow everything except red-line patterns ("yolo")
+ */
+export type ApprovalMode = "auto" | "interactive" | "strict" | "acceptEdits" | "bypass";
+export type Decision = "allow" | "ask" | "deny";
+
+/** User-facing aliases → canonical permission mode (for /perm and config). */
+export const PERMISSION_MODE_ALIASES: Record<string, ApprovalMode> = {
+  default: "interactive",
+  interactive: "interactive",
+  ask: "interactive",
+  auto: "auto",
+  accept: "acceptEdits",
+  acceptedits: "acceptEdits",
+  edits: "acceptEdits",
+  strict: "strict",
+  readonly: "strict",
+  bypass: "bypass",
+  yolo: "bypass",
+};
+
+/** Tools that mutate the filesystem — the ones acceptEdits waves through. */
+const EDIT_TOOL_RE = /^(write_|edit_|append_|replace_|create_|make_|copy_|move_|delete_)/;
+export function isEditTool(toolName: string): boolean { return EDIT_TOOL_RE.test(toolName); }
+
+/**
+ * Pure permission decision (red-line is gated separately, before this). Keeps
+ * the ask/allow/deny semantics in one testable place across all modes.
+ */
+export function decideApproval(level: DangerLevel, mode: ApprovalMode, toolName: string): Decision {
+  if (level === DangerLevel.SAFE) return "allow";
+  switch (mode) {
+    case "bypass": return "allow";
+    case "strict": return "deny";
+    case "interactive": return "ask";
+    case "acceptEdits":
+      if (level === DangerLevel.CRITICAL) return "deny";
+      if (isEditTool(toolName)) return "allow";
+      return level <= DangerLevel.LOW ? "allow" : "ask";
+    case "auto":
+    default:
+      if (level <= DangerLevel.LOW) return "allow";
+      if (level === DangerLevel.CRITICAL) return "deny";
+      return "ask";
+  }
+}
+
 export class SecurityContext {
   public auditLog: AuditEntry[] = [];
   public deniedCount = 0;
   public autoApprovedCount = 0;
   public manualApprovedCount = 0;
-  public approvalMode: "auto" | "interactive" | "strict" = "auto";
+  public approvalMode: ApprovalMode = "auto";
 
   private approvalCallback: ((tool: string, args: Record<string, any>, level: DangerLevel) => Promise<boolean>) | null = null;
 
-  constructor(opts?: { mode?: "auto" | "interactive" | "strict"; onApprove?: (tool: string, args: Record<string, any>, level: DangerLevel) => Promise<boolean> }) {
+  constructor(opts?: { mode?: ApprovalMode; onApprove?: (tool: string, args: Record<string, any>, level: DangerLevel) => Promise<boolean> }) {
     if (opts?.mode) this.approvalMode = opts.mode;
     if (opts?.onApprove) this.approvalCallback = opts.onApprove;
   }
+
+  /** Switch the active permission mode at runtime. */
+  setMode(mode: ApprovalMode): void { this.approvalMode = mode; }
 
   /** Get the danger level for a tool. Defaults to SAFE for unknown tools. */
   getDangerLevel(toolName: string): DangerLevel {
@@ -180,27 +235,13 @@ export class SecurityContext {
       return [false, redline];
     }
 
-    // Safe — always allow
-    if (level === DangerLevel.SAFE) return [true, "safe"];
-
-    // Strict mode — deny all non-safe
-    if (this.approvalMode === "strict") {
-      return [false, `Strict mode: tool '${toolName}' (level ${level}) requires manual approval`];
+    const decision = decideApproval(level, this.approvalMode, toolName);
+    if (decision === "allow") return [true, level === DangerLevel.SAFE ? "safe" : `${this.approvalMode}-allow`];
+    if (decision === "deny") {
+      return [false, `${this.approvalMode} mode: tool '${toolName}' (level ${level}) requires approval / is blocked`];
     }
 
-    // Auto mode — allow LOW, prompt for MEDIUM+, deny CRITICAL
-    if (this.approvalMode === "auto") {
-      if (level <= DangerLevel.LOW) return [true, "auto-low"];
-      if (level === DangerLevel.CRITICAL) return [false, `CRITICAL tool '${toolName}' requires explicit human approval`];
-      // MEDIUM/HIGH with auto mode => need callback
-      if (this.approvalCallback) {
-        const approved = await this.approvalCallback(toolName, args, level);
-        return [approved, approved ? "user-approved" : "user-denied"];
-      }
-      return [true, "auto-med"]; // no callback → auto-allow but log
-    }
-
-    // Interactive mode — prompt for LOW+
+    // decision === "ask" — defer to the interactive callback if present.
     if (this.approvalCallback) {
       const approved = await this.approvalCallback(toolName, args, level);
       return [approved, approved ? "user-approved" : "user-denied"];

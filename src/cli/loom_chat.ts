@@ -424,6 +424,17 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         dim(`模式 → ${mode.current}${mode.current === "default" ? "" : " · Shift+Tab 或 /default 切回"}`);
         continue;
       }
+      if (cmdL === "/perm" || cmdL.startsWith("/perm ")) {
+        const { getSecurity, PERMISSION_MODE_ALIASES } = require("../core/security");
+        const sec = getSecurity();
+        const arg = inp.split(/\s+/)[1]?.toLowerCase();
+        if (!arg) { dim(`权限模式: ${sec.approvalMode} · 可选 default | auto | accept | strict | bypass`); continue; }
+        const m = PERMISSION_MODE_ALIASES[arg];
+        if (!m) { dim(`未知权限模式 '${arg}' · 可选 default | auto | accept | strict | bypass`); continue; }
+        sec.setMode(m);
+        dim(`✓ 权限模式 → ${m}`);
+        continue;
+      }
       if (cmdL === "/context") {
         try {
           const d = agent.contextDetail();

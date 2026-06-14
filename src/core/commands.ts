@@ -438,6 +438,16 @@ export const BUILTIN_COMMANDS: CommandInfo[] = [
     takesArgs: false,
     source: 'builtin',
   },
+  {
+    name: 'perm',
+    aliases: [],
+    description: 'Set permission mode (default|auto|accept|strict|bypass)',
+    label: '权限模式（default/auto/accept/strict/bypass）',
+    category: 'workflow',
+    hints: ['default', 'auto', 'accept', 'strict', 'bypass'],
+    takesArgs: true,
+    source: 'builtin',
+  },
 
   // ── File & Checkpoint ──
   {
