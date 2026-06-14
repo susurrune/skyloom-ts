@@ -314,6 +314,16 @@ export const BUILTIN_COMMANDS: CommandInfo[] = [
     source: 'builtin',
   },
   {
+    name: 'agents',
+    aliases: [],
+    description: 'List spawnable subagents',
+    label: '可派生子智能体',
+    category: 'context',
+    hints: [],
+    takesArgs: false,
+    source: 'builtin',
+  },
+  {
     name: 'workspace',
     aliases: [],
     description: 'Workspace info',

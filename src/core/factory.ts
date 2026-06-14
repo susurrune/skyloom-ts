@@ -61,6 +61,11 @@ export class SystemContext {
   }
 
   async closeAll(): Promise<void> {
+    // Terminate any background shell jobs started this session.
+    try {
+      const { getBackgroundManager } = require('./bgproc');
+      getBackgroundManager().killAll();
+    } catch { /* best-effort */ }
     for (const agent of this.agentMap.values()) {
       await agent.close();
     }
@@ -193,6 +198,20 @@ export function createSystemContext(): SystemContext {
         agentRegistry.register(createDelegateTool(agents, agent));
       } catch (e) {
         log.warn('delegate_tool_not_available', { agent: name, error: String(e) });
+      }
+
+      // Register the spawn_agent tool — isolated-context subagents (Task tool).
+      try {
+        const { createSpawnAgentTool } = require('../tools/spawn');
+        agentRegistry.register(createSpawnAgentTool({
+          config,
+          llm,
+          bus,
+          baseToolRegistry,
+          baseSkillRegistry,
+        }));
+      } catch (e) {
+        log.warn('spawn_tool_not_available', { agent: name, error: String(e) });
       }
 
       // Register model self-service tools (list_models / set_my_model)

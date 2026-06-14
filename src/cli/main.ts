@@ -438,6 +438,19 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
       process.stdout.write("\n");
       continue;
     }
+    if (cmdL === "/agents") {
+      const { loadSubagentDefinitions } = require("../core/subagent");
+      const defs = loadSubagentDefinitions();
+      process.stdout.write(chalk.bold(`\n  可派生子智能体 · spawn_agent\n`));
+      for (const d of defs.values()) {
+        const scope = d.source === "builtin" ? "内置" : "自定义";
+        const tools = d.tools === null ? "全部工具" : `${d.tools.length} 个工具`;
+        process.stdout.write(chalk.dim(`  ◇ ${String(d.name).padEnd(18)} ${d.description}\n`));
+        process.stdout.write(chalk.dim(`    └ ${scope} · ${tools}${d.model ? ` · ${d.model}` : ""}\n`));
+      }
+      process.stdout.write(chalk.dim(`\n  自定义: 在 .sky/agents/ 或 .claude/agents/ 放 <name>.md (frontmatter: description/tools/model)\n\n`));
+      continue;
+    }
     if (cmdL === "/trace") {
       const trace = (currentAgent as any).getLastTrace?.();
       if (!trace || !trace.spans?.length) { process.stdout.write(chalk.dim("  本会话还没有可追踪的运行\n")); continue; }

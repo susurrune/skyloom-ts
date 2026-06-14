@@ -176,3 +176,20 @@ M5 打磨成品     Phase 7        → 美学工程化 + 品牌资产 + 发布
 | 流式与工具执行交错复杂 | 复用已存在的 `chatStreamImpl` 事件模型，只接线不重写 |
 | Catalog 迁移漏模型 | 以 `config/models.yaml` 为真值源迁移，向导/README 派生 |
 | 美学改动破坏现有观感 | 设计 token 抽取为"提取"非"重画"，先快照对比 |
+
+---
+
+## 6. Phase 8 — Claude Code / opencode 能力对齐 ✅ 已完成
+
+四项核心能力补齐,全部 `tsc --noEmit` 绿 + 单测覆盖(351 → 387 用例,+36):
+
+- [x] **P8.1 通用可定义子智能体**(对标 Claude Code `Task` 工具)
+  [`src/core/subagent.ts`](../src/core/subagent.ts) + [`src/tools/spawn.ts`](../src/tools/spawn.ts):`spawn_agent` 工具派生**隔离上下文**的子智能体(独立临时记忆,用完即删),只回传最终报告。内置 `general-purpose` / `explore`;支持 `.sky/agents/*.md` 与 `.claude/agents/*.md` 自定义(frontmatter 兼容 Claude Code,工具名自动映射)。子智能体永不持有 `spawn_agent`(无递归)。`/agents` 列举。新增 [`tests/subagent.test.ts`](../tests/subagent.test.ts) 13 用例。
+- [x] **P8.2 精确编辑 + diff**(对标 Claude Code `Edit`)
+  [`src/core/diff.ts`](../src/core/diff.ts) + 升级 `edit_file`:强制**唯一匹配**(歧义即拒)、`replace_all`、no-op 检测、返回统一 diff(+/- 统计)。并修复旧实现 `String.replace` 把 `$&`/`$1` 当替换模式的隐患。新增 [`tests/edit_diff.test.ts`](../tests/edit_diff.test.ts) 10 用例。
+- [x] **P8.3 后台任务 / 长进程**(对标 Claude Code Bash `run_in_background`)
+  [`src/core/bgproc.ts`](../src/core/bgproc.ts):`run_bash` 加 `background=true` 派后台子进程,`bash_output`(增量读)/`list_bash`/`kill_bash` 控制。复用沙箱红线预检;滚动输出上限;会话退出 `killAll`(无孤儿)。新增 [`tests/bgproc.test.ts`](../tests/bgproc.test.ts) 5 用例。
+- [x] **P8.4 诊断(LSP 关键能力)**(对标 opencode LSP)
+  [`src/core/diagnostics.ts`](../src/core/diagnostics.ts) + `get_diagnostics` 工具:TS/JS 经**工作区** TypeScript 编译器 API 取真实语义诊断(行:列 + TS 码),零额外安装;其他语言走 `config.diagnostics` 配置的外部 checker(解析 `file:line:col` 输出)。新增 [`tests/diagnostics.test.ts`](../tests/diagnostics.test.ts) 8 用例。
+
+> 这是把"完整的多 Agent 终端"推进到**与 Claude Code / opencode 同代能力面**的一步:可派生子智能体、精确可审计的编辑、后台进程、按文件诊断闭环。

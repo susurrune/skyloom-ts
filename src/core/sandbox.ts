@@ -44,7 +44,7 @@ function cleanup(dir: string): void {
 /* ═══════════════════════════════════════
    Pre-execution check
    ═══════════════════════════════════════ */
-function preflightCheck(command: string): string | null {
+export function preflightCheck(command: string): string | null {
   if (!command || !command.trim()) return "Empty command";
 
   const lower = command.toLowerCase().trim();
