@@ -108,6 +108,82 @@ describe('ToolRegistry', () => {
   });
 });
 
+describe('ToolRegistry · input validation + coercion', () => {
+  let registry: ToolRegistry;
+  beforeEach(() => { registry = new ToolRegistry(); });
+
+  function recordTool(name: string, parameters: any[]) {
+    let received: any = null;
+    registry.register(makeTool({
+      name, parameters,
+      handler: async (p: any) => { received = p; return 'ok'; },
+    }));
+    return () => received;
+  }
+
+  it('coerces a numeric string to a number for the handler', async () => {
+    const got = recordTool('n', [{ name: 'x', type: 'number', description: 'x', required: true }]);
+    await registry.execute('n', { x: '5' });
+    expect(got()).toEqual({ x: 5 });
+  });
+
+  it('does not truncate floats (Number, not parseInt)', async () => {
+    const got = recordTool('f', [{ name: 'x', type: 'number', description: 'x', required: true }]);
+    await registry.execute('f', { x: '3.5' });
+    expect(got()).toEqual({ x: 3.5 });
+  });
+
+  it('coerces boolean-like strings', async () => {
+    const got = recordTool('b', [{ name: 'flag', type: 'boolean', description: 'f', required: true }]);
+    await registry.execute('b', { flag: 'true' });
+    expect(got()).toEqual({ flag: true });
+  });
+
+  it('parses a JSON-string object param', async () => {
+    const got = recordTool('o', [{ name: 'cfg', type: 'object', description: 'c', required: true }]);
+    await registry.execute('o', { cfg: '{"a":1}' });
+    expect(got()).toEqual({ cfg: { a: 1 } });
+  });
+
+  it('rejects an uncoercible type and does not run the handler', async () => {
+    const handler = vi.fn().mockResolvedValue('ok');
+    registry.register(makeTool({
+      name: 'num', parameters: [{ name: 'x', type: 'number', description: 'x', required: true }], handler,
+    }));
+    const res = await registry.execute('num', { x: 'not-a-number' });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('expected number');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('enforces enum membership with a helpful message', async () => {
+    const handler = vi.fn().mockResolvedValue('ok');
+    registry.register(makeTool({
+      name: 'pick',
+      parameters: [{ name: 'mode', type: 'string', description: 'm', required: true, enum: ['fast', 'slow'] }],
+      handler,
+    }));
+    const bad = await registry.execute('pick', { mode: 'turbo' });
+    expect(bad.success).toBe(false);
+    expect(bad.error).toContain('fast, slow');
+    expect(handler).not.toHaveBeenCalled();
+
+    const ok = await registry.execute('pick', { mode: 'fast' });
+    expect(ok.success).toBe(true);
+  });
+
+  it('treats a present-but-null required param as missing', async () => {
+    const handler = vi.fn().mockResolvedValue('ok');
+    registry.register(makeTool({
+      name: 'req', parameters: [{ name: 'p', type: 'string', description: 'p', required: true }], handler,
+    }));
+    const res = await registry.execute('req', { p: null });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('required');
+    expect(handler).not.toHaveBeenCalled();
+  });
+});
+
 describe('stableStringify', () => {
   it('produces an order-independent key for objects', async () => {
     const { stableStringify } = await import('../src/core/tool');
