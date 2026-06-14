@@ -43,6 +43,49 @@ export interface MediaAttachment {
   url?: string;
 }
 
+/** An outbound media item the agent wants to send (parsed from its reply). */
+export interface OutboundMedia {
+  kind: 'image' | 'file';
+  /** Local filesystem path or http(s) URL to the binary. */
+  src: string;
+  /** Optional caption / alt text. */
+  alt?: string;
+}
+
+/** The result of splitting an agent reply into plain text + outbound media. */
+export interface ParsedReply {
+  text: string;
+  media: OutboundMedia[];
+}
+
+/**
+ * Parse media directives out of an agent's reply so channels can upload+send
+ * them. Recognized forms (stripped from the returned text):
+ *   - Markdown image:  ![alt](src)
+ *   - Explicit image:  [[image:src]]  or  [[image:src|alt]]
+ *   - Explicit file:   [[file:src]]   or  [[file:src|alt]]
+ * `src` is a local path or http(s) URL. Only http(s) and existing local files
+ * are treated as media; anything else is left in the text untouched.
+ */
+export function parseReply(reply: string): ParsedReply {
+  const media: OutboundMedia[] = [];
+  let text = reply;
+
+  // [[image:src|alt]] / [[file:src|alt]]
+  text = text.replace(/\[\[(image|file):([^\]|]+)(?:\|([^\]]*))?\]\]/gi, (_m, kind, src, alt) => {
+    media.push({ kind: kind.toLowerCase() as 'image' | 'file', src: String(src).trim(), alt: alt ? String(alt).trim() : undefined });
+    return '';
+  });
+
+  // Markdown images: ![alt](src)
+  text = text.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_m, alt, src) => {
+    media.push({ kind: 'image', src: String(src).trim(), alt: alt ? String(alt).trim() : undefined });
+    return '';
+  });
+
+  return { text: text.replace(/\n{3,}/g, '\n\n').trim(), media };
+}
+
 /** Render a media list into a compact, model-readable description line. */
 export function describeMedia(media: MediaAttachment[] | undefined): string {
   if (!media || media.length === 0) return '';
@@ -119,6 +162,21 @@ export interface ChannelAdapter {
    * should throttle their own updates and tolerate an empty/aborted stream.
    */
   sendStreaming?(target: ReplyTarget, chunks: AsyncIterable<string>): Promise<void>;
+
+  /**
+   * Optional: upload and send an image or file. When an adapter implements this,
+   * the gateway extracts media directives from the agent's reply (parseReply)
+   * and delivers them after the text. Adapters without it simply keep the
+   * media reference in the text.
+   */
+  sendMedia?(target: ReplyTarget, item: OutboundMedia): Promise<void>;
+
+  /**
+   * Optional: download an inbound media attachment's bytes so the gateway can
+   * run vision over an image. `att` is one entry from InboundMessage.media.
+   * Returns the binary or null if it can't be fetched.
+   */
+  fetchMedia?(att: MediaAttachment, msg: InboundMessage): Promise<{ data: Buffer; contentType?: string } | null>;
 }
 
 /** Factory signature: build an adapter from its config block (or null if disabled/misconfigured). */

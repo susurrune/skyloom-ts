@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import * as crypto from "crypto";
 import { resolveSecret, TokenCache } from "../src/gateway/helpers";
-import { describeMedia } from "../src/gateway/types";
+import { describeMedia, parseReply } from "../src/gateway/types";
+import { isSendableSrc } from "../src/gateway/helpers";
+import { describeImages } from "../src/gateway/vision";
 import { buildAdapters, SUPPORTED_CHANNELS } from "../src/gateway/registry";
 import { decryptFeishu, createFeishuAdapter } from "../src/gateway/channels/feishu";
 import { wecomSignature, decryptWecom, createWecomAdapter } from "../src/gateway/channels/wecom";
@@ -78,6 +80,87 @@ describe("gateway · media", () => {
     const q = new URLSearchParams({ msg_signature: wecomSignature("tok", "1", "n", enc), timestamp: "1", nonce: "n" });
     const out = await a.handleWebhook(req({ method: "POST", query: q, body }));
     expect(out.message?.media?.[0]).toMatchObject({ kind: "audio", ref: "mid" });
+  });
+});
+
+describe("gateway · parseReply (outbound media)", () => {
+  it("extracts a markdown image and strips it from the text", () => {
+    const r = parseReply("看这张图 ![猫](https://x.com/cat.png) 好看吧");
+    expect(r.media).toEqual([{ kind: "image", src: "https://x.com/cat.png", alt: "猫" }]);
+    expect(r.text).toContain("看这张图");
+    expect(r.text).not.toContain("![");
+  });
+
+  it("extracts [[image:...]] and [[file:...|alt]] directives", () => {
+    const r = parseReply("结果:\n[[image:/tmp/out.png]]\n[[file:/tmp/report.pdf|季度报告]]");
+    expect(r.media).toEqual([
+      { kind: "image", src: "/tmp/out.png", alt: undefined },
+      { kind: "file", src: "/tmp/report.pdf", alt: "季度报告" },
+    ]);
+    expect(r.text).toBe("结果:");
+  });
+
+  it("leaves text without media untouched", () => {
+    const r = parseReply("就是一段普通文字");
+    expect(r.media).toHaveLength(0);
+    expect(r.text).toBe("就是一段普通文字");
+  });
+
+  it("handles multiple images in one reply", () => {
+    const r = parseReply("![a](http://h/1.png) 和 ![b](http://h/2.png)");
+    expect(r.media.map((m) => m.src)).toEqual(["http://h/1.png", "http://h/2.png"]);
+  });
+});
+
+describe("gateway · isSendableSrc", () => {
+  it("accepts http(s) URLs, rejects bare non-existent paths", () => {
+    expect(isSendableSrc("https://x.com/a.png")).toBe(true);
+    expect(isSendableSrc("http://x.com/a.png")).toBe(true);
+    expect(isSendableSrc("/no/such/file/xyz.png")).toBe(false);
+    expect(isSendableSrc("not a path")).toBe(false);
+  });
+});
+
+describe("gateway · sendMedia capability", () => {
+  it("all three adapters expose sendMedia", () => {
+    const f = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const w = createWecomAdapter({ corpId: "c", corpSecret: "s", token: "t", encodingAesKey: "k".repeat(43), agentId: 1 }, {})!;
+    const q = createQQAdapter({ appId: "1", secret: "supersecretseedvalue" }, {})!;
+    expect(typeof f.sendMedia).toBe("function");
+    expect(typeof w.sendMedia).toBe("function");
+    expect(typeof q.sendMedia).toBe("function");
+  });
+
+  it("qq sendMedia rejects a non-URL source", async () => {
+    const q = createQQAdapter({ appId: "1", secret: "supersecretseedvalue" }, {})!;
+    await expect(q.sendMedia!({ channel: "qq", kind: "group", groupOpenid: "g" }, { kind: "image", src: "/local/file.png" }))
+      .rejects.toThrow(/http\(s\) URL/);
+  });
+});
+
+describe("gateway · vision (multimodal read)", () => {
+  it("describeImages returns null with no images", async () => {
+    expect(await describeImages([], { model: "gpt-4o-mini", env: {} })).toBeNull();
+  });
+  it("returns null when no API key is available (skips silently)", async () => {
+    const img = { data: Buffer.from("x"), filename: "a.png", contentType: "image/png" };
+    expect(await describeImages([img], { model: "gpt-4o-mini", env: {} })).toBeNull();
+  });
+  it("skips Anthropic models (not OpenAI-chat-shaped here)", async () => {
+    const img = { data: Buffer.from("x"), filename: "a.png" };
+    expect(await describeImages([img], { model: "claude-sonnet-4-6", env: { ANTHROPIC_API_KEY: "k" } })).toBeNull();
+  });
+  it("all three adapters expose fetchMedia", () => {
+    const f = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const w = createWecomAdapter({ corpId: "c", corpSecret: "s", token: "t", encodingAesKey: "k".repeat(43), agentId: 1 }, {})!;
+    const q = createQQAdapter({ appId: "1", secret: "supersecretseedvalue" }, {})!;
+    expect(typeof f.fetchMedia).toBe("function");
+    expect(typeof w.fetchMedia).toBe("function");
+    expect(typeof q.fetchMedia).toBe("function");
+  });
+  it("qq fetchMedia returns null without a url", async () => {
+    const q = createQQAdapter({ appId: "1", secret: "supersecretseedvalue" }, {})!;
+    expect(await q.fetchMedia!({ kind: "image" } as any, {} as any)).toBeNull();
   });
 });
 

@@ -14,9 +14,10 @@
  */
 
 import * as crypto from 'crypto';
+import axios from 'axios';
 import { getLogger } from '../../core/logger';
-import { resolveSecret, postJson, TokenCache } from '../helpers';
-import type { ChannelAdapter, MediaAttachment, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
+import { resolveSecret, postJson, postMultipart, loadMedia, TokenCache } from '../helpers';
+import type { ChannelAdapter, InboundMessage, MediaAttachment, OutboundMedia, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-feishu');
 
@@ -237,6 +238,52 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
       }
       // Final flush so the last tokens always land.
       if (dirty || acc) await patchCard(messageId, acc.trim() || '(无回复)');
+    },
+
+    async sendMedia(target: ReplyTarget, item: OutboundMedia): Promise<void> {
+      const chatId = target.chatId as string;
+      if (!chatId) return;
+      const loaded = await loadMedia(item.src);
+      const headers = await authHeader();
+
+      if (item.kind === 'image') {
+        const up = await postMultipart(`${base}/open-apis/im/v1/images`, {
+          image_type: 'message',
+          image: { data: loaded.data, filename: loaded.filename || 'image', contentType: loaded.contentType || 'image/png' },
+        }, { headers });
+        if (up.code !== 0) { onTokenError(up.code); throw new Error(`feishu image upload ${up.code}: ${up.msg}`); }
+        const imageKey = up.data?.image_key;
+        const send = await postJson(`${base}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+          { receive_id: chatId, msg_type: 'image', content: JSON.stringify({ image_key: imageKey }) },
+          { headers });
+        if (send.code !== 0) { onTokenError(send.code); throw new Error(`feishu image send ${send.code}: ${send.msg}`); }
+        return;
+      }
+
+      // file: upload to im/v1/files then send a file message
+      const up = await postMultipart(`${base}/open-apis/im/v1/files`, {
+        file_type: 'stream',
+        file_name: loaded.filename || 'file',
+        file: { data: loaded.data, filename: loaded.filename || 'file', contentType: loaded.contentType || 'application/octet-stream' },
+      }, { headers });
+      if (up.code !== 0) { onTokenError(up.code); throw new Error(`feishu file upload ${up.code}: ${up.msg}`); }
+      const fileKey = up.data?.file_key;
+      const send = await postJson(`${base}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+        { receive_id: chatId, msg_type: 'file', content: JSON.stringify({ file_key: fileKey }) },
+        { headers });
+      if (send.code !== 0) { onTokenError(send.code); throw new Error(`feishu file send ${send.code}: ${send.msg}`); }
+    },
+
+    async fetchMedia(att: MediaAttachment, msg: InboundMessage): Promise<{ data: Buffer; contentType?: string } | null> {
+      const messageId = (msg.raw as any)?.event?.message?.message_id;
+      if (!messageId || !att.ref) return null;
+      const token = await tokenCache.get();
+      const res = await axios.get(
+        `${base}/open-apis/im/v1/messages/${messageId}/resources/${att.ref}?type=${att.kind === 'image' ? 'image' : 'file'}`,
+        { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer', timeout: 30000, validateStatus: (s) => s >= 200 && s < 300 },
+      );
+      const ct = res.headers['content-type'];
+      return { data: Buffer.from(res.data), contentType: typeof ct === 'string' ? ct : undefined };
     },
   };
 }
