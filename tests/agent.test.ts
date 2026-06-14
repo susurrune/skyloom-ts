@@ -133,6 +133,37 @@ describe("agent · context window (catalog-aware compaction)", () => {
   });
 });
 
+describe("agent · tool-round budget (configurable)", () => {
+  function budgetAgent(llmCfg: any) {
+    const reg = new ToolRegistry();
+    const config = { agents: { fog: {} }, llm: llmCfg, memory: { shortTermLimit: 100, dbPath: "/tmp/sky-test" } };
+    return new FogAgent(config as any, new MockLLM([{ content: "x" }]) as any, new MessageBus(), reg, new SkillRegistry());
+  }
+
+  it("defaults are generous (50 soft / 200 hard) so long tasks don't get cut off", () => {
+    const a = budgetAgent({}) as any;
+    expect(a._maxToolRounds).toBe(50);
+    expect(a._maxToolRoundsHardCap).toBe(200);
+  });
+
+  it("honors a custom max_tool_rounds and hard cap from config", () => {
+    const a = budgetAgent({ max_tool_rounds: 8, max_tool_rounds_hard_cap: 12 }) as any;
+    expect(a._maxToolRounds).toBe(8);
+    expect(a._maxToolRoundsHardCap).toBe(12);
+  });
+
+  it("max_tool_rounds: 0 means unlimited (very high ceiling, not 0)", () => {
+    const a = budgetAgent({ max_tool_rounds: 0 }) as any;
+    expect(a._maxToolRounds).toBeGreaterThanOrEqual(100000);
+    expect(a._maxToolRoundsHardCap).toBeGreaterThanOrEqual(100000);
+  });
+
+  it("hard cap is never below the soft limit even if misconfigured", () => {
+    const a = budgetAgent({ max_tool_rounds: 80, max_tool_rounds_hard_cap: 10 }) as any;
+    expect(a._maxToolRoundsHardCap).toBeGreaterThanOrEqual(80);
+  });
+});
+
 describe("agent · interrupt (Ctrl-C)", () => {
   it("stops between rounds on abort and preserves partial output", async () => {
     const controller = new AbortController();
