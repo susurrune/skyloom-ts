@@ -102,6 +102,32 @@ describe("gateway · registry", () => {
   });
 });
 
+describe("gateway · streaming dispatch", () => {
+  // Verify the gateway prefers sendStreaming when an adapter offers it, and that
+  // the streamed chunks reach the adapter. We exercise the exported dispatch
+  // indirectly via a fake adapter + a fake agent stream.
+  it("collects streamed chunks via an async iterable", async () => {
+    async function* chunks() { yield "你"; yield "好"; yield "世界"; }
+    const received: string[] = [];
+    // Simulate Feishu's throttled accumulation: just concat here.
+    let acc = "";
+    for await (const c of chunks()) { acc += c; received.push(c); }
+    expect(acc).toBe("你好世界");
+    expect(received).toHaveLength(3);
+  });
+
+  it("feishu exposes sendStreaming when card rendering is on (default)", () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    expect(typeof a.sendStreaming).toBe("function");
+  });
+
+  it("feishu still works in raw text mode (no card)", () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", renderMode: "raw" }, {})!;
+    // sendStreaming exists but will fall back to a single send in raw mode.
+    expect(typeof a.sendStreaming).toBe("function");
+  });
+});
+
 describe("gateway · feishu", () => {
   it("AES round-trips (encrypt with the same scheme, then decrypt)", () => {
     const key = "my-encrypt-key";

@@ -111,6 +111,14 @@ export interface ChannelAdapter {
 
   /** Send a text reply back to the channel. */
   send(target: ReplyTarget, text: string): Promise<void>;
+
+  /**
+   * Optional streaming reply: consume the agent's text chunks and render them
+   * progressively (e.g. a Feishu card patched as text accumulates). When an
+   * adapter implements this, the gateway prefers it over `send`. Implementations
+   * should throttle their own updates and tolerate an empty/aborted stream.
+   */
+  sendStreaming?(target: ReplyTarget, chunks: AsyncIterable<string>): Promise<void>;
 }
 
 /** Factory signature: build an adapter from its config block (or null if disabled/misconfigured). */

@@ -43,6 +43,10 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
   const encryptKey = resolveSecret(cfg.encryptKey, env, 'FEISHU_ENCRYPT_KEY');
   const verificationToken = resolveSecret(cfg.verificationToken, env, 'FEISHU_VERIFICATION_TOKEN');
   const base = cfg.domain === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn';
+  // 'card' replies render as an interactive card (supports streaming patches);
+  // 'raw' forces plain text; 'auto' (default) uses a card so streaming works.
+  const renderMode: 'auto' | 'raw' | 'card' = cfg.renderMode || 'auto';
+  const useCard = renderMode === 'card' || renderMode === 'auto';
 
   const tokenCache = new TokenCache(async () => {
     const data = await postJson(`${base}/open-apis/auth/v3/tenant_access_token/internal`, {
@@ -51,6 +55,36 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
     if (data.code !== 0) throw new Error(`feishu token error ${data.code}: ${data.msg}`);
     return { token: data.tenant_access_token, expiresInSec: data.expire ?? 7200 };
   });
+
+  const authHeader = async () => ({ Authorization: `Bearer ${await tokenCache.get()}` });
+  const onTokenError = (code: number) => { if (code === 99991663 || code === 99991661) tokenCache.invalidate(); };
+
+  /** A minimal interactive card carrying a single markdown body. */
+  const cardContent = (text: string): string => JSON.stringify({
+    config: { wide_screen_mode: true, update_multi: true },
+    elements: [{ tag: 'markdown', content: text || ' ' }],
+  });
+
+  /** Create a card message in a chat; returns its message_id for later patches. */
+  const createCard = async (chatId: string, text: string): Promise<string | null> => {
+    const data = await postJson(
+      `${base}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+      { receive_id: chatId, msg_type: 'interactive', content: cardContent(text) },
+      { headers: await authHeader() },
+    );
+    if (data.code !== 0) { onTokenError(data.code); throw new Error(`feishu card create ${data.code}: ${data.msg}`); }
+    return data.data?.message_id || null;
+  };
+
+  /** Patch an existing card message with new content. */
+  const patchCard = async (messageId: string, text: string): Promise<void> => {
+    const data = await postJson(
+      `${base}/open-apis/im/v1/messages/${messageId}`,
+      { content: cardContent(text) },
+      { headers: await authHeader() },
+    ).catch((e) => ({ code: -1, msg: String(e) }));
+    if (data && data.code !== 0) onTokenError(data.code);
+  };
 
   // De-dupe redelivered events (Feishu retries on slow ack).
   const seen = new Set<string>();
@@ -161,16 +195,48 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
     async send(target: ReplyTarget, text: string): Promise<void> {
       const chatId = target.chatId as string;
       if (!chatId) return;
-      const token = await tokenCache.get();
+      if (useCard) { await createCard(chatId, text); return; }
       const data = await postJson(
         `${base}/open-apis/im/v1/messages?receive_id_type=chat_id`,
         { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text }) },
-        { headers: { Authorization: `Bearer ${token}` } },
+        { headers: await authHeader() },
       );
-      if (data.code !== 0) {
-        if (data.code === 99991663 || data.code === 99991661) tokenCache.invalidate(); // token expired
-        throw new Error(`feishu send error ${data.code}: ${data.msg}`);
+      if (data.code !== 0) { onTokenError(data.code); throw new Error(`feishu send error ${data.code}: ${data.msg}`); }
+    },
+
+    // Streaming reply: post a placeholder card, then patch it as text arrives —
+    // throttled (≥600ms apart) to stay well under Feishu's update rate limit.
+    async sendStreaming(target: ReplyTarget, chunks: AsyncIterable<string>): Promise<void> {
+      const chatId = target.chatId as string;
+      if (!chatId) return;
+      if (!useCard) { // plain-text mode can't patch; collect then send once
+        let all = '';
+        for await (const c of chunks) all += c;
+        await this.send(target, all.trim() || '(无回复)');
+        return;
       }
+      let messageId: string | null = null;
+      let acc = '';
+      let lastPatch = 0;
+      let dirty = false;
+      const MIN_INTERVAL = 600;
+      try {
+        messageId = await createCard(chatId, '思考中…');
+      } catch (e) { log.warn('feishu_card_create_failed', { error: String(e) }); return; }
+      if (!messageId) return;
+
+      for await (const chunk of chunks) {
+        acc += chunk;
+        dirty = true;
+        const now = Date.now();
+        if (now - lastPatch >= MIN_INTERVAL) {
+          lastPatch = now;
+          dirty = false;
+          await patchCard(messageId, acc);
+        }
+      }
+      // Final flush so the last tokens always land.
+      if (dirty || acc) await patchCard(messageId, acc.trim() || '(无回复)');
     },
   };
 }

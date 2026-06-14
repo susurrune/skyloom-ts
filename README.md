@@ -417,9 +417,13 @@ channels:
 
 | 渠道 | 入站(收) | 鉴权/加密 |
 |------|----------|-----------|
-| 飞书 Feishu | 事件订阅 webhook(`im.message.receive_v1`) | verification token + 可选 AES-256-CBC 解密 + URL challenge |
-| 企业微信 WeCom | 应用回调(XML) | msg_signature(SHA1) + AES(PKCS7) + GET echostr 验证 |
-| QQ Bot | 官方 webhook(群/私聊/频道 @) | Ed25519 验签 + op=13 validation 握手 |
+| 飞书 Feishu | 文本 + 媒体(图片/语音/视频/文件/表情/富文本 post) | verification token + 可选 AES-256-CBC 解密 + URL challenge |
+| 企业微信 WeCom | 文本 + 媒体(图片/语音/视频/文件/位置) | msg_signature(SHA1) + AES(PKCS7) + GET echostr 验证 |
+| QQ Bot | 文本 + 媒体(attachments) · 群/私聊/频道 @ | Ed25519 验签 + op=13 validation 握手 |
+
+**媒体消息**:入站的图片/语音/文件等会被标准化为 `[image: …] [file: …]` 之类的可读描述拼进 prompt,Agent 即使不下载二进制也知道用户发了什么。
+
+**飞书卡片 + 流式**:飞书默认以**交互卡片**回复,并在生成过程中**逐步 patch 卡片内容**(节流 ≥600ms),呈现打字机式流式效果。`channels.feishu.renderMode: raw` 可改回纯文本,`streaming: false` 可关流式(改为一次性发送)。
 
 > ⚠️ 网关接收外部平台回调,默认绑定 `0.0.0.0`。请放在反向代理/HTTPS 之后,并妥善保管密钥(建议走环境变量 / `secretInput`)。
 
