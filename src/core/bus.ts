@@ -3,6 +3,9 @@
  */
 
 import { EventEmitter } from 'events';
+import { getLogger } from './logger';
+
+const log = getLogger('bus');
 
 /**
  * Event types for the message bus.
@@ -133,7 +136,7 @@ export class MessageBus {
       try {
         await handler(event);
       } catch (err) {
-        console.error('state_change handler failed:', err);
+        log.warn('state_change_handler_failed', { error: String(err) });
       }
     }
   }
@@ -152,7 +155,7 @@ export class MessageBus {
         try {
           await handler(event);
         } catch (err) {
-          console.error(`bus handler failed for target=${event.target}:`, err);
+          log.warn('bus_handler_failed', { target: event.target, error: String(err) });
         }
       }
     } else {
@@ -165,7 +168,7 @@ export class MessageBus {
           try {
             await handler(event);
           } catch (err) {
-            console.error(`bus handler failed for subscriber=${name}:`, err);
+            log.warn('bus_handler_failed', { subscriber: name, error: String(err) });
           }
         }
       }

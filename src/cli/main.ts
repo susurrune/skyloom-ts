@@ -301,6 +301,13 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
 
   await agent.init();
 
+  // Interactive UI (loom or classic): route logs to a file so warn/error lines
+  // (e.g. web_search provider timeouts) never paint over the TUI frame. Opt out
+  // with SKYLOOM_LOG_CONSOLE=1; override path with SKYLOOM_LOG_FILE.
+  if (process.env.SKYLOOM_LOG_CONSOLE !== "1") {
+    try { require("../core/logger").setLogFile(process.env.SKYLOOM_LOG_FILE); } catch { /* optional */ }
+  }
+
   // Wire up security approval — prompt user for HIGH/CRITICAL operations
   try {
     const { getSecurity, DangerLevel, PERMISSION_MODE_ALIASES } = require("../core/security");
