@@ -10,9 +10,8 @@ import { createSystemContext, orchestrateTask } from "../core/factory";
 import { loadConfig, USER_CONFIG_DIR } from "../core/config";
 import { listProviders, modelsFor, providerLabel, validateModel } from "../core/catalog";
 import { agentTheme } from "../core/theme";
-import { classify } from "../core/router";
 import { InteractiveMode, ModeController } from "./mode";
-import { readLine, renderPalette, StreamRenderer, stripMarkdown } from "./tui";
+import { readLine, renderPalette, StreamRenderer } from "./tui";
 import { loomChat } from "./loom_chat";
 
 const MODE = new ModeController();
@@ -73,18 +72,6 @@ function welcome(agent: any) {
   process.stdout.write(chalk.dim("  /help for commands  ·  /quit to exit\n\n"));
 }
 
-function statusBar(agent: any, ctx: any): string {
-  try {
-    const cu = agent.contextUsage();
-    const pct = cu.pct || 0;
-    const bar = pct < 50 ? chalk.green : pct < 80 ? chalk.yellow : chalk.red;
-    const filled = Math.round(pct / 10);
-    const ctxBar = `${bar("█".repeat(filled) + "░".repeat(10 - filled))} ${pct}%`;
-    const cost = formatCost(ctx.llm.getTotalCost());
-    return chalk.dim(`${ctxBar}  ·  ${cost}  ·  ${cu.model || "?"}`);
-  } catch { return ""; }
-}
-
 function formatCost(c: number): string {
   if (c >= 1) return chalk.yellow(`$${c.toFixed(2)}`);
   if (c >= 0.01) return chalk.yellow(`$${c.toFixed(4)}`);
@@ -118,11 +105,6 @@ async function streamResponse(agent: any, input: string): Promise<void> {
   let renderer: StreamRenderer | null = null;
   const header = () => { if (!headerShown) { out.write("\n  " + chalk.bold.hex(theme.hex)(`${theme.symbol} ${theme.kanji}`) + chalk.hex(theme.hex)(` ${theme.name}`) + "\n\n"); headerShown = true; } };
   const endBlock = () => { if (renderer) { renderer.flush(); renderer = null; out.write("\n"); } };
-
-  // All content passes through this cleaner before display
-  const writeClean = (text: string) => {
-    if (renderer) renderer.write(text);
-  };
 
   // ── Ctrl-C interrupts this turn (keeps partial output); a 2nd Ctrl-C exits. ──
   const controller = new AbortController();
@@ -374,7 +356,7 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
 
   // Wire up security approval — prompt user for HIGH/CRITICAL operations
   try {
-    const { getSecurity, DangerLevel, PERMISSION_MODE_ALIASES } = require("../core/security");
+    const { getSecurity, PERMISSION_MODE_ALIASES } = require("../core/security");
     const sec = getSecurity();
     // Honor a configured permission mode (config.yaml cli.approvalMode), mapped
     // through the same aliases as /perm.
@@ -405,7 +387,6 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
     return; // loomChat exits the process itself
   }
 
-  // eslint-disable-next-line prefer-const
   let currentAgent = agent; // mutable for agent switching
   let lastSessions: any[] = []; // index→session map for /resume <n>
   welcome(agent);
@@ -599,7 +580,7 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
       continue;
     }
     if (cmdL === "/models" || cmdL.startsWith("/models ")) {
-      const { listProviders, modelsFor, providerLabel, allModels } = require("../core/catalog");
+      const { listProviders, modelsFor, providerLabel } = require("../core/catalog");
       const args = inp.split(/\s+/).slice(1);
       const filter = args[0]?.toLowerCase() || "";
       process.stdout.write(chalk.bold("\n  ✦ 模型目录 · Model Catalog\n"));

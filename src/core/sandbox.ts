@@ -6,14 +6,11 @@
  * limits, and dangerous command detection BEFORE execution.
  */
 
-import { execSync, exec } from "child_process";
+import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { getLogger } from "./logger";
 import { REDLINE_PATTERNS, REDLINE_COMMANDS } from "./security";
-
-const log = getLogger("sandbox");
 
 /* ═══════════════════════════════════════
    Configuration

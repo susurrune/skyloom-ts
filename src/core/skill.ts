@@ -245,7 +245,6 @@ function extractSkillHead(body: string, maxChars: number): string {
 // Patterns for auto-deriving triggers
 const TRIGGER_QUOTED = /["'"'""]([^"'""\n]{1,40})["'""']/g;
 const TRIGGER_EXT = /(?<![A-Za-z0-9])\.[A-Za-z0-9]{2,6}\b/g;
-const TRIGGER_STRIP = " \t,.;:!?，。、；：！？、。";
 
 /**
  * Pull candidate trigger phrases out of a skill description.

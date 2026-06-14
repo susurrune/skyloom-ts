@@ -14,8 +14,6 @@ import chalk from "chalk";
 import { agentTheme, PALETTE } from "../core/theme";
 import { registry } from "../core/commands";
 
-const TUI_VERSION = (() => { try { return require("../../package.json").version; } catch { return ""; } })();
-
 export interface TUIContext {
   agent: any;
   agents: Map<string, any>;
