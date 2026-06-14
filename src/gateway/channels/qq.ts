@@ -18,7 +18,7 @@
 import * as crypto from 'crypto';
 import { getLogger } from '../../core/logger';
 import { resolveSecret, postJson, TokenCache } from '../helpers';
-import type { ChannelAdapter, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
+import type { ChannelAdapter, MediaAttachment, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-qq');
 
@@ -102,7 +102,17 @@ export function createQQAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAdapte
       else if (t === 'C2C_MESSAGE_CREATE') replyTo = { channel: 'qq', kind: 'c2c', userOpenid: d.author?.user_openid, msgId };
       else if (t === 'AT_MESSAGE_CREATE' || t === 'MESSAGE_CREATE') replyTo = { channel: 'qq', kind: 'channel', channelId: d.channel_id, msgId };
 
-      if (!replyTo || !content) return { response: { status: 200, body: '' } };
+      // QQ delivers images/files as an attachments array on the event.
+      const media: MediaAttachment[] = [];
+      for (const att of (Array.isArray(d.attachments) ? d.attachments : [])) {
+        const ct = String(att?.content_type || '');
+        const kind: MediaAttachment['kind'] = ct.startsWith('image') ? 'image'
+          : ct.startsWith('audio') || ct.startsWith('voice') ? 'audio'
+          : ct.startsWith('video') ? 'video' : 'file';
+        media.push({ kind, ref: att?.id, filename: att?.filename, mimeType: att?.content_type, url: att?.url });
+      }
+
+      if (!replyTo || (!content && media.length === 0)) return { response: { status: 200, body: '' } };
 
       const userId = d.author?.user_openid || d.author?.id || d.author?.member_openid || 'unknown';
       return {
@@ -112,6 +122,7 @@ export function createQQAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAdapte
           conversationId: (replyTo.groupOpenid as string) || (replyTo.channelId as string) || (userId as string),
           userId,
           text: content,
+          media: media.length ? media : undefined,
           replyTo,
           raw: payload,
         },

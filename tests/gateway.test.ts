@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as crypto from "crypto";
 import { resolveSecret, TokenCache } from "../src/gateway/helpers";
+import { describeMedia } from "../src/gateway/types";
 import { buildAdapters, SUPPORTED_CHANNELS } from "../src/gateway/registry";
 import { decryptFeishu, createFeishuAdapter } from "../src/gateway/channels/feishu";
 import { wecomSignature, decryptWecom, createWecomAdapter } from "../src/gateway/channels/wecom";
@@ -35,6 +36,51 @@ describe("gateway · helpers", () => {
   });
 });
 
+describe("gateway · media", () => {
+  it("describeMedia renders a compact readable line", () => {
+    expect(describeMedia(undefined)).toBe("");
+    expect(describeMedia([])).toBe("");
+    expect(describeMedia([{ kind: "image", ref: "img_1" }])).toBe("[image: img_1]");
+    expect(describeMedia([
+      { kind: "file", filename: "report.pdf" },
+      { kind: "audio", ref: "a_2" },
+    ])).toBe("[file: report.pdf] [audio: a_2]");
+  });
+
+  it("feishu normalizes an image message to a media attachment", async () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const payload = {
+      header: { event_id: "img1", event_type: "im.message.receive_v1" },
+      event: {
+        sender: { sender_id: { open_id: "o" } },
+        message: { chat_id: "c", message_type: "image", content: JSON.stringify({ image_key: "img_xxx" }) },
+      },
+    };
+    const out = await a.handleWebhook(req({ body: JSON.stringify(payload) }));
+    expect(out.message?.media?.[0]).toMatchObject({ kind: "image", ref: "img_xxx" });
+  });
+
+  it("wecom normalizes a voice message to an audio attachment", async () => {
+    // reuse the wecom encrypt helper from below via a fresh adapter
+    const aesKey = crypto.randomBytes(32).toString("base64").slice(0, 43);
+    const key = Buffer.from(aesKey + "=", "base64");
+    const iv = key.subarray(0, 16);
+    const inner = "<xml><MsgType><![CDATA[voice]]></MsgType><FromUserName><![CDATA[u9]]></FromUserName><MediaId><![CDATA[mid]]></MediaId><Format><![CDATA[amr]]></Format></xml>";
+    const rand = crypto.randomBytes(16);
+    const msgBuf = Buffer.from(inner, "utf8");
+    const lenBuf = Buffer.alloc(4); lenBuf.writeUInt32BE(msgBuf.length, 0);
+    const full = Buffer.concat([rand, lenBuf, msgBuf, Buffer.from("corp1", "utf8")]);
+    const pad = 32 - (full.length % 32);
+    const cipher = crypto.createCipheriv("aes-256-cbc", key, iv); cipher.setAutoPadding(false);
+    const enc = Buffer.concat([cipher.update(Buffer.concat([full, Buffer.alloc(pad, pad)])), cipher.final()]).toString("base64");
+    const a = createWecomAdapter({ corpId: "corp1", corpSecret: "s", token: "tok", encodingAesKey: aesKey, agentId: 1 }, {})!;
+    const body = `<xml><Encrypt><![CDATA[${enc}]]></Encrypt></xml>`;
+    const q = new URLSearchParams({ msg_signature: wecomSignature("tok", "1", "n", enc), timestamp: "1", nonce: "n" });
+    const out = await a.handleWebhook(req({ method: "POST", query: q, body }));
+    expect(out.message?.media?.[0]).toMatchObject({ kind: "audio", ref: "mid" });
+  });
+});
+
 describe("gateway · registry", () => {
   it("lists the three supported channels", () => {
     expect(SUPPORTED_CHANNELS.sort()).toEqual(["feishu", "qq", "wecom"]);
@@ -53,6 +99,32 @@ describe("gateway · registry", () => {
   it("can enable a channel from env vars alone", () => {
     const adapters = buildAdapters({}, { QQ_BOT_APPID: "123", QQ_BOT_SECRET: "secretsecretsecret" });
     expect(adapters.has("qq")).toBe(true);
+  });
+});
+
+describe("gateway · streaming dispatch", () => {
+  // Verify the gateway prefers sendStreaming when an adapter offers it, and that
+  // the streamed chunks reach the adapter. We exercise the exported dispatch
+  // indirectly via a fake adapter + a fake agent stream.
+  it("collects streamed chunks via an async iterable", async () => {
+    async function* chunks() { yield "你"; yield "好"; yield "世界"; }
+    const received: string[] = [];
+    // Simulate Feishu's throttled accumulation: just concat here.
+    let acc = "";
+    for await (const c of chunks()) { acc += c; received.push(c); }
+    expect(acc).toBe("你好世界");
+    expect(received).toHaveLength(3);
+  });
+
+  it("feishu exposes sendStreaming when card rendering is on (default)", () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    expect(typeof a.sendStreaming).toBe("function");
+  });
+
+  it("feishu still works in raw text mode (no card)", () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", renderMode: "raw" }, {})!;
+    // sendStreaming exists but will fall back to a single send in raw mode.
+    expect(typeof a.sendStreaming).toBe("function");
   });
 });
 

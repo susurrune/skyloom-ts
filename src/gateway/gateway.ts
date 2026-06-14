@@ -16,6 +16,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { getLogger } from '../core/logger';
 import { createSystemContext } from '../core/factory';
 import { buildAdapters } from './registry';
+import { describeMedia } from './types';
 import type { ChannelAdapter, InboundMessage, RawRequest } from './types';
 
 const log = getLogger('gateway');
@@ -28,27 +29,59 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 /** Run an agent turn for an inbound message and collect the final text reply. */
-async function runAgent(
+/** Build the agent prompt from an inbound message (text + media description). */
+function buildPrompt(msg: InboundMessage): string {
+  const mediaDesc = describeMedia(msg.media);
+  if (!mediaDesc) return msg.text;
+  return msg.text ? `${msg.text}\n\n(用户还发送了媒体: ${mediaDesc})` : `用户发送了媒体: ${mediaDesc}`;
+}
+
+/** Resolve the agent for a channel message. */
+function resolveAgent(ctx: ReturnType<typeof createSystemContext>, adapter: ChannelAdapter) {
+  const cfgChannels = (ctx.config as any).channels || {};
+  const agentName = cfgChannels[adapter.id]?.agent || adapter.defaultAgent || 'fair';
+  return ctx.agentMap.get(agentName) || ctx.agentMap.get('fair') || [...ctx.agentMap.values()][0];
+}
+
+/** Dispatch one inbound message to its agent and deliver the reply. */
+async function dispatch(
   ctx: ReturnType<typeof createSystemContext>,
   adapter: ChannelAdapter,
   msg: InboundMessage,
-): Promise<string> {
-  const cfgChannels = (ctx.config as any).channels || {};
-  const agentName = cfgChannels[adapter.id]?.agent || adapter.defaultAgent || 'fair';
-  const agent = ctx.agentMap.get(agentName) || ctx.agentMap.get('fair') || [...ctx.agentMap.values()][0];
+): Promise<void> {
+  const agent = resolveAgent(ctx, adapter);
   if (!agent) throw new Error('no agent available');
-
   await agent.init();
+  const prompt = buildPrompt(msg);
+
+  // Streaming path: stream content chunks straight to the adapter (e.g. a Feishu
+  // card patched as text arrives). Falls back to collect-then-send otherwise.
+  const cfgStreaming = ((ctx.config as any).channels || {})[adapter.id]?.streaming !== false;
+  if (adapter.sendStreaming && cfgStreaming) {
+    async function* contentChunks(): AsyncGenerator<string> {
+      try {
+        for await (const ev of agent.chatStream(prompt)) {
+          if ((ev as any).type === 'content') yield (ev as any).text as string;
+        }
+      } catch (e) {
+        log.warn('gateway_agent_failed', { channel: adapter.id, error: String(e) });
+        yield `\n[出错了] ${String(e)}`;
+      }
+    }
+    await adapter.sendStreaming(msg.replyTo, contentChunks());
+    return;
+  }
+
   let text = '';
   try {
-    for await (const ev of agent.chatStream(msg.text)) {
+    for await (const ev of agent.chatStream(prompt)) {
       if ((ev as any).type === 'content') text += (ev as any).text;
     }
   } catch (e) {
     log.warn('gateway_agent_failed', { channel: adapter.id, error: String(e) });
-    return `[出错了] ${String(e)}`;
+    text = `[出错了] ${String(e)}`;
   }
-  return text.trim() || '(无回复)';
+  await adapter.send(msg.replyTo, text.trim() || '(无回复)');
 }
 
 export interface GatewayOptions {
@@ -114,14 +147,8 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
       // Route to an agent and deliver the reply asynchronously (after the ack).
       if (outcome.message) {
         const msg = outcome.message;
-        void (async () => {
-          try {
-            const reply = await runAgent(ctx, adapter, msg);
-            await adapter.send(msg.replyTo, reply);
-          } catch (e) {
-            log.warn('gateway_dispatch_failed', { channel: adapter.id, error: String(e) });
-          }
-        })();
+        void dispatch(ctx, adapter, msg).catch((e) =>
+          log.warn('gateway_dispatch_failed', { channel: adapter.id, error: String(e) }));
       }
     } catch (e) {
       log.warn('gateway_request_error', { error: String(e) });

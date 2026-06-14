@@ -16,7 +16,7 @@
 import * as crypto from 'crypto';
 import { getLogger } from '../../core/logger';
 import { resolveSecret, postJson, TokenCache } from '../helpers';
-import type { ChannelAdapter, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
+import type { ChannelAdapter, MediaAttachment, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-feishu');
 
@@ -43,6 +43,10 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
   const encryptKey = resolveSecret(cfg.encryptKey, env, 'FEISHU_ENCRYPT_KEY');
   const verificationToken = resolveSecret(cfg.verificationToken, env, 'FEISHU_VERIFICATION_TOKEN');
   const base = cfg.domain === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn';
+  // 'card' replies render as an interactive card (supports streaming patches);
+  // 'raw' forces plain text; 'auto' (default) uses a card so streaming works.
+  const renderMode: 'auto' | 'raw' | 'card' = cfg.renderMode || 'auto';
+  const useCard = renderMode === 'card' || renderMode === 'auto';
 
   const tokenCache = new TokenCache(async () => {
     const data = await postJson(`${base}/open-apis/auth/v3/tenant_access_token/internal`, {
@@ -51,6 +55,36 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
     if (data.code !== 0) throw new Error(`feishu token error ${data.code}: ${data.msg}`);
     return { token: data.tenant_access_token, expiresInSec: data.expire ?? 7200 };
   });
+
+  const authHeader = async () => ({ Authorization: `Bearer ${await tokenCache.get()}` });
+  const onTokenError = (code: number) => { if (code === 99991663 || code === 99991661) tokenCache.invalidate(); };
+
+  /** A minimal interactive card carrying a single markdown body. */
+  const cardContent = (text: string): string => JSON.stringify({
+    config: { wide_screen_mode: true, update_multi: true },
+    elements: [{ tag: 'markdown', content: text || ' ' }],
+  });
+
+  /** Create a card message in a chat; returns its message_id for later patches. */
+  const createCard = async (chatId: string, text: string): Promise<string | null> => {
+    const data = await postJson(
+      `${base}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+      { receive_id: chatId, msg_type: 'interactive', content: cardContent(text) },
+      { headers: await authHeader() },
+    );
+    if (data.code !== 0) { onTokenError(data.code); throw new Error(`feishu card create ${data.code}: ${data.msg}`); }
+    return data.data?.message_id || null;
+  };
+
+  /** Patch an existing card message with new content. */
+  const patchCard = async (messageId: string, text: string): Promise<void> => {
+    const data = await postJson(
+      `${base}/open-apis/im/v1/messages/${messageId}`,
+      { content: cardContent(text) },
+      { headers: await authHeader() },
+    ).catch((e) => ({ code: -1, msg: String(e) }));
+    if (data && data.code !== 0) onTokenError(data.code);
+  };
 
   // De-dupe redelivered events (Feishu retries on slow ack).
   const seen = new Set<string>();
@@ -103,12 +137,45 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
       const chatId = message.chat_id as string;
       const msgType = message.message_type as string;
       let text = '';
-      if (msgType === 'text') {
-        try { text = JSON.parse(message.content || '{}').text || ''; } catch { text = ''; }
-        // Strip @mentions like "@_user_1 ".
-        text = text.replace(/@_user_\d+/g, '').trim();
-      } else {
-        text = `[${msgType} 消息]`;
+      const media: MediaAttachment[] = [];
+      let content: any = {};
+      try { content = JSON.parse(message.content || '{}'); } catch { /* ignore */ }
+      switch (msgType) {
+        case 'text':
+          text = (content.text || '').replace(/@_user_\d+/g, '').trim(); // strip @mentions
+          break;
+        case 'image':
+          media.push({ kind: 'image', ref: content.image_key });
+          break;
+        case 'audio':
+          media.push({ kind: 'audio', ref: content.file_key });
+          break;
+        case 'media': // short video
+          media.push({ kind: 'video', ref: content.file_key, filename: content.file_name });
+          break;
+        case 'file':
+          media.push({ kind: 'file', ref: content.file_key, filename: content.file_name });
+          break;
+        case 'sticker':
+          media.push({ kind: 'sticker', ref: content.file_key });
+          break;
+        case 'post': { // rich text: pull plain text + embedded images
+          const blocks = content?.content;
+          if (Array.isArray(blocks)) {
+            for (const row of blocks) {
+              for (const el of row || []) {
+                if (el?.tag === 'text' && el.text) text += el.text;
+                else if (el?.tag === 'a' && el.text) text += el.text;
+                else if (el?.tag === 'img' && el.image_key) media.push({ kind: 'image', ref: el.image_key });
+              }
+              text += '\n';
+            }
+          }
+          text = text.trim();
+          break;
+        }
+        default:
+          text = `[${msgType} 消息]`;
       }
       const senderId = payload.event?.sender?.sender_id?.open_id || payload.event?.sender?.sender_id?.user_id || 'unknown';
 
@@ -118,6 +185,7 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
           conversationId: chatId || senderId,
           userId: senderId,
           text,
+          media: media.length ? media : undefined,
           replyTo: { channel: 'feishu', chatId },
           raw: payload,
         },
@@ -127,16 +195,48 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
     async send(target: ReplyTarget, text: string): Promise<void> {
       const chatId = target.chatId as string;
       if (!chatId) return;
-      const token = await tokenCache.get();
+      if (useCard) { await createCard(chatId, text); return; }
       const data = await postJson(
         `${base}/open-apis/im/v1/messages?receive_id_type=chat_id`,
         { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text }) },
-        { headers: { Authorization: `Bearer ${token}` } },
+        { headers: await authHeader() },
       );
-      if (data.code !== 0) {
-        if (data.code === 99991663 || data.code === 99991661) tokenCache.invalidate(); // token expired
-        throw new Error(`feishu send error ${data.code}: ${data.msg}`);
+      if (data.code !== 0) { onTokenError(data.code); throw new Error(`feishu send error ${data.code}: ${data.msg}`); }
+    },
+
+    // Streaming reply: post a placeholder card, then patch it as text arrives —
+    // throttled (≥600ms apart) to stay well under Feishu's update rate limit.
+    async sendStreaming(target: ReplyTarget, chunks: AsyncIterable<string>): Promise<void> {
+      const chatId = target.chatId as string;
+      if (!chatId) return;
+      if (!useCard) { // plain-text mode can't patch; collect then send once
+        let all = '';
+        for await (const c of chunks) all += c;
+        await this.send(target, all.trim() || '(无回复)');
+        return;
       }
+      let messageId: string | null = null;
+      let acc = '';
+      let lastPatch = 0;
+      let dirty = false;
+      const MIN_INTERVAL = 600;
+      try {
+        messageId = await createCard(chatId, '思考中…');
+      } catch (e) { log.warn('feishu_card_create_failed', { error: String(e) }); return; }
+      if (!messageId) return;
+
+      for await (const chunk of chunks) {
+        acc += chunk;
+        dirty = true;
+        const now = Date.now();
+        if (now - lastPatch >= MIN_INTERVAL) {
+          lastPatch = now;
+          dirty = false;
+          await patchCard(messageId, acc);
+        }
+      }
+      // Final flush so the last tokens always land.
+      if (dirty || acc) await patchCard(messageId, acc.trim() || '(无回复)');
     },
   };
 }

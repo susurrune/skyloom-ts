@@ -24,8 +24,34 @@ export interface InboundMessage {
   text: string;
   /** Where to send the reply (channel-specific opaque target). */
   replyTo: ReplyTarget;
+  /** Media attachments on this message (image / audio / file / …). */
+  media?: MediaAttachment[];
   /** Raw event for adapters that need more than the normalized fields. */
   raw?: unknown;
+}
+
+/** A non-text attachment, normalized across channels. */
+export interface MediaAttachment {
+  kind: 'image' | 'audio' | 'video' | 'file' | 'sticker' | 'other';
+  /** Channel-specific id/key used to fetch the binary (image_key, media_id, url…). */
+  ref?: string;
+  /** Original filename, when the platform provides one. */
+  filename?: string;
+  /** MIME type, when known. */
+  mimeType?: string;
+  /** Direct URL, when the platform provides one. */
+  url?: string;
+}
+
+/** Render a media list into a compact, model-readable description line. */
+export function describeMedia(media: MediaAttachment[] | undefined): string {
+  if (!media || media.length === 0) return '';
+  const parts = media.map((m) => {
+    const label = m.filename || m.ref || m.url || '';
+    const tag = label ? `${m.kind}: ${label}` : m.kind;
+    return `[${tag}]`;
+  });
+  return parts.join(' ');
 }
 
 /** Opaque, channel-specific destination for an outbound reply. */
@@ -85,6 +111,14 @@ export interface ChannelAdapter {
 
   /** Send a text reply back to the channel. */
   send(target: ReplyTarget, text: string): Promise<void>;
+
+  /**
+   * Optional streaming reply: consume the agent's text chunks and render them
+   * progressively (e.g. a Feishu card patched as text accumulates). When an
+   * adapter implements this, the gateway prefers it over `send`. Implementations
+   * should throttle their own updates and tolerate an empty/aborted stream.
+   */
+  sendStreaming?(target: ReplyTarget, chunks: AsyncIterable<string>): Promise<void>;
 }
 
 /** Factory signature: build an adapter from its config block (or null if disabled/misconfigured). */
