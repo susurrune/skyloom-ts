@@ -133,35 +133,61 @@ describe("agent · context window (catalog-aware compaction)", () => {
   });
 });
 
-describe("agent · tool-round budget (configurable)", () => {
-  function budgetAgent(llmCfg: any) {
+describe("agent · progress-based stopping", () => {
+  function budgetAgent(llmCfg: any, turns: Turn[] = [{ content: "x" }], tools: any[] = []) {
     const reg = new ToolRegistry();
-    const config = { agents: { fog: {} }, llm: llmCfg, memory: { shortTermLimit: 100, dbPath: "/tmp/sky-test" } };
-    return new FogAgent(config as any, new MockLLM([{ content: "x" }]) as any, new MessageBus(), reg, new SkillRegistry());
+    for (const t of tools) reg.register({ name: t.name, description: t.name, handler: t.handler, maxRetries: 0 });
+    const config = { agents: { fog: {} }, llm: llmCfg, memory: { shortTermLimit: 200, dbPath: "/tmp/sky-test" } };
+    return new FogAgent(config as any, new MockLLM(turns) as any, new MessageBus(), reg, new SkillRegistry());
   }
 
-  it("defaults are generous (50 soft / 200 hard) so long tasks don't get cut off", () => {
+  it("defaults: generous backstop + small no-progress threshold", () => {
     const a = budgetAgent({}) as any;
-    expect(a._maxToolRounds).toBe(50);
-    expect(a._maxToolRoundsHardCap).toBe(200);
+    expect(a._maxToolRoundsHardCap).toBe(1000);
+    expect(a._maxNoProgressRounds).toBe(6);
   });
 
-  it("honors a custom max_tool_rounds and hard cap from config", () => {
-    const a = budgetAgent({ max_tool_rounds: 8, max_tool_rounds_hard_cap: 12 }) as any;
-    expect(a._maxToolRounds).toBe(8);
-    expect(a._maxToolRoundsHardCap).toBe(12);
+  it("honors config overrides for hard cap and no-progress rounds", () => {
+    const a = budgetAgent({ max_tool_rounds_hard_cap: 30, max_no_progress_rounds: 3 }) as any;
+    expect(a._maxToolRoundsHardCap).toBe(30);
+    expect(a._maxNoProgressRounds).toBe(3);
   });
 
-  it("max_tool_rounds: 0 means unlimited (very high ceiling, not 0)", () => {
-    const a = budgetAgent({ max_tool_rounds: 0 }) as any;
-    expect(a._maxToolRounds).toBeGreaterThanOrEqual(100000);
-    expect(a._maxToolRoundsHardCap).toBeGreaterThanOrEqual(100000);
+  it("max_tool_rounds_hard_cap: 0 means effectively unlimited", () => {
+    const a = budgetAgent({ max_tool_rounds_hard_cap: 0 }) as any;
+    expect(a._maxToolRoundsHardCap).toBeGreaterThanOrEqual(1000000);
   });
 
-  it("hard cap is never below the soft limit even if misconfigured", () => {
-    const a = budgetAgent({ max_tool_rounds: 80, max_tool_rounds_hard_cap: 10 }) as any;
-    expect(a._maxToolRoundsHardCap).toBeGreaterThanOrEqual(80);
-  });
+  it("a long PRODUCTIVE run is never cut off by a round count", async () => {
+    // 60 rounds that each make genuine progress (a DISTINCT successful tool
+    // call — not a repeated signature), then finish. With the old round caps
+    // (40) this died; progress-based stopping lets it run to completion.
+    let n = 0;
+    const turns: Turn[] = [
+      ...Array.from({ length: 60 }, (_v, i) => ({ toolCalls: [{ name: "step", args: { i } }] })),
+      { content: "done after 60 productive rounds" },
+    ];
+    const a = budgetAgent({}, turns, [{ name: "step", handler: async () => `progress ${++n}` }]);
+    const evs = await collect(a.chatStream("do a big task"), 5000);
+    const text = evs.filter((e) => e.type === "content").map((e) => e.text).join("");
+    expect(text).toContain("done after 60 productive rounds");
+    expect(evs.some((e) => e.type === "truncated")).toBe(false);
+  }, 20000);
+
+  it("stops on no-progress: distinct tool calls that all fail, never any text", async () => {
+    // Each round calls a DIFFERENT failing tool with no text. The LoopGuard's
+    // signature/stuck heuristics may not trip (calls differ), so the
+    // progress breaker is what must stop the spin. Distinct args avoid the
+    // signature-loop path; the tool always fails so no round makes progress.
+    const turns: Turn[] = Array.from({ length: 40 }, (_v, i) => ({ toolCalls: [{ name: "flaky", args: { i } }] }));
+    const a = budgetAgent({ max_no_progress_rounds: 5 }, turns, [
+      { name: "flaky", handler: async () => { throw new Error("nope"); } },
+    ]) as any;
+    const evs = await collect(a.chatStream("spin"), 500);
+    expect(evs.some((e) => e.type === "done")).toBe(true);
+    const text = evs.filter((e) => e.type === "content").map((e: any) => e.text).join("");
+    expect(text).toMatch(/stalled|stuck/); // stopped by a breaker, not 40 rounds
+  }, 15000);
 });
 
 describe("agent · interrupt (Ctrl-C)", () => {
