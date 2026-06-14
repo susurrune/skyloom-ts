@@ -120,7 +120,7 @@
 
 - [x] **P4.1 Session 恢复 + 持久化修复**：新增 CLI `/sessions`（编号列表、标记当前）、`/resume <序号|id>`、`/new`。**并修复了一个严重 bug**：`persistDb()`（唯一写盘的代码）**从未被调用** → sql.js 纯内存 → 会话/长期记忆/工作记忆**重启全丢**（"启动自动恢复最新会话"形同虚设）。改为所有写经 `dbRun` 触发**防抖落盘** + `close()` 同步保存。新增跨实例持久化回归测试。
 - [x] **P4.2 自动压缩（catalog 感知触发）**：`shouldAutoCompact()`/`contextUsage()` 不再硬编码 128K —— 改为按当前模型在 catalog 里的真实 `context` 窗口判断（留 20% 余量给回复）。修复了小窗口模型（deepseek-reasoner 64K、mixtral 32K）长聊时**先于压缩就溢出**的隐患；状态栏 % 与模型名也正确了。压缩本身（摘要 + 保留近 N 条 + 指令保真）已存在并已接线。后续：结构化 checkpoint + 溢出后重试（对标 opencode）。
-- [ ] **P4.3 上下文快照**：环境信息、日期、工作区、激活技能合成一份"系统上下文"，模型可见但与历史分离（轻量版 Context Epoch）。
+- [x] **P4.3 环境上下文快照**（对标 Claude Code `<env>` 块）：[`envcontext.ts`](../src/core/envcontext.ts) 的 `buildEnvBlock` 合成「运行环境」块(工作目录、平台、Node、git 仓库/分支、日期),`gitInfo` 用纯文件读取识别仓库与分支(兼容 worktree 的 `.git` 文件)。`BaseAgent.injectEnvironment` 在 init/reinitLanguage 把它注入系统提示,与对话历史分离。新增 [`tests/envcontext.test.ts`](../tests/envcontext.test.ts) 6 用例。
 
 ### Phase 5 — 工具与插件健壮性｜~1 天
 
