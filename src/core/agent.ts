@@ -90,8 +90,8 @@ export class BaseAgent {
   protected _skillTools: Map<string, string[]> = new Map();
   protected _skillConfigOverrides: Map<string, Record<string, any>> = new Map();
   protected _baseSystemPrompt: string = '';
-  protected _maxToolRounds: number = 20;
-  protected _maxToolRoundsHardCap: number = 40;
+  protected _maxToolRounds: number = 50;
+  protected _maxToolRoundsHardCap: number = 200;
   protected _userTurnsSinceExtract: number = 0;
   protected _pendingExtracts: Set<Promise<any>> = new Set();
   protected _pendingRequests: Map<string, { resolve: (value: string) => void; reject: (err: Error) => void }> = new Map();
@@ -131,7 +131,29 @@ export class BaseAgent {
       shortTermLimit: mc.shortTermLimit || mc.short_term_limit || 100,
       maxPersistedMessages: mc.maxPersistedMessages || mc.max_persisted_messages,
     }, this.name);
-    this._maxToolRounds = 20;
+
+    // Tool-round budget. The LoopGuard is the real safety net (it stops genuine
+    // loops — repeated signatures, all-failing calls, search storms — at any
+    // round count), so this cap exists only as a last-resort ceiling against
+    // pathological cases the guard misses. Defaults are generous so normal long
+    // tasks (big refactors across many files) never hit it; configurable via
+    // config.llm.max_tool_rounds / max_tool_rounds_hard_cap. Setting
+    // max_tool_rounds to 0 (or negative) means "unlimited" — a very high ceiling
+    // so a guard-less runaway still can't burn tokens forever.
+    const lc: any = (config as any).llm || {};
+    const soft = Number(lc.max_tool_rounds ?? lc.maxToolRounds);
+    const hard = Number(lc.max_tool_rounds_hard_cap ?? lc.maxToolRoundsHardCap);
+    const UNLIMITED = 100000;
+    if (Number.isFinite(soft) && soft <= 0) {
+      // Unlimited: rely entirely on the LoopGuard + Ctrl-C + context compaction.
+      this._maxToolRounds = UNLIMITED;
+      this._maxToolRoundsHardCap = UNLIMITED;
+    } else {
+      this._maxToolRounds = Number.isFinite(soft) && soft > 0 ? Math.floor(soft) : 50;
+      this._maxToolRoundsHardCap = Number.isFinite(hard) && hard > 0
+        ? Math.max(Math.floor(hard), this._maxToolRounds)
+        : Math.max(200, this._maxToolRounds);
+    }
   }
 
   // ── System prompt resolution ──
@@ -1112,7 +1134,10 @@ export class BaseAgent {
         this.memory.addMessage('assistant', synth);
         yield { type: 'content', text: synth };
       }
-      yield { type: 'truncated', reason: `max tool rounds (${this._maxToolRounds}) reached` };
+      yield {
+        type: 'truncated',
+        reason: `safety ceiling of ${this._maxToolRoundsHardCap} tool rounds reached — the task may be unfinished. Send "continue" to resume, or raise llm.max_tool_rounds in config (0 = unlimited).`,
+      };
       yield { type: 'done' };
     } catch (e: any) {
       if (!assistantStored) this.popLastUserMessage();
