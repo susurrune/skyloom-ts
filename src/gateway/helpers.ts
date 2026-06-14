@@ -5,6 +5,8 @@
  */
 
 import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * Resolve a secret/config value. Accepts a literal string, or an env-ref object
@@ -53,6 +55,64 @@ export async function getJson(
   const res = await axios.get(url, {
     headers: { Accept: 'application/json', ...(opts?.headers || {}) },
     timeout: opts?.timeoutMs ?? 15000,
+    validateStatus: (s) => s >= 200 && s < 300,
+  });
+  return res.data;
+}
+
+/** A loaded binary plus its filename, ready to upload. */
+export interface LoadedMedia {
+  data: Buffer;
+  filename: string;
+  contentType?: string;
+}
+
+/**
+ * Load media bytes from a local filesystem path or an http(s) URL. Local paths
+ * are read directly; remote URLs are fetched (capped at 30 MiB to avoid
+ * pulling something huge into memory). Throws if the source can't be loaded.
+ */
+export async function loadMedia(src: string): Promise<LoadedMedia> {
+  if (/^https?:\/\//i.test(src)) {
+    const res = await axios.get(src, {
+      responseType: 'arraybuffer',
+      timeout: 30000,
+      maxContentLength: 30 * 1024 * 1024,
+      validateStatus: (s) => s >= 200 && s < 300,
+    });
+    const urlName = path.basename(new URL(src).pathname) || 'file';
+    const ct = res.headers['content-type'];
+    return {
+      data: Buffer.from(res.data),
+      filename: urlName,
+      contentType: typeof ct === 'string' ? ct : undefined,
+    };
+  }
+  const data = fs.readFileSync(src); // throws ENOENT if missing — caller handles
+  return { data, filename: path.basename(src) };
+}
+
+/** Is this a sendable media source (http(s) URL or an existing local file)? */
+export function isSendableSrc(src: string): boolean {
+  if (/^https?:\/\//i.test(src)) return true;
+  try { return fs.existsSync(src) && fs.statSync(src).isFile(); } catch { return false; }
+}
+
+/** POST multipart/form-data (Node 18+ FormData/Blob), return parsed JSON. */
+export async function postMultipart(
+  url: string,
+  fields: Record<string, string | { data: Buffer; filename: string; contentType?: string }>,
+  opts?: { headers?: Record<string, string>; timeoutMs?: number },
+): Promise<any> {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(fields)) {
+    if (typeof v === 'string') form.append(k, v);
+    else form.append(k, new Blob([v.data], v.contentType ? { type: v.contentType } : undefined), v.filename);
+  }
+  const res = await axios.post(url, form, {
+    headers: { ...(opts?.headers || {}) },
+    timeout: opts?.timeoutMs ?? 30000,
+    maxBodyLength: Infinity,
     validateStatus: (s) => s >= 200 && s < 300,
   });
   return res.data;

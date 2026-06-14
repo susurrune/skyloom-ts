@@ -17,8 +17,8 @@
 
 import * as crypto from 'crypto';
 import { getLogger } from '../../core/logger';
-import { resolveSecret, postJson, getJson, TokenCache } from '../helpers';
-import type { ChannelAdapter, MediaAttachment, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
+import { resolveSecret, postJson, getJson, postMultipart, loadMedia, TokenCache } from '../helpers';
+import type { ChannelAdapter, MediaAttachment, OutboundMedia, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-wecom');
 
@@ -145,6 +145,34 @@ export function createWecomAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAda
       if (data.errcode !== 0) {
         if (data.errcode === 42001 || data.errcode === 40014) tokenCache.invalidate();
         throw new Error(`wecom send error ${data.errcode}: ${data.errmsg}`);
+      }
+    },
+
+    async sendMedia(target: ReplyTarget, item: OutboundMedia): Promise<void> {
+      const toUser = target.toUser as string;
+      if (!toUser || !agentId) return;
+      const loaded = await loadMedia(item.src);
+      const accessToken = await tokenCache.get();
+      const type = item.kind === 'image' ? 'image' : 'file';
+      // Upload to the temporary-media store (valid 3 days), then push by media_id.
+      const up = await postMultipart(
+        `https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token=${encodeURIComponent(accessToken)}&type=${type}`,
+        { media: { data: loaded.data, filename: loaded.filename || (type === 'image' ? 'image.png' : 'file'), contentType: loaded.contentType } },
+      );
+      if (up.errcode && up.errcode !== 0) {
+        if (up.errcode === 42001 || up.errcode === 40014) tokenCache.invalidate();
+        throw new Error(`wecom media upload ${up.errcode}: ${up.errmsg}`);
+      }
+      const mediaId = up.media_id;
+      const body: any = { touser: toUser, msgtype: type, agentid: Number(agentId) };
+      body[type] = { media_id: mediaId };
+      const send = await postJson(
+        `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`,
+        body,
+      );
+      if (send.errcode !== 0) {
+        if (send.errcode === 42001 || send.errcode === 40014) tokenCache.invalidate();
+        throw new Error(`wecom media send ${send.errcode}: ${send.errmsg}`);
       }
     },
   };
