@@ -38,6 +38,8 @@ program.command("mcp").action(() => { import("../core/mcp_server").then(m => m.s
 program.command("gateway").description("Run the channel gateway (Feishu / WeCom / QQ)")
   .option("-p,--port <p>", "port", "8848")
   .action((o: { port?: string }) => { import("../gateway/gateway").then(m => m.startGateway({ port: parseInt(o.port || "8848") })); });
+program.command("channels").description("Configure a chat channel (Feishu / WeCom / QQ) with QR shortcuts")
+  .action(async () => { await channelsWizard(); });
 program.command("config").action(() => { const c = loadConfig(); process.stdout.write(chalk.cyan("\nConfig: ") + USER_CONFIG_DIR + "\n"); for (const [n, a] of Object.entries(c.agents || {})) process.stdout.write(`  ${chalk.bold(n)}: ${(a as any).model || "default"}\n`); });
 program.command("init").action(() => { if (!fs.existsSync(USER_CONFIG_DIR)) fs.mkdirSync(USER_CONFIG_DIR, { recursive: true }); process.stdout.write(chalk.green("✓ ") + USER_CONFIG_DIR + "\n"); });
 program.command("apikey").description("Manage API keys (persisted to ~/.skyloom/config.yaml)")
@@ -275,6 +277,65 @@ async function setupWizard(): Promise<{ provider: string; key: string; model: st
   return { provider: prov.id, key: key.trim(), model };
 }
 
+/* ═══════════════════════════════════════
+   Channel setup wizard (sky channels)
+   ═══════════════════════════════════════ */
+async function channelsWizard(): Promise<void> {
+  const { CHANNEL_SETUP, SETUP_CHANNEL_IDS, callbackUrl, saveChannelConfig, missingRequired } = require("../gateway/setup");
+  const { renderQR } = require("../gateway/qr");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
+
+  try {
+    process.stdout.write("\n" + chalk.cyan("  ✦ 渠道接入向导 · sky channels ✦\n\n"));
+    process.stdout.write(chalk.dim("  选择要配置的聊天软件:\n\n"));
+    SETUP_CHANNEL_IDS.forEach((id: string, i: number) => {
+      process.stdout.write(chalk.dim(`  ${i + 1}. ${CHANNEL_SETUP[id].name}\n`));
+    });
+    const choice = await ask(chalk.cyan(`\n  编号 (1-${SETUP_CHANNEL_IDS.length}, q 退出): `));
+    if (choice.trim().toLowerCase() === "q") return;
+    const idx = parseInt(choice) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= SETUP_CHANNEL_IDS.length) { process.stdout.write(chalk.dim("  已取消\n")); return; }
+    const spec = CHANNEL_SETUP[SETUP_CHANNEL_IDS[idx]];
+
+    // Steps + QR to the platform console.
+    process.stdout.write("\n" + chalk.bold(`  配置 ${spec.name}\n\n`));
+    spec.steps.forEach((s: string, i: number) => process.stdout.write(chalk.dim(`  ${i + 1}. ${s}\n`)));
+    process.stdout.write(chalk.dim(`\n  📱 扫码打开管理后台:  `) + chalk.cyan(spec.consoleUrl) + "\n");
+    const consoleQR = renderQR(spec.consoleUrl);
+    if (consoleQR) process.stdout.write("\n" + consoleQR.split("\n").map((l: string) => "    " + l).join("\n") + "\n");
+    if (spec.docsUrl) process.stdout.write(chalk.dim(`  📖 文档: ${spec.docsUrl}\n`));
+
+    // Collect credential fields.
+    process.stdout.write("\n" + chalk.dim("  逐项填入凭据(回车跳过可选项):\n\n"));
+    const values: Record<string, string> = {};
+    for (const f of spec.fields) {
+      const req = f.required ? chalk.red("*") : chalk.dim("(可选)");
+      if (f.hint) process.stdout.write(chalk.dim(`    ↳ ${f.hint}\n`));
+      const v = await ask(chalk.cyan(`  ${f.label} ${req}: `));
+      if (v.trim()) values[f.key] = v.trim();
+    }
+    const missing = missingRequired(spec.id, values);
+    if (missing.length) {
+      process.stdout.write(chalk.yellow(`\n  ⚠ 缺少必填项: ${missing.join(", ")} — 已保存现有项,可再次运行补全。\n`));
+    }
+
+    const cfgPath = saveChannelConfig(spec.id, values);
+    process.stdout.write(chalk.green(`\n  ✓ 已保存到 ${cfgPath} 的 channels.${spec.id}\n`));
+
+    // Callback URL + QR to paste into the platform console.
+    const base = (await ask(chalk.cyan("\n  你的网关公网地址(如 https://bot.example.com,回车用 http://localhost:8848): "))).trim()
+      || "http://localhost:8848";
+    const cb = callbackUrl(base, spec.id);
+    process.stdout.write(chalk.dim("\n  把下面的回调 URL 填入平台后台的事件/接收配置:\n  ") + chalk.cyan(cb) + "\n");
+    const cbQR = renderQR(cb);
+    if (cbQR) process.stdout.write("\n" + cbQR.split("\n").map((l: string) => "    " + l).join("\n") + "\n");
+    process.stdout.write(chalk.dim(`\n  完成后运行  sky gateway  启动网关。\n\n`));
+  } finally {
+    rl.close();
+  }
+}
+
 async function chat(agentName: string, modelOverride?: string, classic?: boolean): Promise<void> {
   const haveKey = checkApiKeys();
   if (!haveKey) {
@@ -508,6 +569,7 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
     }
     if (cmdL.startsWith("/task ")) { const g = inp.slice(6); process.stdout.write(chalk.cyan("\n  ✦ " + g + "\n\n")); await runTask(g); continue; }
     if (cmdL === "/setup") { const r = await setupWizard(); if (r) process.stdout.write(chalk.green(`  ${r.provider} · ${r.model} — Ready!\n`)); continue; }
+    if (cmdL === "/channels") { await channelsWizard(); continue; }
     if (cmdL === "/model" || cmdL.startsWith("/model ")) {
       const { setAgentModel, setUnifiedModel, clearAgentModel, setAgentApiKey, describeAgentLLM } = require("../core/model_config");
       const cfg = (ctx as any).config;
