@@ -13,3 +13,6 @@ Thumbs.db
 *.log
 coverage/
 .claude/
+
+# stray test temp dirs (defensive — tests now use os.tmpdir)
+skill-test-*/

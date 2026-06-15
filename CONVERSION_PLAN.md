@@ -1,5 +1,10 @@
 # Skyloom Python → TypeScript 完整转换计划
 
+> **状态：迁移已完成（自 v1.25.0）。** 本文档现作为历史记录与转换规范留存。
+> 下方 Phase 1–8 的清单复选框反映的是迁移过程中的规划，**全部模块均已转换并
+> 落地**（97 个 TS 源文件 + 49 套件 530 用例，`tsc --noEmit` / 测试 / lint 全绿）。
+> 当前及后续的工程演进路线见 [`docs/OPTIMIZATION_PLAN.md`](docs/OPTIMIZATION_PLAN.md)。
+
 ## 已完成的核心模块（✅）
 
 ### 基础配置层

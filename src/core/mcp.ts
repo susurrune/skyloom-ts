@@ -9,6 +9,7 @@
 import { spawn, ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import axios from "axios";
 import type { Logger } from "./logger";
 
 const MCP_PROTOCOL_VERSION = "2025-03-26";
@@ -75,7 +76,9 @@ export class MCPClient {
 
   // SSE-specific state
   private sseResponse: any = null;
+  private sseAbort: AbortController | null = null;
   private sseMessageUrl: string = "";
+  private sseEndpointResolver: (() => void) | null = null;
 
   constructor(config: MCPServerConfig, log?: Logger | null) {
     this.config = config;
@@ -191,12 +194,169 @@ export class MCPClient {
 
   /**
    * Initialize SSE transport.
+   *
+   * Opens a persistent `text/event-stream` GET to the configured URL. The
+   * server first emits an `endpoint` event carrying the URL to POST JSON-RPC
+   * messages to; subsequent `message` events carry responses/notifications,
+   * which are correlated against `this.pending` by request id (same path the
+   * stdio loop uses). Once the endpoint is known we run the standard
+   * initialize → initialized → tools/list handshake.
    */
   private async initSSE(): Promise<MCPToolDef[]> {
-    // SSE implementation would connect via HTTP GET to /sse endpoint
-    // and receive endpoint information, then POST to message endpoint.
-    // For now, return empty array as placeholder.
-    return [];
+    const url = this.config.url;
+    if (!url) {
+      return [];
+    }
+
+    // Wait for the server to advertise its message endpoint before we can POST.
+    const endpointReady = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("SSE endpoint handshake timeout")),
+        10000
+      );
+      this.sseEndpointResolver = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+
+    try {
+      await this.openSSEStream(url);
+      await endpointReady;
+    } catch (e) {
+      this.log?.warn("mcp_sse_connect_failed", {
+        server: this.config.name,
+        error: String(e),
+      });
+      await this.close().catch(() => {});
+      return [];
+    }
+
+    try {
+      const initResp = await this.requestSSE("initialize", {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: CLIENT_INFO,
+      });
+      if (!initResp || initResp.error) {
+        return [];
+      }
+
+      // Fire-and-forget the initialized notification (no id → no response).
+      this.postJson({
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+        params: {},
+      }).catch(() => {});
+
+      const toolsResp = await this.requestSSE("tools/list", {});
+      if (toolsResp && toolsResp.result) {
+        this.serverTools = toolsResp.result.tools || [];
+      }
+      return this.serverTools;
+    } catch (err) {
+      this.log?.warn("mcp_sse_init_failed", {
+        server: this.config.name,
+        error: String(err),
+      });
+      await this.close().catch(() => {});
+      return [];
+    }
+  }
+
+  /**
+   * Open the SSE stream and dispatch parsed events. Resolves once the HTTP
+   * connection is established (not when it closes).
+   */
+  private async openSSEStream(url: string): Promise<void> {
+    const controller = new AbortController();
+    this.sseAbort = controller;
+
+    const resp = await axios.get(url, {
+      responseType: "stream",
+      signal: controller.signal,
+      headers: {
+        Accept: "text/event-stream",
+        ...(this.config.env || {}),
+      },
+      timeout: 0,
+    });
+    this.sseResponse = resp.data;
+
+    let buffer = "";
+    resp.data.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf-8");
+      // SSE events are separated by a blank line.
+      let sep: number;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const rawEvent = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        this.handleSSEEvent(rawEvent, url);
+      }
+    });
+
+    resp.data.on("end", () => this.failPendingSSE("MCP SSE stream closed"));
+    resp.data.on("error", (err: Error) =>
+      this.failPendingSSE(`MCP SSE stream error: ${err.message}`)
+    );
+  }
+
+  /**
+   * Parse one raw SSE event block (`event:`/`data:` lines) and dispatch it.
+   */
+  private handleSSEEvent(rawEvent: string, baseUrl: string): void {
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const line of rawEvent.split("\n")) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    const data = dataLines.join("\n");
+    if (!data) {
+      return;
+    }
+
+    if (eventName === "endpoint") {
+      // `data` is the (possibly relative) URL to POST messages to.
+      try {
+        this.sseMessageUrl = new URL(data, baseUrl).toString();
+      } catch {
+        this.sseMessageUrl = data;
+      }
+      this.sseEndpointResolver?.();
+      this.sseEndpointResolver = null;
+      return;
+    }
+
+    // event: message (or default) — a JSON-RPC response/notification.
+    const msg = this.parseJsonLine(data);
+    if (!msg) {
+      return;
+    }
+    const msgId = msg.id;
+    if (msgId === undefined || msgId === null) {
+      return;
+    }
+    const pending = this.pending.get(msgId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pending.resolve(msg);
+      this.pending.delete(msgId);
+    }
+  }
+
+  /**
+   * Reject every in-flight SSE request (stream closed or errored).
+   */
+  private failPendingSSE(reason: string): void {
+    for (const [id, { reject, timer }] of this.pending) {
+      clearTimeout(timer);
+      reject(new Error(reason));
+      this.pending.delete(id);
+    }
   }
 
   /**
@@ -431,15 +591,22 @@ export class MCPClient {
   }
 
   /**
-   * POST JSON data via HTTP (SSE).
+   * POST JSON-RPC data to the SSE message endpoint. The actual response
+   * arrives asynchronously over the event stream (see handleSSEEvent), so
+   * this only confirms the message was accepted by the server.
    */
-  private async postJson(_data: JsonRpcMessage): Promise<void> {
+  private async postJson(data: JsonRpcMessage): Promise<void> {
     if (!this.sseMessageUrl) {
       throw new Error("SSE message URL not set");
     }
 
-    // Placeholder: in real implementation would use fetch() to POST
-    // For now, just return empty promise
+    await axios.post(this.sseMessageUrl, data, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.config.env || {}),
+      },
+      timeout: 10000,
+    });
   }
 
   /**
@@ -542,8 +709,17 @@ export class MCPClient {
     }
 
     // Close SSE response if exists
+    if (this.sseAbort) {
+      try {
+        this.sseAbort.abort();
+      } catch {
+        // Ignore
+      }
+      this.sseAbort = null;
+    }
     if (this.sseResponse) {
       try {
+        this.sseResponse.destroy?.();
         await this.sseResponse.close?.();
       } catch {
         // Ignore
@@ -551,6 +727,7 @@ export class MCPClient {
       this.sseResponse = null;
     }
 
+    this.sseEndpointResolver = null;
     this.sseMessageUrl = "";
   }
 }

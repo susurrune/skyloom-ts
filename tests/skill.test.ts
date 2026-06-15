@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 
 describe('Skill', () => {
   it('creates a skill with model override', async () => {
@@ -42,7 +43,7 @@ describe('Skill', () => {
 describe('Skill.fromMarkdown', () => {
   it('loads skill with YAML frontmatter', async () => {
     const { Skill } = await import('../src/core/skill');
-    const tmpDir = fs.mkdtempSync('skill-test-');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-test-'));
     const mdPath = path.join(tmpDir, 'test.md');
     fs.writeFileSync(mdPath, `---
 name: test_skill
@@ -69,7 +70,7 @@ This is a test skill.
 
   it('supports string path', async () => {
     const { Skill } = await import('../src/core/skill');
-    const tmpDir = fs.mkdtempSync('skill-test-');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-test-'));
     const mdPath = path.join(tmpDir, 'x.md');
     fs.writeFileSync(mdPath, '---\nname: x\ndescription: x\n---\n\nBody.', 'utf-8');
     const s = Skill.fromMarkdown(mdPath);
@@ -83,7 +84,7 @@ This is a test skill.
 
   it('derives triggers from quoted descriptions', async () => {
     const { Skill } = await import('../src/core/skill');
-    const tmpDir = fs.mkdtempSync('skill-test-');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-test-'));
     const mdPath = path.join(tmpDir, 'pptx.md');
     fs.writeFileSync(mdPath, `---
 name: pptx
@@ -108,7 +109,7 @@ Body.`, 'utf-8');
 
   it('small body loaded in full', async () => {
     const { Skill } = await import('../src/core/skill');
-    const tmpDir = fs.mkdtempSync('skill-test-');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-test-'));
     const mdPath = path.join(tmpDir, 'small.md');
     fs.writeFileSync(mdPath, '---\nname: small\ndescription: x\n---\n\n# Small Skill\n\nThis fits inline easily.', 'utf-8');
     const s = Skill.fromMarkdown(mdPath);
@@ -122,7 +123,7 @@ Body.`, 'utf-8');
 
   it('large body truncated to head', async () => {
     const { Skill } = await import('../src/core/skill');
-    const tmpDir = fs.mkdtempSync('skill-test-');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-test-'));
     const mdPath = path.join(tmpDir, 'big.md');
 
     let body = '# Big Skill\n\n## Quick Reference\nFirst section content.\n\n';
