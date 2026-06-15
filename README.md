@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-3a7a6e.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-3a7a6e)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](https://www.typescriptlang.org)
-[![Tests](https://img.shields.io/badge/tests-240%20passed-2ecc71)](https://github.com/susurrune/skyloom-ts/tree/main/tests)
+[![Tests](https://img.shields.io/badge/tests-530%20passed-2ecc71)](https://github.com/susurrune/skyloom-ts/tree/main/tests)
 
 </div>
 
@@ -542,7 +542,7 @@ skyloom-ts/
 │   ├── providers.yaml        Provider 目录（base URL / env var）
 │   ├── models.yaml           模型目录（上下文窗口 / 成本）
 │   └── skills/               17 个内置技能 (SKILL.md)
-├── tests/                    24 套件 · 240 Vitest 用例
+├── tests/                    49 套件 · 530 Vitest 用例
 ├── docs/
 │   ├── AESTHETIC_DESIGN.md   美学设计系统
 │   └── OPTIMIZATION_PLAN.md  优化路线图
@@ -565,7 +565,7 @@ npm install
 
 npm run build         # tsc 编译
 npm run dev           # watch 模式
-npm test              # Vitest (24 套件 · 240 用例)
+npm test              # Vitest (49 套件 · 530 用例)
 npm run test:coverage # 覆盖率报告
 npm run type-check    # TypeScript 严格模式检查
 npm run lint          # ESLint
@@ -605,4 +605,4 @@ Skyloom 正朝「顶级开源 Agent 框架」演进，对标 [opencode](https://
 
 ## 许可证
 
-[MIT License](LICENSE) · **v1.14.7** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)
+[MIT License](LICENSE) · **v1.25.0** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)
