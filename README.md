@@ -605,4 +605,4 @@ Skyloom 正朝「顶级开源 Agent 框架」演进，对标 [opencode](https://
 
 ## 许可证
 
-[MIT License](LICENSE) · **v1.25.0** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)
+[MIT License](LICENSE) · **v1.26.0** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)
