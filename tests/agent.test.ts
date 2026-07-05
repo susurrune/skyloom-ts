@@ -85,13 +85,16 @@ describe("agent · chat loop (mock LLM)", () => {
   });
 
   it("clears the delegation timeout as soon as a response arrives", async () => {
-    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
     try {
       const bus = new MessageBus();
       const agent = makeAgent([], [], bus);
       await agent.init();
 
       const reply = agent.requestHelp("rain", "inspect this", 60);
+      const timeoutHandle = setTimeoutSpy.mock.results.at(-1)?.value;
+      expect(timeoutHandle).toBeDefined();
       await Promise.resolve();
       const request = bus.getHistory("fog").find((event) => event.type === EventType.AGENT_REQUEST);
       expect(request).toBeTruthy();
@@ -104,9 +107,10 @@ describe("agent · chat loop (mock LLM)", () => {
       ));
 
       await expect(reply).resolves.toBe("done");
-      expect(vi.getTimerCount()).toBe(0);
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(timeoutHandle);
     } finally {
-      vi.useRealTimers();
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
     }
   });
 
