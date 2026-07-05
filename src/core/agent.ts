@@ -24,6 +24,7 @@ import { selectRelevantTools } from './tool_router';
 import { getModelInfo } from './catalog';
 import { estimateTokens } from './estimate';
 import { LoopGuard } from './agent/guard';
+import { DelegationCoordinator } from './agent/delegation';
 import {
   ToolCallExecutor,
   type ToolCallExecutorOptions,
@@ -79,8 +80,7 @@ export class BaseAgent {
   protected _maxNoProgressRounds: number = 6;
   protected _userTurnsSinceExtract: number = 0;
   protected _pendingExtracts: Set<Promise<any>> = new Set();
-  protected _pendingRequests: Map<string, { resolve: (value: string) => void; reject: (err: Error) => void }> = new Map();
-  protected _bgTasks: Set<Promise<void>> = new Set();
+  private _delegationCoordinator: DelegationCoordinator | null = null;
   approvalCallback: ((toolName: string, args: Record<string, any>) => Promise<boolean>) | null = null;
   /** Plan mode: read-only tool set + plan-first instructions on each turn. */
   planMode: boolean = false;
@@ -638,14 +638,12 @@ export class BaseAgent {
   }
 
   async close(): Promise<void> {
-    // Drain ALL in-flight background work BEFORE closing memory — both fact
-    // extraction and background request handlers (delegate_to / agent requests).
-    // Missing _bgTasks meant a request handler could still be writing to memory
-    // as the DB closed, losing work or erroring on a closed database.
-    const pending = [...this._pendingExtracts, ...this._bgTasks];
+    // Drain all in-flight work before closing memory so background writes land.
+    const pending = [...this._pendingExtracts];
     if (pending.length > 0) {
       await Promise.allSettled(pending);
     }
+    await this._delegationCoordinator?.drain();
     await this.memory.close();
     this.bus.unsubscribe(this.name);
   }
@@ -675,12 +673,8 @@ export class BaseAgent {
         event.source,
         { task_id: task.id, success: result.success, content: result.content }
       ));
-    } else if (event.type === EventType.AGENT_REQUEST && event.target === this.name) {
-      const p = this.handleRequest(event);
-      this._bgTasks.add(p);
-      p.then(() => this._bgTasks.delete(p)).catch(() => this._bgTasks.delete(p));
-    } else if (event.type === EventType.AGENT_RESPONSE && event.target === this.name) {
-      this.handleResponse(event);
+    } else {
+      this.delegationCoordinator.handleEvent(event);
     }
   }
 
@@ -1509,65 +1503,18 @@ export class BaseAgent {
   }
 
   async requestHelp(targetAgent: string, description: string, timeout: number = 60): Promise<string> {
-    const correlationId = Math.random().toString(36).slice(2, 14);
-
-    const promise = new Promise<string>((resolve, reject) => {
-      this._pendingRequests.set(correlationId, { resolve, reject });
-    });
-
-    await this.bus.publish(new Event(
-      EventType.AGENT_REQUEST, this.name, targetAgent,
-      { correlation_id: correlationId, description, source: this.name }
-    ));
-
-    try {
-      const result = await Promise.race([
-        promise,
-        new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout after ${timeout}s`)), timeout * 1000)
-        ),
-      ]);
-      return result;
-    } catch {
-      this._pendingRequests.delete(correlationId);
-      return `[${targetAgent} did not respond within ${timeout}s]`;
-    }
+    return this.delegationCoordinator.requestHelp(targetAgent, description, timeout);
   }
 
-  protected async handleRequest(event: Event): Promise<void> {
-    const description = event.data?.description || '';
-    const correlationId = event.data?.correlation_id || '';
-    const source = event.data?.source || '';
-    if (!correlationId) return;
-
-    const task = new Task({
-      id: `req-${correlationId.slice(0, 8)}`,
-      description,
-      assignedTo: this.name,
-    });
-
-    try {
-      const result = await this.executeTask(task);
-      await this.bus.publish(new Event(
-        EventType.AGENT_RESPONSE, this.name, source,
-        { correlation_id: correlationId, content: result.content, success: result.success }
-      ));
-    } catch (e) {
-      await this.bus.publish(new Event(
-        EventType.AGENT_RESPONSE, this.name, source,
-        { correlation_id: correlationId, content: `[error] ${e}`, success: false }
-      ));
+  private get delegationCoordinator(): DelegationCoordinator {
+    if (!this._delegationCoordinator) {
+      this._delegationCoordinator = new DelegationCoordinator({
+        agentName: () => this.name,
+        bus: this.bus,
+        executeTask: (task) => this.executeTask(task),
+      });
     }
-  }
-
-  protected handleResponse(event: Event): void {
-    const correlationId = event.data?.correlation_id || '';
-    if (!correlationId) return;
-    const pending = this._pendingRequests.get(correlationId);
-    if (pending) {
-      this._pendingRequests.delete(correlationId);
-      pending.resolve(event.data?.content || '');
-    }
+    return this._delegationCoordinator;
   }
 
   getStatus(): Record<string, any> {

@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { FogAgent } from "../src/agents/fog";
 import { RainAgent } from "../src/agents/rain";
-import { MessageBus } from "../src/core/bus";
+import { Event, EventType, MessageBus } from "../src/core/bus";
 import { ToolRegistry } from "../src/core/tool";
 import { Skill, SkillRegistry } from "../src/core/skill";
+import { TaskResult } from "../src/core/agent/task";
 
 /**
  * Characterization tests for the agent chat/tool loop, driven by a scripted
@@ -81,6 +82,92 @@ describe("agent · chat loop (mock LLM)", () => {
     await Promise.all([agent.init(), agent.init(), agent.init()]);
 
     expect(subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the delegation timeout as soon as a response arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const bus = new MessageBus();
+      const agent = makeAgent([], [], bus);
+      await agent.init();
+
+      const reply = agent.requestHelp("rain", "inspect this", 60);
+      await Promise.resolve();
+      const request = bus.getHistory("fog").find((event) => event.type === EventType.AGENT_REQUEST);
+      expect(request).toBeTruthy();
+
+      await bus.publish(new Event(
+        EventType.AGENT_RESPONSE,
+        "rain",
+        "fog",
+        { correlation_id: request!.data.correlation_id, content: "done", success: true },
+      ));
+
+      await expect(reply).resolves.toBe("done");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles a delegation with a fallback when the target times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const agent = makeAgent([]);
+      const reply = agent.requestHelp("rain", "inspect this", 2);
+      let result: string | undefined;
+      void reply.then((value) => { result = value; });
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.resolve();
+
+      expect(result).toBe("[rain did not respond within 2s]");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for an inbound delegation to finish before closing", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const agent = makeAgent([]);
+    vi.spyOn(agent, "executeTask").mockImplementation(async () => {
+      await gate;
+      return new TaskResult(true, "delegated result");
+    });
+
+    await agent.handleEvent(new Event(
+      EventType.AGENT_REQUEST,
+      "rain",
+      "fog",
+      { correlation_id: "close-123", description: "finish first", source: "rain" },
+    ));
+
+    let closed = false;
+    const closing = agent.close().then(() => { closed = true; });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+
+    release();
+    await closing;
+    expect(closed).toBe(true);
+  });
+
+  it("routes a delegation response to the event source when payload source is absent", async () => {
+    const bus = new MessageBus();
+    const agent = makeAgent([], [], bus);
+    vi.spyOn(agent, "executeTask").mockResolvedValue(new TaskResult(true, "private result"));
+
+    await agent.handleEvent(new Event(
+      EventType.AGENT_REQUEST,
+      "rain",
+      "fog",
+      { correlation_id: "route-123", description: "inspect" },
+    ));
+    await agent.close();
+
+    const response = bus.getHistory().find((event) => event.type === EventType.AGENT_RESPONSE);
+    expect(response?.target).toBe("rain");
   });
 
   it("serializes overlapping streaming turns for the same agent", async () => {
