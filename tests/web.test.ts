@@ -1,7 +1,15 @@
 import { describe, it, expect, afterAll, vi } from "vitest";
+import type { Server } from "http";
 import { escapeHtml, highlightCode, mdInline, mdToHtml } from "../src/web/markdown";
 import { AGENT_THEMES } from "../src/core/theme";
 import { renderInkWashAppJS, renderInkWashCSS, renderInkWashUI, AGENTS_META } from "../src/web/ui";
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve) => {
+    server.close(() => resolve());
+    server.closeIdleConnections?.();
+  });
+}
 
 /* ════════ markdown renderer (isomorphic, injected into the page) ════════ */
 
@@ -302,7 +310,7 @@ describe("web · server", () => {
       expect(init).toHaveBeenCalledTimes(1);
       expect(createSession).toHaveBeenCalledTimes(1);
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeServer(server);
     }
   });
 
@@ -345,7 +353,7 @@ describe("web · server", () => {
         ],
       });
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeServer(server);
     }
   });
 
@@ -417,7 +425,7 @@ describe("web · server", () => {
       expect(deleteSession).toHaveBeenCalledWith("session-older");
       expect(createSession).toHaveBeenCalledTimes(1);
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeServer(server);
     }
   });
 
@@ -450,7 +458,7 @@ describe("web · server", () => {
       expect(response.status).toBe(409);
       expect(createSession).not.toHaveBeenCalled();
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeServer(server);
     }
   });
 });

@@ -22,7 +22,10 @@ async function listenPlainServer(): Promise<Server> {
 }
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeIdleConnections?.();
+  })));
 });
 
 describe("sky web command", () => {
