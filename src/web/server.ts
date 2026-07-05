@@ -17,14 +17,27 @@ import {
   renderInkWashUI,
   SKYLOOM_FAVICON_PNG,
 } from "./ui";
+import { applyWebSettings, buildWebSettings, WebSettingsError } from "./settings";
 
 const MAX_CHAT_BODY_BYTES = 1024 * 1024;
 type SystemContext = ReturnType<typeof createSystemContext>;
 
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.toLowerCase().split("%")[0];
+  return normalized === "::1" ||
+    normalized.startsWith("127.") ||
+    normalized.startsWith("::ffff:127.");
+}
+
 /* ──────────────────────────────────────────────
    Server
    ────────────────────────────────────────────── */
-export async function startWebServer(port: number = 7777, contextOverride?: SystemContext): Promise<Server> {
+export async function startWebServer(
+  port: number = 7777,
+  contextOverride?: SystemContext,
+  options: { configDir?: string } = {},
+): Promise<Server> {
   const ctx = contextOverride ?? createSystemContext();
 
   // Bind to loopback by default: the chat API drives the agent (and its tools)
@@ -77,7 +90,7 @@ export async function startWebServer(port: number = 7777, contextOverride?: Syst
     } else {
       res.setHeader("Access-Control-Allow-Origin", "*");
     }
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
@@ -96,6 +109,15 @@ export async function startWebServer(port: number = 7777, contextOverride?: Syst
       else if (url.pathname === "/api/history" && req.method === "GET") await handleHistory(url, res, ctx);
       else if (url.pathname === "/api/agents" && req.method === "GET") handleAgents(res, ctx);
       else if (url.pathname === "/api/status" && req.method === "GET") handleStatus(res, ctx);
+      else if (url.pathname === "/api/settings" && req.method === "GET") handleGetSettings(res, ctx);
+      else if (url.pathname === "/api/settings" && req.method === "PATCH") {
+        if (!isLoopbackAddress(req.socket.remoteAddress)) {
+          res.writeHead(403, { "Content-Type": "application/json" })
+            .end(JSON.stringify({ error: "Settings can only be changed from this machine" }));
+          return;
+        }
+        await handlePatchSettings(req, res, ctx, options.configDir);
+      }
       else if (url.pathname.startsWith("/api/")) res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Not found" }));
       else serveUI(res);
     } catch (e) { res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: String(e) })); }
@@ -299,6 +321,30 @@ function handleAgents(res: ServerResponse, ctx: SystemContext) {
 }
 function handleStatus(res: ServerResponse, ctx: SystemContext) {
   res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(buildRuntimeStatus(ctx)));
+}
+
+function handleGetSettings(res: ServerResponse, ctx: SystemContext): void {
+  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(buildWebSettings(ctx)));
+}
+
+async function handlePatchSettings(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: SystemContext,
+  configDir?: string,
+): Promise<void> {
+  const payload = await readJsonBody(req, res);
+  if (!payload) return;
+  try {
+    const settings = applyWebSettings(ctx, payload, { configDir });
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(settings));
+  } catch (error) {
+    if (error instanceof WebSettingsError) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: error.message }));
+      return;
+    }
+    throw error;
+  }
 }
 
 function serveUI(res: ServerResponse): void {

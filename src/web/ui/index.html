@@ -41,6 +41,7 @@
     <span id="strip-pig">松烟墨 · 探索洞察</span>
     <span id="strip-sp"></span>
     <div id="strip-actions" aria-label="会话操作">
+      <button class="strip-btn" id="settings-btn" type="button" title="工坊设置" aria-label="工坊设置" aria-haspopup="dialog" aria-expanded="false"><span class="ui-icon img2-icon icon-home" aria-hidden="true"></span></button>
       <button class="strip-btn history-btn" id="sessions-btn" type="button" title="聊天历史" aria-label="聊天历史" aria-haspopup="dialog" aria-expanded="false"><span class="ui-icon img2-icon icon-brand" aria-hidden="true"></span><span class="history-label">历史</span></button>
       <button class="strip-btn" id="retry-btn" type="button" title="重新发送上一条消息" aria-label="重试" disabled><span class="ui-icon img2-icon icon-retry" aria-hidden="true"></span></button>
       <button class="strip-btn" id="export-btn" type="button" title="导出会话为 Markdown" aria-label="导出"><span class="ui-icon img2-icon icon-download" aria-hidden="true"></span></button>
@@ -66,6 +67,54 @@
       <button id="sessions-close" type="button">关闭</button>
     </header>
     <div id="sessions-list" aria-live="polite"></div>
+  </section>
+</div>
+
+<div id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+  <section id="settings-sheet">
+    <header class="settings-head">
+      <div><span class="sheet-kicker">LOOM WORKSHOP</span><h2 id="settings-title">工坊设置</h2></div>
+      <button id="settings-close" type="button">关闭</button>
+    </header>
+    <form id="settings-form">
+      <div id="settings-loading" aria-live="polite">正在展开设置卷册…</div>
+      <div id="settings-content" hidden>
+        <section class="settings-section agent-settings" aria-labelledby="agent-settings-title">
+          <div class="settings-section-head">
+            <span id="settings-agent-icon" class="weather-doodle img2-icon icon-fog" aria-hidden="true"></span>
+            <div><span class="section-no">01 · AGENT</span><h3 id="agent-settings-title">当前灵</h3></div>
+            <span id="settings-agent-name"></span>
+          </div>
+          <label class="setting-row setting-wide"><span>模型</span><select id="setting-model"></select></label>
+          <label class="setting-row"><span>创造性 <output id="setting-temperature-value" for="setting-temperature"></output></span><input id="setting-temperature" type="range" min="0" max="2" step="0.05"></label>
+          <label class="setting-row"><span>回复上限</span><select id="setting-max-tokens"><option value="1024">1,024</option><option value="2048">2,048</option><option value="4096">4,096</option><option value="8192">8,192</option><option value="16384">16,384</option><option value="32768">32,768</option></select></label>
+          <label class="setting-toggle"><span><b>计划模式</b><small>只读调研与方案输出</small></span><input id="setting-plan-mode" type="checkbox"><i aria-hidden="true"></i></label>
+        </section>
+
+        <section class="settings-section" aria-labelledby="runtime-settings-title">
+          <div class="settings-section-head compact"><div><span class="section-no">02 · RUNTIME</span><h3 id="runtime-settings-title">运行织法</h3></div></div>
+          <div class="settings-grid">
+            <label class="setting-row"><span>回复语言</span><select id="setting-language"><option value="zh">中文</option><option value="en">English</option></select></label>
+            <label class="setting-row"><span>权限模式</span><select id="setting-approval"><option value="interactive">询问确认</option><option value="auto">自动判断</option><option value="acceptEdits">接受编辑</option><option value="strict">严格只读</option><option value="bypass">放行模式</option></select></label>
+            <label class="setting-row"><span>工具并发</span><input id="setting-concurrency" type="number" min="1" max="16" step="1"></label>
+            <label class="setting-row"><span>工具结果上限</span><select id="setting-result-limit"><option value="12000">12k</option><option value="24000">24k</option><option value="50000">50k</option><option value="100000">100k</option><option value="200000">200k</option></select></label>
+          </div>
+          <label class="setting-toggle runtime-toggle"><span><b>夜墨模式</b><small>界面主题</small></span><input id="setting-dark-mode" type="checkbox"><i aria-hidden="true"></i></label>
+        </section>
+
+        <section class="settings-section" aria-labelledby="credential-settings-title">
+          <div class="settings-section-head compact"><div><span class="section-no">03 · CREDENTIAL</span><h3 id="credential-settings-title">模型凭据</h3></div><span id="setting-key-state"></span></div>
+          <div class="credential-row">
+            <label class="setting-row"><span>Provider</span><select id="setting-key-provider"></select></label>
+            <label class="setting-row key-field"><span>新 API Key</span><input id="setting-api-key" type="password" autocomplete="new-password" placeholder="••••••••"></label>
+          </div>
+        </section>
+      </div>
+      <footer class="settings-foot">
+        <span id="settings-result" role="status" aria-live="polite"></span>
+        <button id="settings-save" type="submit" disabled><span class="ui-icon img2-icon icon-check" aria-hidden="true"></span><span>落印保存</span></button>
+      </footer>
+    </form>
   </section>
 </div>
 

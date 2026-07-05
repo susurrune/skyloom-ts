@@ -202,6 +202,7 @@ export function createSystemContext(): SystemContext {
         agentRegistry,
         agentSkills
       ) as BaseAgent;
+      agent.planMode = Boolean((config.agents as any)?.[name]?.plan_mode);
 
       // Register delegate_to tool
       try {

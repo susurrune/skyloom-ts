@@ -37,7 +37,7 @@ export function providerOfModel(modelId: string): string | null {
 }
 
 /** Read-mutate-write the raw user config file (narrow patch). */
-function patchUserConfig(mutate: (cfg: any) => void, dir: string = USER_CONFIG_DIR): void {
+export function patchUserConfig(mutate: (cfg: any) => void, dir: string = USER_CONFIG_DIR): void {
   const file = path.join(dir, 'config.yaml');
   let cfg: any = {};
   if (fs.existsSync(file)) {

@@ -95,7 +95,7 @@ describe("web · page", () => {
 
   it("ships the enterprise interaction surface", () => {
     // stop-generation, theme toggle, retry/export/new session, shortcuts, scroll pill, toasts
-    for (const marker of ["send-btn", "theme-btn", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
+    for (const marker of ["send-btn", "theme-btn", "settings-btn", "settings-panel", "setting-dark-mode", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
       expect(shipped, `missing: ${marker}`).toContain(marker);
     }
     // tool timeline + reasoning + markdown body classes exist in CSS
@@ -147,6 +147,8 @@ describe("web · page", () => {
     expect(script).toMatch(/Array\.isArray\(parsed\)/);
     expect(script).toContain("cancelAnimationFrame");
     expect(script).toContain("function openSessions");
+    expect(script).toContain("function openSettings");
+    expect(script).toContain("/api/settings");
     expect(script).toMatch(/fetch\(["']\/api\/sessions\?agent=/);
     expect(script).toMatch(/fetch\(["']\/api\/session\/load["']/);
     expect(script).toMatch(/method:\s*["']DELETE["']/);
@@ -247,6 +249,17 @@ describe("web · server", () => {
     });
     expect(sj.agents.summary.total).toBe(6);
     expect(sj.tools.registered).toBeGreaterThan(20);
+
+    const settings = await fetch(`http://127.0.0.1:${port}/api/settings`);
+    expect(settings.status).toBe(200);
+    const settingsJson: any = await settings.json();
+    expect(settingsJson.runtime).toMatchObject({
+      language: expect.any(String),
+      approvalMode: expect.any(String),
+      toolConcurrency: expect.any(Number),
+    });
+    expect(Array.isArray(settingsJson.agents)).toBe(true);
+    expect(JSON.stringify(settingsJson)).not.toMatch(/api[_-]?key/i);
 
     const bad = await fetch(`http://127.0.0.1:${port}/api/chat`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",

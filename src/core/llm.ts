@@ -510,7 +510,8 @@ export class LLMClient {
    * Get max retries from config.
    */
   private _getRetries(): number {
-    return (this.config.llm as any)?.maxRetries ?? 2;
+    const llm = (this.config.llm as any) || {};
+    return llm.max_retries ?? llm.maxRetries ?? 2;
   }
 
   /**
@@ -676,9 +677,11 @@ export class LLMClient {
     _stream: boolean = false,
     overrides?: Record<string, unknown>
   ): Promise<LLMResponse> {
-    const temperature = (overrides?.temperature as number) ?? 0.7;
-    const maxTokens = (overrides?.maxTokens as number) ?? 4096;
-    const maxRetries = (this.config.llm as any)?.maxRetries ?? 2;
+    const agentConfig = (agentName ? this.config.agents?.[agentName] : null) || {};
+    const llmConfig = this.config.llm || {};
+    const temperature = (overrides?.temperature as number) ?? agentConfig.temperature ?? llmConfig.temperature ?? 0.7;
+    const maxTokens = (overrides?.maxTokens as number) ?? agentConfig.max_tokens ?? llmConfig.max_tokens ?? 4096;
+    const maxRetries = llmConfig.max_retries ?? llmConfig.maxRetries ?? 2;
     const isAnthropic = model.includes("claude") || model.startsWith("anthropic/");
 
     let lastError: Error | null = null;
@@ -900,8 +903,10 @@ export class LLMClient {
     this.checkBudget();
     const ov = overrides || {};
     const model: string = typeof ov.model === "string" ? ov.model : this.getModel(agentName);
-    const temperature = (ov.temperature as number) ?? 0.7;
-    const maxTokens = (ov.maxTokens as number) ?? 4096;
+    const agentConfig = (agentName ? this.config.agents?.[agentName] : null) || {};
+    const llmConfig = this.config.llm || {};
+    const temperature = (ov.temperature as number) ?? agentConfig.temperature ?? llmConfig.temperature ?? 0.7;
+    const maxTokens = (ov.maxTokens as number) ?? agentConfig.max_tokens ?? llmConfig.max_tokens ?? 4096;
     const isAnthropic = model.includes("claude") || model.startsWith("anthropic/");
 
     // Blocking fallback used for Anthropic (different wire format) and on

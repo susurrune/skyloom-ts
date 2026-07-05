@@ -25,6 +25,8 @@ export function clientMain(): void {
   let unread = 0;
   let sessionsBusy = false;
   let panelActiveSessionId: string | null = null;
+  let settingsData: any = null;
+  let settingsBusy = false;
 
   /* ── platform-aware shortcuts ──
      Apple: ⌘1-6 / ⌘K. Elsewhere: Alt+1-6 (Ctrl+digit is reserved by browsers
@@ -181,6 +183,7 @@ export function clientMain(): void {
     updateRetryButton();
     $('#chat-input').focus();
     syncHistory(a);
+    if (settingsData && $('#settings-panel').classList.contains('show')) renderSettings(settingsData);
   }
 
   /* ── message rendering ── */
@@ -468,6 +471,153 @@ export function clientMain(): void {
     $('#sessions-btn').setAttribute('aria-expanded', 'false');
   }
 
+  /* ── workshop settings ── */
+  function closeSettings() {
+    const panel = $('#settings-panel');
+    if (!panel) return;
+    panel.classList.remove('show');
+    $('#settings-btn').setAttribute('aria-expanded', 'false');
+  }
+
+  function setSelectValue(select: any, value: string, label?: string) {
+    if (![...select.options].some((option: any) => option.value === value)) {
+      const option = el('option');
+      option.value = value;
+      option.textContent = label || value;
+      select.appendChild(option);
+    }
+    select.value = value;
+  }
+
+  function renderSettings(data: any) {
+    settingsData = data;
+    const agent = (data.agents || []).find((item: any) => item.name === cur.name);
+    if (!agent) throw new Error('agent settings unavailable');
+    $('#settings-loading').hidden = true;
+    $('#settings-content').hidden = false;
+    $('#settings-save').disabled = false;
+    $('#settings-agent-icon').className = 'weather-doodle img2-icon icon-' + cur.name;
+    $('#settings-agent-name').textContent = cur.label;
+
+    const modelSelect = $('#setting-model');
+    modelSelect.innerHTML = '';
+    const inherited = el('option');
+    inherited.value = '';
+    inherited.textContent = '跟随统一模型 · ' + agent.model;
+    modelSelect.appendChild(inherited);
+    const providerNames = new Map((data.providers || []).map((provider: any) => [provider.id, provider.name]));
+    const groups = new Map();
+    for (const model of data.models || []) {
+      if (!groups.has(model.provider)) {
+        const group = el('optgroup');
+        group.label = providerNames.get(model.provider) || model.provider;
+        groups.set(model.provider, group);
+        modelSelect.appendChild(group);
+      }
+      const option = el('option');
+      option.value = model.id;
+      option.textContent = model.id + (model.local ? ' · 本地' : '');
+      groups.get(model.provider).appendChild(option);
+    }
+    setSelectValue(modelSelect, agent.modelSource === 'agent' ? agent.model : '', agent.model);
+    $('#setting-temperature').value = String(agent.temperature);
+    $('#setting-temperature-value').textContent = Number(agent.temperature).toFixed(2);
+    setSelectValue($('#setting-max-tokens'), String(agent.maxTokens), String(agent.maxTokens));
+    $('#setting-plan-mode').checked = Boolean(agent.planMode);
+    $('#setting-language').value = data.runtime.language;
+    $('#setting-approval').value = data.runtime.approvalMode;
+    $('#setting-concurrency').value = String(data.runtime.toolConcurrency);
+    setSelectValue($('#setting-result-limit'), String(data.runtime.toolResultLimit), String(data.runtime.toolResultLimit));
+    $('#setting-dark-mode').checked = themeNow() === 'dark';
+
+    const providerSelect = $('#setting-key-provider');
+    const previousProvider = providerSelect.value || agent.provider || '';
+    providerSelect.innerHTML = '';
+    for (const provider of data.providers || []) {
+      const option = el('option');
+      option.value = provider.id;
+      option.textContent = provider.name + (provider.configured ? ' · 已配置' : '');
+      providerSelect.appendChild(option);
+    }
+    if ([...providerSelect.options].some((option: any) => option.value === previousProvider)) providerSelect.value = previousProvider;
+    updateKeyState();
+  }
+
+  function updateKeyState() {
+    if (!settingsData) return;
+    const provider = (settingsData.providers || []).find((item: any) => item.id === $('#setting-key-provider').value);
+    const state = $('#setting-key-state');
+    state.textContent = provider && provider.configured ? '已配置' : '待配置';
+    state.className = provider && provider.configured ? 'configured' : '';
+  }
+
+  async function openSettings() {
+    const panel = $('#settings-panel');
+    if (panel.classList.contains('show')) { closeSettings(); return; }
+    closeSessions();
+    $('#keys-modal').classList.remove('show');
+    $('#settings-sheet').scrollTop = 0;
+    panel.classList.add('show');
+    $('#settings-btn').setAttribute('aria-expanded', 'true');
+    $('#settings-loading').hidden = false;
+    $('#settings-loading').textContent = '正在展开设置卷册…';
+    $('#settings-content').hidden = true;
+    $('#settings-save').disabled = true;
+    $('#settings-result').textContent = '';
+    try {
+      const response = await fetch('/api/settings');
+      if (!response.ok) throw new Error('settings unavailable');
+      renderSettings(await response.json());
+      $('#settings-close').focus();
+    } catch {
+      $('#settings-loading').textContent = '设置卷册暂时无法读取';
+    }
+  }
+
+  async function saveSettings(e: any) {
+    e.preventDefault();
+    if (settingsBusy || streaming) {
+      toast(streaming ? '生成中，停止后再调整运行设置' : '设置正在保存');
+      return;
+    }
+    settingsBusy = true;
+    const button = $('#settings-save');
+    button.disabled = true;
+    $('#settings-result').textContent = '正在落印…';
+    const apiKey = $('#setting-api-key').value.trim();
+    const payload: any = {
+      agent: cur.name,
+      model: $('#setting-model').value || null,
+      temperature: Number($('#setting-temperature').value),
+      maxTokens: Number($('#setting-max-tokens').value),
+      planMode: Boolean($('#setting-plan-mode').checked),
+      language: $('#setting-language').value,
+      approvalMode: $('#setting-approval').value,
+      toolConcurrency: Number($('#setting-concurrency').value),
+      toolResultLimit: Number($('#setting-result-limit').value),
+    };
+    if (apiKey) payload.apiKey = { provider: $('#setting-key-provider').value, value: apiKey };
+    try {
+      const response = await fetch('/api/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data: any = await response.json();
+      if (!response.ok) throw new Error(data.error || 'save failed');
+      $('#setting-api-key').value = '';
+      renderSettings(data);
+      $('#settings-result').textContent = '已保存 · 下次对话生效';
+      toast('工坊设置已保存');
+    } catch (error: any) {
+      $('#settings-result').textContent = error && error.message ? error.message : '保存失败';
+      toast('设置保存失败', 'err');
+    } finally {
+      settingsBusy = false;
+      button.disabled = false;
+    }
+  }
+
   function sessionDate(raw: any): string {
     if (!raw) return '刚刚';
     const source = String(raw);
@@ -524,6 +674,7 @@ export function clientMain(): void {
   async function openSessions(refresh?: boolean) {
     const panel = $('#sessions-panel');
     if (panel.classList.contains('show') && !refresh) { closeSessions(); return; }
+    closeSettings();
     if (streaming || resetting || syncing || sessionsBusy) {
       toast(streaming ? '生成中，先停止再切换会话' : '正在同步会话，请稍候');
       return;
@@ -698,6 +849,19 @@ export function clientMain(): void {
     });
     $('#send-btn').addEventListener('click', () => (streaming ? stop() : send()));
     $('#theme-btn').addEventListener('click', () => setTheme(themeNow() === 'dark' ? 'light' : 'dark'));
+    $('#settings-btn').addEventListener('click', openSettings);
+    $('#settings-close').addEventListener('click', closeSettings);
+    $('#settings-panel').addEventListener('click', (e: any) => {
+      if (e.target.id === 'settings-panel') closeSettings();
+    });
+    $('#settings-form').addEventListener('submit', saveSettings);
+    $('#setting-temperature').addEventListener('input', () => {
+      $('#setting-temperature-value').textContent = Number($('#setting-temperature').value).toFixed(2);
+    });
+    $('#setting-key-provider').addEventListener('change', updateKeyState);
+    $('#setting-dark-mode').addEventListener('change', () => {
+      setTheme($('#setting-dark-mode').checked ? 'dark' : 'light');
+    });
     $('#retry-btn').addEventListener('click', retryLast);
     $('#sessions-btn').addEventListener('click', () => openSessions());
     $('#sessions-close').addEventListener('click', closeSessions);
@@ -742,6 +906,7 @@ export function clientMain(): void {
       if (e.key === 'Escape') {
         if (streaming) { stop(); return; }
         closeSessions();
+        closeSettings();
         $('#keys-modal').classList.remove('show');
         return;
       }

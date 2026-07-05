@@ -1497,7 +1497,7 @@ export class BaseAgent {
         return approved;
       }
     } catch { /* fall through */ }
-    const mode = (this.config as any).cli?.approvalMode || 'auto';
+    const mode = (this.config as any).cli?.approval_mode || (this.config as any).cli?.approvalMode || 'auto';
     if (mode === 'strict') return false;
     return true;
   }
