@@ -8,6 +8,9 @@ triggers:
   - "graphql"
   - "oauth"
   - "webhook"
+  - "接口"
+  - "接口集成"
+  - "鉴权"
 ---
 
 ## API integration specialist

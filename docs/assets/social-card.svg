@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#15171b"/>
+  <path d="M0 442 C168 342 308 380 454 318 C636 240 790 346 980 258 C1080 212 1156 214 1200 204 L1200 630 L0 630 Z" fill="#dcd8cd" opacity=".08"/>
+  <circle cx="948" cy="184" r="76" fill="#b3342d" opacity=".9"/>
+  <text x="170" y="214" font-family="Georgia,'Noto Serif SC',serif" font-size="78" font-weight="700" fill="#f8f4ec" letter-spacing="8">Skyloom</text>
+  <text x="174" y="302" font-family="Georgia,'Noto Serif SC',serif" font-size="44" fill="#dcd8cd" letter-spacing="8">水墨气象台</text>
+  <text x="176" y="378" font-family="Georgia,'Noto Serif SC',serif" font-size="26" fill="#b2ada1">Six weather-themed agents, woven on local-first memory.</text>
+  <g transform="translate(170 470)" font-family="Georgia,'Noto Serif SC',serif" font-size="28" text-anchor="middle" fill="#f8f4ec">
+    <text x="0" y="0" fill="#a8a294">霧</text><text x="72" y="0" fill="#6ea6dc">雨</text><text x="144" y="0" fill="#67c2af">霜</text><text x="216" y="0" fill="#b6b6aa">雪</text><text x="288" y="0" fill="#d2a83e">露</text><text x="360" y="0" fill="#e0635a">晴</text>
+  </g>
+</svg>

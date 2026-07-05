@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as crypto from "crypto";
+import { Readable } from "stream";
 import { resolveSecret, TokenCache } from "../src/gateway/helpers";
 import { describeMedia, parseReply } from "../src/gateway/types";
 import { isSendableSrc } from "../src/gateway/helpers";
@@ -9,6 +10,7 @@ import { decryptFeishu, createFeishuAdapter } from "../src/gateway/channels/feis
 import { wecomSignature, decryptWecom, createWecomAdapter } from "../src/gateway/channels/wecom";
 import { qqSeed, qqSignValidation, qqVerify, createQQAdapter } from "../src/gateway/channels/qq";
 import type { RawRequest } from "../src/gateway/types";
+import * as gatewayCore from "../src/gateway/gateway";
 
 function req(partial: Partial<RawRequest> & { body?: Buffer | string }): RawRequest {
   return {
@@ -208,6 +210,48 @@ describe("gateway · streaming dispatch", () => {
     const a = createFeishuAdapter({ appId: "a", appSecret: "s", renderMode: "raw" }, {})!;
     // sendStreaming exists but will fall back to a single send in raw mode.
     expect(typeof a.sendStreaming).toBe("function");
+  });
+
+  it("routes each channel conversation through its own named agent session", async () => {
+    async function* reply() { yield { type: "content", text: "ok" }; }
+    const chatStreamInNamedSession = vi.fn(() => reply());
+    const agent = {
+      init: vi.fn(async () => undefined),
+      chatStream: vi.fn(() => { throw new Error("shared session must not be used"); }),
+      chatStreamInNamedSession,
+    };
+    const send = vi.fn(async () => undefined);
+    const adapter: any = { id: "feishu", name: "Feishu", defaultAgent: "fair", send };
+    const ctx: any = {
+      config: { channels: {} },
+      agentMap: new Map([["fair", agent]]),
+    };
+    const msg: any = {
+      channel: "feishu",
+      conversationId: "chat-42",
+      userId: "user-1",
+      text: "hello",
+      replyTo: { chatId: "chat-42" },
+    };
+
+    await (gatewayCore as any).dispatch(ctx, adapter, msg);
+
+    expect(chatStreamInNamedSession).toHaveBeenCalledWith("gateway:feishu:chat-42", "hello");
+    expect(send).toHaveBeenCalled();
+  });
+
+  it("uses a valid default gateway port when the environment is unset or invalid", () => {
+    const resolveGatewayPort = (gatewayCore as any).resolveGatewayPort;
+    expect(resolveGatewayPort(undefined, {})).toBe(8848);
+    expect(resolveGatewayPort(undefined, { SKYLOOM_GATEWAY_PORT: "9001" })).toBe(9001);
+    expect(resolveGatewayPort(undefined, { SKYLOOM_GATEWAY_PORT: "not-a-port" })).toBe(8848);
+  });
+
+  it("rejects oversized webhook bodies before buffering them in memory", async () => {
+    const request = Readable.from([Buffer.alloc(6), Buffer.alloc(6)]);
+    await expect((gatewayCore as any).readBody(request, 10)).rejects.toMatchObject({
+      code: "PAYLOAD_TOO_LARGE",
+    });
   });
 });
 

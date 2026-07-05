@@ -155,6 +155,58 @@ describe("Memory · long-term (SQLite)", () => {
     await b.close();
   });
 
+  it("migrates the legacy shared empty-name database into Fog without losing history", async () => {
+    const cfg = tmpConfig();
+    const legacy = new Memory(cfg, "");
+    await legacy.initDb();
+    const sid = await legacy.createSession();
+    legacy.addMessage("user", "旧版共享会话");
+    await flush();
+    await legacy.close();
+
+    const fog = new Memory(cfg, "fog");
+    await fog.initDb();
+    try {
+      expect((await fog.listSessions()).some((session) => session.id === sid)).toBe(true);
+      expect(await fog.loadSession(sid)).toBe(true);
+      expect(fog.getMessages().some((message) => message.content === "旧版共享会话")).toBe(true);
+    } finally {
+      await fog.close();
+    }
+  });
+
+  it("uses the first user message as an unnamed session preview", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    try {
+      const sid = await mem.createSession();
+      mem.addMessage("user", "帮我排查登录接口偶发超时");
+      mem.addMessage("assistant", "我先检查请求链路");
+      await flush();
+
+      const session = (await mem.listSessions()).find((item) => item.id === sid);
+      expect(session?.preview).toBe("帮我排查登录接口偶发超时");
+    } finally {
+      await mem.close();
+    }
+  });
+
+  it("derives a preview for legacy sessions whose stored preview is blank", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    try {
+      const sid = await mem.createSession();
+      mem.addMessage("user", "这是旧数据库里已有的第一条问题");
+      await flush();
+      (mem as any).dbRun("UPDATE sessions SET preview = '' WHERE id = ?", [sid]);
+
+      const session = (await mem.listSessions()).find((item) => item.id === sid);
+      expect(session?.preview).toBe("这是旧数据库里已有的第一条问题");
+    } finally {
+      await mem.close();
+    }
+  });
+
   it("getMemoryStats returns a populated object", async () => {
     const mem = new Memory(tmpConfig(), "fog");
     await mem.initDb();

@@ -19,7 +19,7 @@ import { lookup } from 'dns/promises';
 import { execFileSync } from 'child_process';
 import type { ToolRegistry } from '../core/tool';
 import { getLogger } from '../core/logger';
-import { fenceCheck, assertFetchAllowed } from './guards';
+import { fenceCheck, readResponseText, safeFetch } from './guards';
 
 const log = getLogger('extra-tools');
 const MAX_OUT = 10000;
@@ -223,18 +223,17 @@ export function registerExtraTools(registry: ToolRegistry): void {
       { name: 'headers', type: 'object', description: 'Headers as a JSON object', required: false },
       { name: 'body', type: 'string', description: 'Request body', required: false },
     ],
-    handler: async (params) => {
+    handler: async (params, context) => {
       try {
-        await assertFetchAllowed(String(params.url || ''));
         const method = String(params.method || 'GET').toUpperCase();
         let headers: Record<string, string> | undefined;
         if (params.headers) {
           headers = typeof params.headers === 'string' ? JSON.parse(params.headers) : (params.headers as Record<string, string>);
         }
-        const init: Record<string, any> = { method, headers };
+        const init: Record<string, any> = { method, headers, signal: context?.signal };
         if (params.body != null && method !== 'GET' && method !== 'HEAD') init.body = String(params.body);
-        const res = await fetch(String(params.url), init);
-        const text = await res.text();
+        const res = await safeFetch(String(params.url), init);
+        const text = await readResponseText(res);
         return `Status: ${res.status} ${res.statusText}\n\n${clip(text)}`;
       } catch (e: any) { return `Error: ${e instanceof Error ? e.message : e}`; }
     },
@@ -242,23 +241,61 @@ export function registerExtraTools(registry: ToolRegistry): void {
 
   registry.register({
     name: 'download_file',
-    description: 'Download a URL to a local file path.',
+    description: 'Download a URL to a local file path using a bounded stream and atomic replacement.',
     parameters: [
       { name: 'url', type: 'string', description: 'URL to download', required: true },
       { name: 'path', type: 'string', description: 'Local destination path', required: true },
+      { name: 'max_bytes', type: 'number', description: 'Maximum download size in bytes (default 50 MiB)', required: false, default: 50 * 1024 * 1024 },
     ],
-    handler: async (params) => {
+    handler: async (params, context) => {
+      let temp = '';
+      let fd: number | null = null;
       try {
-        await assertFetchAllowed(String(params.url || ''));
         const dest = path.resolve(String(params.path || ''));
         const fenced = fenceCheck(dest); if (fenced) return fenced;
-        const res = await fetch(String(params.url));
+        const maxBytes = Math.max(1, Math.min(1024 * 1024 * 1024, Math.floor(Number(params.max_bytes) || 50 * 1024 * 1024)));
+        const res = await safeFetch(String(params.url), { signal: context?.signal }, { timeoutMs: 30000 });
         if (!res.ok) return `Error: HTTP ${res.status} ${res.statusText}`;
-        const buf = Buffer.from(await res.arrayBuffer());
+        const declaredSize = Number(res.headers.get('content-length'));
+        if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
+          await res.body?.cancel().catch(() => undefined);
+          return `Error: download exceeds ${maxBytes} byte limit`;
+        }
+
         fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.writeFileSync(dest, buf);
-        return `Downloaded ${buf.length} bytes → ${dest}`;
-      } catch (e: any) { return `Error: ${e instanceof Error ? e.message : e}`; }
+        temp = path.join(path.dirname(dest), `.${path.basename(dest)}.${crypto.randomUUID()}.part`);
+        fd = fs.openSync(temp, 'wx');
+        let total = 0;
+        if (res.body) {
+          const reader = res.body.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > maxBytes) {
+              await reader.cancel().catch(() => undefined);
+              throw new Error(`download exceeds ${maxBytes} byte limit`);
+            }
+            fs.writeSync(fd, value);
+          }
+        }
+        fs.closeSync(fd);
+        fd = null;
+        try {
+          fs.renameSync(temp, dest);
+        } catch (e: any) {
+          if (!['EEXIST', 'EPERM'].includes(e?.code) || !fs.existsSync(dest)) throw e;
+          fs.rmSync(dest, { force: true });
+          fs.renameSync(temp, dest);
+        }
+        temp = '';
+        return `Downloaded ${total} bytes → ${dest}`;
+      } catch (e: any) {
+        return `Error: ${e instanceof Error ? e.message : e}`;
+      } finally {
+        if (fd !== null) try { fs.closeSync(fd); } catch { /* already closed */ }
+        if (temp) try { fs.rmSync(temp, { force: true }); } catch { /* best effort */ }
+      }
     },
   });
 

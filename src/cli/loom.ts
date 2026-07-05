@@ -1088,7 +1088,8 @@ export class LoomUI {
           skipW += charWidth(glyphs[startIdx].codePointAt(0)!);
           startIdx++;
         }
-        let shown = "", shownW = 0, cursorCol = promptW + (beforeW - skipW);
+        let shown = "", shownW = 0;
+        const cursorCol = promptW + (beforeW - skipW);
         for (let i = startIdx; i < glyphs.length; i++) {
           const cw = charWidth(glyphs[i].codePointAt(0)!);
           if (shownW + cw > avail) break;

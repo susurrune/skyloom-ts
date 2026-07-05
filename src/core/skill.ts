@@ -197,7 +197,7 @@ interface SkillConfig {
  * Returns { fm, body } or null.
  */
 function parseFrontmatter(text: string): { fm: Record<string, any>; body: string } | null {
-  const match = text.match(/^---\s*\n(.*?)\n---\s*\n?(.*)/s);
+  const match = text.match(/^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?(.*)/s);
   if (!match) return null;
   try {
     const fm = parseYaml(match[1]) || {};

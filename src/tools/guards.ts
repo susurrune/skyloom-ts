@@ -6,7 +6,11 @@
 
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs';
 import { lookup } from 'dns/promises';
+
+type FetchInit = NonNullable<Parameters<typeof fetch>[1]>;
+type FetchResponse = Awaited<ReturnType<typeof fetch>>;
 
 /* ── SSRF guard for outbound fetches ──────────────────────────────────────
    Auto-approved/low-danger fetch tools must not be able to pivot to internal
@@ -60,6 +64,93 @@ export async function assertFetchAllowed(rawUrl: string): Promise<void> {
   }
 }
 
+/** Fetch with SSRF checks on the initial URL and every redirect target. */
+export async function safeFetch(
+  rawUrl: string,
+  init: FetchInit = {},
+  opts: { timeoutMs?: number; maxRedirects?: number } = {},
+): Promise<FetchResponse> {
+  const timeoutMs = opts.timeoutMs ?? 20000;
+  const maxRedirects = opts.maxRedirects ?? 5;
+  const controller = new AbortController();
+  const upstreamSignal = init.signal;
+  const abortFromUpstream = () => controller.abort(upstreamSignal?.reason);
+  if (upstreamSignal?.aborted) abortFromUpstream();
+  else upstreamSignal?.addEventListener('abort', abortFromUpstream, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error('request timeout')), timeoutMs);
+
+  let current = new URL(rawUrl);
+  let method = String(init.method || 'GET').toUpperCase();
+  let body = init.body;
+  const headers = new globalThis.Headers(init.headers);
+
+  try {
+    for (let redirects = 0; ; redirects++) {
+      await assertFetchAllowed(current.href);
+      const response = await fetch(current, {
+        ...init,
+        method,
+        body,
+        headers,
+        redirect: 'manual',
+        signal: controller.signal,
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+
+      const location = response.headers.get('location');
+      if (!location) return response;
+      if (redirects >= maxRedirects) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`too many redirects (>${maxRedirects})`);
+      }
+
+      const next = new URL(location, current);
+      if (next.origin !== current.origin) {
+        headers.delete('authorization');
+        headers.delete('cookie');
+        headers.delete('proxy-authorization');
+      }
+      if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === 'POST')) {
+        method = 'GET';
+        body = undefined;
+        headers.delete('content-length');
+        headers.delete('content-type');
+      }
+      await response.body?.cancel().catch(() => undefined);
+      current = next;
+    }
+  } finally {
+    clearTimeout(timer);
+    upstreamSignal?.removeEventListener('abort', abortFromUpstream);
+  }
+}
+
+/** Decode a response body without buffering an unbounded payload in memory. */
+export async function readResponseText(response: FetchResponse, maxBytes = 1024 * 1024): Promise<string> {
+  const declaredSize = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`response body exceeds ${maxBytes} byte limit`);
+  }
+  if (!response.body) return '';
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`response body exceeds ${maxBytes} byte limit`);
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 /* ── Optional workspace fence for file tools ──────────────────────────────
    Off by default (the agent is a Claude-Code-style assistant that legitimately
    works across a repo). Set SKYLOOM_WORKSPACE_FENCE=1 to confine file tools to
@@ -76,7 +167,22 @@ export function fenceRoot(): string | null {
 export function fenceCheck(resolvedPath: string): string | null {
   const root = fenceRoot();
   if (!root) return null;
-  const rel = path.relative(root, resolvedPath);
+  const canonicalize = (target: string): string => {
+    let existing = path.resolve(target);
+    const missing: string[] = [];
+    while (!fs.existsSync(existing)) {
+      const parent = path.dirname(existing);
+      if (parent === existing) break;
+      missing.unshift(path.basename(existing));
+      existing = parent;
+    }
+    let canonical = existing;
+    try { canonical = fs.realpathSync.native(existing); } catch { /* preserve resolved fallback */ }
+    return path.resolve(canonical, ...missing);
+  };
+  const canonicalRoot = canonicalize(root);
+  const canonicalTarget = canonicalize(resolvedPath);
+  const rel = path.relative(canonicalRoot, canonicalTarget);
   if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return null;
-  return `Error: 路径越界 — 工作区围栏已启用 (SKYLOOM_WORKSPACE_FENCE=1)，'${resolvedPath}' 在根目录 '${root}' 之外。`;
+  return `Error: 路径越界 — 工作区围栏已启用 (SKYLOOM_WORKSPACE_FENCE=1)，'${resolvedPath}' 的真实路径在根目录 '${root}' 之外。`;
 }

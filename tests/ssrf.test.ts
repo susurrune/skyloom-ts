@@ -1,5 +1,6 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { isPrivateIp, assertFetchAllowed } from "../src/tools/builtin";
+import { readResponseText, safeFetch } from "../src/tools/guards";
 
 describe("SSRF guard — isPrivateIp", () => {
   it("flags loopback, private, link-local and metadata addresses", () => {
@@ -34,5 +35,25 @@ describe("SSRF guard — assertFetchAllowed", () => {
   });
   it("rejects an invalid URL", async () => {
     await expect(assertFetchAllowed("not a url")).rejects.toThrow(/invalid URL/);
+  });
+
+  it("revalidates redirect targets before following them", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, {
+      status: 302,
+      headers: { location: "http://127.0.0.1/private" },
+    }));
+    globalThis.fetch = fetchMock as typeof fetch;
+    try {
+      await expect(safeFetch("https://public.invalid/start")).rejects.toThrow(/private|loopback/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("stops reading response text at the configured byte limit", async () => {
+    const response = new Response(new Uint8Array(12), { status: 200 });
+    await expect(readResponseText(response, 10)).rejects.toThrow(/exceeds|too large/i);
   });
 });

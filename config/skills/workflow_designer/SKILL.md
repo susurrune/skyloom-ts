@@ -6,6 +6,9 @@ triggers:
   - "pipeline"
   - "automate"
   - "orchestration"
+  - "工作流"
+  - "自动化流程"
+  - "编排"
 ---
 
 ## Workflow design

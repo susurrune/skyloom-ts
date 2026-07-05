@@ -8,6 +8,9 @@ triggers:
   - "xml"
   - "etl"
   - "parse"
+  - "数据转换"
+  - "数据清洗"
+  - "格式转换"
 ---
 
 ## Data transformation

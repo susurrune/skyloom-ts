@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -116,6 +116,24 @@ describe("extra tools — filesystem", () => {
       delete process.env.SKYLOOM_WORKSPACE_FENCE; delete process.env.SKYLOOM_WORKSPACE_ROOT;
     }
   });
+
+  it("blocks workspace-fence escapes through directory links", async () => {
+    const { call } = setup();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "sky-outside-"));
+    const linked = path.join(dir, "linked-outside");
+    fs.symlinkSync(outside, linked, process.platform === "win32" ? "junction" : "dir");
+    process.env.SKYLOOM_WORKSPACE_FENCE = "1";
+    process.env.SKYLOOM_WORKSPACE_ROOT = dir;
+    try {
+      const result = await call("append_file", { path: path.join(linked, "escaped.txt"), content: "nope" });
+      expect(result).toMatch(/路径越界/);
+      expect(fs.existsSync(path.join(outside, "escaped.txt"))).toBe(false);
+    } finally {
+      delete process.env.SKYLOOM_WORKSPACE_FENCE;
+      delete process.env.SKYLOOM_WORKSPACE_ROOT;
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("extra tools — batch 2", () => {
@@ -208,5 +226,26 @@ describe("extra tools — network guards", () => {
     const { call } = setup();
     expect(await call("http_request", { url: "http://169.254.169.254/" })).toMatch(/private|blocked/);
     expect(await call("download_file", { url: "file:///etc/passwd", path: "/tmp/x" })).toMatch(/scheme/);
+  });
+
+  it("limits streamed downloads and leaves no partial destination", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sky-download-"));
+    const destination = path.join(dir, "large.bin");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(new Uint8Array(12), { status: 200 })) as typeof fetch;
+    try {
+      const { call } = setup();
+      const result = await call("download_file", {
+        url: "https://public.invalid/large.bin",
+        path: destination,
+        max_bytes: 10,
+      });
+      expect(result).toMatch(/exceeds|too large/i);
+      expect(fs.existsSync(destination)).toBe(false);
+      expect(fs.readdirSync(dir)).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -768,7 +768,7 @@ export class LLMClient {
     const envVar = envMap.get(provider) || (provider.toUpperCase() + "_API_KEY");
 
     // 1. Check environment variable first
-    let key = process.env[envVar];
+    const key = process.env[envVar];
     if (key) return key;
 
     // 2. Check config file (~/.skyloom/config.yaml)

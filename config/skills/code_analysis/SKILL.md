@@ -6,6 +6,9 @@ triggers:
   - "code analysis"
   - "complexity"
   - "dead code"
+  - "代码分析"
+  - "调用链"
+  - "复杂度"
 ---
 
 ## Deep code analysis

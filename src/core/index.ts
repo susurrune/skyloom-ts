@@ -32,6 +32,7 @@ export * from './longdoc';
 export * from './filter';
 export * from './estimate';
 export * from './arbitrate';
+export * from './status';
 
 // Version — read from package.json
 export const VERSION = (() => { try { return require('../../package.json').version; } catch { return '1.6.0'; } })();

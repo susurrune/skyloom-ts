@@ -1,6 +1,7 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import { escapeHtml, highlightCode, mdInline, mdToHtml } from "../src/web/markdown";
-import { renderInkWashUI, AGENTS_META } from "../src/web/ui";
+import { AGENT_THEMES } from "../src/core/theme";
+import { renderInkWashAppJS, renderInkWashCSS, renderInkWashUI, AGENTS_META } from "../src/web/ui";
 
 /* ════════ markdown renderer (isomorphic, injected into the page) ════════ */
 
@@ -69,9 +70,11 @@ describe("web · markdown renderer", () => {
 
 describe("web · page", () => {
   const html = renderInkWashUI();
-  const script = (html.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || "";
+  const css = renderInkWashCSS();
+  const script = renderInkWashAppJS();
+  const shipped = html + css + script;
 
-  it("injected client script is valid standalone JS with no module artifacts", () => {
+  it("client script is valid standalone JS with no module artifacts", () => {
     expect(script.length).toBeGreaterThan(1000);
     expect(() => new Function(script)).not.toThrow();
     for (const bad of ["exports.", "require(", "Object.defineProperty(exports"]) {
@@ -83,23 +86,30 @@ describe("web · page", () => {
   });
 
   it("ships the enterprise interaction surface", () => {
-    // stop-generation, theme toggle, export/clear, shortcuts, scroll pill, toasts
-    for (const marker of ["send-btn", "theme-btn", "export-btn", "clear-btn", "keys-modal", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
-      expect(html, `missing: ${marker}`).toContain(marker);
+    // stop-generation, theme toggle, retry/export/new session, shortcuts, scroll pill, toasts
+    for (const marker of ["send-btn", "theme-btn", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
+      expect(shipped, `missing: ${marker}`).toContain(marker);
     }
     // tool timeline + reasoning + markdown body classes exist in CSS
     for (const cls of [".tool-row", ".think", ".codeblock", ".md-table", ".caret", ".welcome"]) {
-      expect(html, `missing css: ${cls}`).toContain(cls);
+      expect(css, `missing css: ${cls}`).toContain(cls);
     }
+    // static shell now references separated assets
+    expect(html).toContain('/ui/styles.css?v=');
+    expect(html).toContain('/ui/app.js?v=');
+    expect(html).toContain('icon-brand');
+    expect(html).toContain('icon-fog');
+    expect(html).toContain('icon-send');
+    expect(css).toContain("image2-icons.png");
+    expect(html).toContain('aria-live="polite"');
     // dark mode tokens
-    expect(html).toContain("[data-theme=dark]");
-    expect(html).toContain("prefers-reduced-motion");
+    expect(css).toContain("[data-theme=dark]");
+    expect(css).toContain("prefers-reduced-motion");
   });
 
   it("shortcut labels are OS-aware, not hardcoded to macOS", () => {
     // no ⌘ baked into the static HTML/hint — labels are filled at boot
-    const staticHtml = html.replace(/<script>[\s\S]*?<\/script>/, "");
-    expect(staticHtml).not.toContain("⌘");
+    expect(html).not.toContain("⌘");
     // the client detects Apple platforms and picks per-platform modifiers:
     // ⌘ on Apple; Alt+digit (Ctrl+digit is browser-reserved) and Ctrl+K elsewhere
     expect(script).toContain("isApple");
@@ -109,6 +119,30 @@ describe("web · page", () => {
     // physical-key matching so macOS Option+digit (¡™£…) still works
     expect(script).toContain("Digit[1-6]");
     expect(script).toContain("e.altKey");
+    expect(script).toContain("skyweb.agent");
+    expect(script).toContain("skyweb.draft.");
+    expect(script).toContain("skyweb.session.");
+    expect(script).toContain("function syncHistory");
+    expect(script).toMatch(/fetch\(["']\/api\/history\?agent=/);
+    expect(script).toContain("FIELD NOTE / 01");
+    expect(script).toContain("store.setItem(DKEY(cur.name), inp.value);");
+    expect(script).toContain("function retryLast");
+    expect(script).toMatch(/fetch\(["']\/api\/session["']/);
+    expect(html).toContain('id="sessions-btn"');
+    expect(html).toContain('aria-label="聊天历史"');
+    expect(html).toContain('<span class="history-label">历史</span>');
+    expect(html).toContain('id="sessions-panel"');
+    expect(script).toContain("LEGACY_HKEY");
+    expect(script).toMatch(/["']skyweb\.h\.["'] \+ a \+ ["']\.["']/);
+    expect(script).toContain("store.getItem(SKEY(a))");
+    expect(script).toContain("sessionId: store.getItem(SKEY(cur.name))");
+    expect(script).toMatch(/Array\.isArray\(parsed\)/);
+    expect(script).toContain("cancelAnimationFrame");
+    expect(script).toContain("function openSessions");
+    expect(script).toMatch(/fetch\(["']\/api\/sessions\?agent=/);
+    expect(script).toMatch(/fetch\(["']\/api\/session\/load["']/);
+    expect(script).toMatch(/method:\s*["']DELETE["']/);
+    expect(script).not.toContain("当前会话已是空的");
   });
 
   it("includes all six agents with light+dark pigments and suggestions", () => {
@@ -117,7 +151,19 @@ describe("web · page", () => {
       expect(a.light).toMatch(/^#[0-9a-f]{6}$/i);
       expect(a.dark).toMatch(/^#[0-9a-f]{6}$/i);
       expect(a.tips.length).toBeGreaterThanOrEqual(3);
-      expect(html).toContain(a.kanji);
+      expect(shipped).toContain(a.kanji);
+    }
+  });
+
+  it("derives web agent identity from the shared core theme", () => {
+    for (const a of AGENTS_META) {
+      const theme = AGENT_THEMES[a.name];
+      expect(theme).toBeTruthy();
+      expect(a.light).toBe(theme.hex);
+      expect(a.kanji).toBe(theme.kanji);
+      expect(a.pig).toBe(theme.pigment);
+      expect(a.sub).toBe(theme.specialty);
+      expect(a.poem).toBe(theme.poem);
     }
   });
 });
@@ -131,40 +177,85 @@ describe("web · server", () => {
   it("serves the UI and the JSON API; rejects bad requests", async () => {
     const { startWebServer } = await import("../src/web/server");
     const port = 3789 + Math.floor(Math.random() * 1000);
-    await startWebServer(port);
+    const server = await startWebServer(port);
+    close = () => server.close();
 
     const page = await fetch(`http://127.0.0.1:${port}/`);
     expect(page.status).toBe(200);
     const body = await page.text();
     expect(body).toContain("水墨气象台");
-    expect(body).toContain("clientMain()");
-    expect(body).toContain('href="/favicon.svg?v=');
-    expect(body).toContain('href="/favicon.ico?v=');
+    expect(body).toContain('/ui/styles.css?v=');
+    expect(body).toContain('/ui/app.js?v=');
+    expect(body).toContain('href="/ui/assets/image2-favicon.png?v=');
+    expect(body).toContain('id="side-dock"');
+    expect(body).toContain('class="side-btn theme-tool"');
+    expect(body).toContain('class="side-btn help-tool"');
 
-    const icon = await fetch(`http://127.0.0.1:${port}/favicon.svg?v=test`);
+    const styles = await fetch(`http://127.0.0.1:${port}/ui/styles.css?v=test`);
+    expect(styles.status).toBe(200);
+    expect(styles.headers.get("content-type")).toContain("text/css");
+    const stylesBody = await styles.text();
+    expect(stylesBody).toContain("#mountain-wash");
+    expect(stylesBody).toContain(".tool-row");
+
+    const app = await fetch(`http://127.0.0.1:${port}/ui/app.js?v=test`);
+    expect(app.status).toBe(200);
+    expect(app.headers.get("content-type")).toContain("application/javascript");
+    expect(await app.text()).toContain("function clientMain");
+
+    const atlas = await fetch(`http://127.0.0.1:${port}/ui/assets/image2-icons.png?v=test`);
+    expect(atlas.status).toBe(200);
+    expect(atlas.headers.get("content-type")).toContain("image/png");
+    expect((await atlas.arrayBuffer()).byteLength).toBeGreaterThan(1000);
+
+    const icon = await fetch(`http://127.0.0.1:${port}/ui/assets/image2-favicon.png?v=test`);
     expect(icon.status).toBe(200);
-    expect(icon.headers.get("content-type")).toContain("image/svg+xml");
-    expect(icon.headers.get("cache-control")).toContain("no-cache");
-    expect(await icon.text()).toContain("<svg");
+    expect(icon.headers.get("content-type")).toContain("image/png");
+    expect((await icon.arrayBuffer()).byteLength).toBeGreaterThan(1000);
 
     const legacyIcon = await fetch(`http://127.0.0.1:${port}/favicon.ico?v=test`, { redirect: "manual" });
     expect(legacyIcon.status).toBe(200);
-    expect(legacyIcon.headers.get("content-type")).toContain("image/svg+xml");
+    expect(legacyIcon.headers.get("content-type")).toContain("image/png");
 
     const agents = await fetch(`http://127.0.0.1:${port}/api/agents`);
     expect(agents.status).toBe(200);
     const aj: any = await agents.json();
-    // agent construction is environment-dependent (needs provider config);
-    // the contract here is the response shape, not the roster
     expect(Array.isArray(aj.agents)).toBe(true);
+    expect(aj.agents.map((agent: any) => agent.name).sort()).toEqual([
+      'dew', 'fair', 'fog', 'frost', 'rain', 'snow',
+    ]);
 
     const status = await fetch(`http://127.0.0.1:${port}/api/status`);
     expect(status.status).toBe(200);
+    const sj: any = await status.json();
+    expect(sj).toMatchObject({
+      version: expect.any(String),
+      workspace: expect.any(String),
+      runtime: { node: expect.any(String), uptimeSeconds: expect.any(Number) },
+      agents: { summary: { total: expect.any(Number), busy: expect.any(Number), idle: expect.any(Number) } },
+      tools: { registered: expect.any(Number), calls: expect.any(Number), failures: expect.any(Number) },
+      background: { total: expect.any(Number), running: expect.any(Number) },
+      mcp: { connected: expect.any(Number), servers: expect.any(Array) },
+    });
+    expect(sj.agents.summary.total).toBe(6);
+    expect(sj.tools.registered).toBeGreaterThan(20);
 
     const bad = await fetch(`http://127.0.0.1:${port}/api/chat`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
     });
     expect(bad.status).toBe(400);
+
+    const malformed = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{",
+    });
+    expect(malformed.status).toBe(400);
+
+    const evilOrigin = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://evil.example.com" },
+      body: JSON.stringify({ message: "hi" }),
+    });
+    expect(evilOrigin.status).toBe(403);
 
     // Host-header guard: a rebound/evil Host is refused on loopback binding.
     // (fetch/undici silently drops a Host override, so use raw http.)
@@ -178,4 +269,188 @@ describe("web · server", () => {
     });
     expect(evilStatus).toBe(403);
   }, 15000);
+
+  it("starts a genuinely new backend session for the selected agent", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = 4789 + Math.floor(Math.random() * 1000);
+    const createSession = vi.fn(async () => "session-new");
+    const init = vi.fn(async () => undefined);
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init,
+      memory: { createSession },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog" }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ sessionId: "session-new" });
+      expect(init).toHaveBeenCalledTimes(1);
+      expect(createSession).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("serves the active backend conversation without internal tool messages", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = 5289 + Math.floor(Math.random() * 1000);
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        getActiveSession: () => "session-active",
+        getMessages: () => [
+          { role: "system", content: "internal prompt" },
+          { role: "user", content: "请检查项目" },
+          { role: "assistant", content: "先读取", toolCalls: [{ id: "call-1" }] },
+          { role: "tool", content: "secret tool output" },
+          { role: "assistant", content: "检查完成" },
+        ],
+      },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/history?agent=fog`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        sessionId: "session-active",
+        messages: [
+          { role: "user", content: "请检查项目" },
+          { role: "assistant", content: "检查完成" },
+        ],
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("lists, restores, and deletes persisted web sessions", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = 5489 + Math.floor(Math.random() * 1000);
+    let activeSession = "session-current";
+    const loadSession = vi.fn(async (sessionId: string) => {
+      if (sessionId !== "session-older") return false;
+      activeSession = sessionId;
+      return true;
+    });
+    const deleteSession = vi.fn(async (sessionId: string) => {
+      if (sessionId !== activeSession) return false;
+      activeSession = null as any;
+      return true;
+    });
+    const createSession = vi.fn(async () => {
+      activeSession = "session-fresh";
+      return activeSession;
+    });
+    const sessions = [
+      { id: "session-current", preview: "当前问题", messageCount: 4, updatedAt: "2026-07-04 20:00:00" },
+      { id: "session-older", preview: "旧问题", messageCount: 2, updatedAt: "2026-07-03 20:00:00" },
+    ];
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        listSessions: vi.fn(async () => sessions),
+        getActiveSession: () => activeSession,
+        loadSession,
+        deleteSession,
+        createSession,
+      },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const listed = await fetch(`http://127.0.0.1:${port}/api/sessions?agent=fog`);
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toEqual({ activeSessionId: "session-current", sessions });
+
+      const loaded = await fetch(`http://127.0.0.1:${port}/api/session/load`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", sessionId: "session-older" }),
+      });
+      expect(loaded.status).toBe(200);
+      expect(await loaded.json()).toEqual({ sessionId: "session-older" });
+      expect(loadSession).toHaveBeenCalledWith("session-older");
+
+      const deleted = await fetch(`http://127.0.0.1:${port}/api/session`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", sessionId: "session-older" }),
+      });
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toEqual({ deleted: true, sessionId: "session-fresh" });
+      expect(deleteSession).toHaveBeenCalledWith("session-older");
+      expect(createSession).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("refuses to reset a session while the agent is busy", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = 5789 + Math.floor(Math.random() * 1000);
+    const createSession = vi.fn(async () => "should-not-run");
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "thinking",
+      init: vi.fn(async () => undefined),
+      memory: { createSession },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog" }),
+      });
+      expect(response.status).toBe(409);
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });

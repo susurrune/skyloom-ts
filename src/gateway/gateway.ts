@@ -23,11 +23,25 @@ import type { ChannelAdapter, InboundMessage, RawRequest } from './types';
 import type { LoadedMedia } from './helpers';
 
 const log = getLogger('gateway');
+const MAX_WEBHOOK_BODY_BYTES = 2 * 1024 * 1024;
 
 /** Collect the full request body. */
-async function readBody(req: IncomingMessage): Promise<Buffer> {
+export async function readBody(
+  req: IncomingMessage,
+  maxBytes = MAX_WEBHOOK_BODY_BYTES,
+): Promise<Buffer> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) {
+      const error = new Error('request body too large') as NodeJS.ErrnoException;
+      error.code = 'PAYLOAD_TOO_LARGE';
+      throw error;
+    }
+    chunks.push(buffer);
+  }
   return Buffer.concat(chunks);
 }
 
@@ -80,7 +94,7 @@ function resolveAgent(ctx: ReturnType<typeof createSystemContext>, adapter: Chan
 }
 
 /** Dispatch one inbound message to its agent and deliver the reply. */
-async function dispatch(
+export async function dispatch(
   ctx: ReturnType<typeof createSystemContext>,
   adapter: ChannelAdapter,
   msg: InboundMessage,
@@ -94,11 +108,12 @@ async function dispatch(
   // Streaming path: stream content chunks straight to the adapter (e.g. a Feishu
   // card patched as text arrives). Falls back to collect-then-send otherwise.
   const cfgStreaming = ((ctx.config as any).channels || {})[adapter.id]?.streaming !== false;
+  const sessionName = `gateway:${msg.channel}:${msg.conversationId}`;
   if (adapter.sendStreaming && cfgStreaming) {
     let full = '';
     async function* contentChunks(): AsyncGenerator<string> {
       try {
-        for await (const ev of agent.chatStream(prompt)) {
+        for await (const ev of agent.chatStreamInNamedSession(sessionName, prompt)) {
           if ((ev as any).type === 'content') { const t = (ev as any).text as string; full += t; yield t; }
         }
       } catch (e) {
@@ -114,7 +129,7 @@ async function dispatch(
 
   let text = '';
   try {
-    for await (const ev of agent.chatStream(prompt)) {
+    for await (const ev of agent.chatStreamInNamedSession(sessionName, prompt)) {
       if ((ev as any).type === 'content') text += (ev as any).text;
     }
   } catch (e) {
@@ -158,6 +173,14 @@ export interface GatewayOptions {
   host?: string;
 }
 
+export function resolveGatewayPort(
+  explicit?: number,
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  const candidate = explicit ?? Number(env.SKYLOOM_GATEWAY_PORT);
+  return Number.isInteger(candidate) && candidate > 0 && candidate <= 65535 ? candidate : 8848;
+}
+
 export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
   const ctx = createSystemContext();
   const adapters = buildAdapters((ctx.config as any).channels || {}, process.env);
@@ -177,7 +200,7 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
     }
   }
 
-  const port = opts.port ?? Number(process.env.SKYLOOM_GATEWAY_PORT) ?? 8848;
+  const port = resolveGatewayPort(opts.port);
   // Gateways receive inbound webhooks from the platform's servers, so unlike the
   // local web UI they must bind to a reachable interface by default.
   const host = opts.host || process.env.SKYLOOM_GATEWAY_HOST || '0.0.0.0';
@@ -221,7 +244,10 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
       }
     } catch (e) {
       log.warn('gateway_request_error', { error: String(e) });
-      if (!res.headersSent) res.writeHead(500).end('error');
+      if (!res.headersSent) {
+        const status = (e as NodeJS.ErrnoException)?.code === 'PAYLOAD_TOO_LARGE' ? 413 : 500;
+        res.writeHead(status).end(status === 413 ? 'request body too large' : 'error');
+      }
     }
   });
 

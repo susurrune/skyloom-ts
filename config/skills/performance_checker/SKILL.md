@@ -7,6 +7,9 @@ triggers:
   - "bottleneck"
   - "optimize"
   - "profile"
+  - "性能"
+  - "卡顿"
+  - "性能优化"
 ---
 
 ## Performance profiling

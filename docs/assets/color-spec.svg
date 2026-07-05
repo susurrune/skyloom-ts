@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 640">
+  <rect width="1120" height="640" fill="#f8f4ec"/>
+  <text x="80" y="92" font-family="Georgia,'Noto Serif SC',serif" font-size="44" font-weight="700" fill="#1a1614">Skyloom Pigments</text>
+  <text x="82" y="134" font-family="Georgia,'Noto Serif SC',serif" font-size="18" fill="#3d3833" letter-spacing="4">宣纸 · 矿物颜料 · 夜墨</text>
+  <g transform="translate(80 210)" font-family="Georgia,'Noto Serif SC',serif">
+    <g><rect width="132" height="132" rx="12" fill="#4a4a44"/><text x="66" y="74" text-anchor="middle" font-size="34" fill="#fff">霧</text><text x="0" y="170" font-size="18" fill="#1a1614">松烟墨</text><text x="0" y="198" font-size="14" fill="#8c8680">#4a4a44</text></g>
+    <g transform="translate(166 0)"><rect width="132" height="132" rx="12" fill="#2a5c8a"/><text x="66" y="74" text-anchor="middle" font-size="34" fill="#fff">雨</text><text x="0" y="170" font-size="18" fill="#1a1614">石青</text><text x="0" y="198" font-size="14" fill="#8c8680">#2a5c8a</text></g>
+    <g transform="translate(332 0)"><rect width="132" height="132" rx="12" fill="#3a7a6e"/><text x="66" y="74" text-anchor="middle" font-size="34" fill="#fff">霜</text><text x="0" y="170" font-size="18" fill="#1a1614">石绿</text><text x="0" y="198" font-size="14" fill="#8c8680">#3a7a6e</text></g>
+    <g transform="translate(498 0)"><rect width="132" height="132" rx="12" fill="#8a8a82"/><text x="66" y="74" text-anchor="middle" font-size="34" fill="#fff">雪</text><text x="0" y="170" font-size="18" fill="#1a1614">铅白</text><text x="0" y="198" font-size="14" fill="#8c8680">#8a8a82</text></g>
+    <g transform="translate(664 0)"><rect width="132" height="132" rx="12" fill="#8b6914"/><text x="66" y="74" text-anchor="middle" font-size="34" fill="#fff">露</text><text x="0" y="170" font-size="18" fill="#1a1614">赭石</text><text x="0" y="198" font-size="14" fill="#8c8680">#8b6914</text></g>
+    <g transform="translate(830 0)"><rect width="132" height="132" rx="12" fill="#b3342d"/><text x="66" y="74" text-anchor="middle" font-size="34" fill="#fff">晴</text><text x="0" y="170" font-size="18" fill="#1a1614">朱砂</text><text x="0" y="198" font-size="14" fill="#8c8680">#b3342d</text></g>
+  </g>
+  <g transform="translate(80 500)" font-family="Georgia,'Noto Serif SC',serif">
+    <rect width="150" height="58" rx="8" fill="#f8f4ec" stroke="#c4bfb8"/><text x="20" y="36" fill="#1a1614" font-size="16">宣纸 #f8f4ec</text>
+    <rect x="184" width="150" height="58" rx="8" fill="#1a1614"/><text x="204" y="36" fill="#f8f4ec" font-size="16">夜墨 #1a1614</text>
+    <rect x="368" width="150" height="58" rx="8" fill="#3d3833"/><text x="388" y="36" fill="#f8f4ec" font-size="16">墨中 #3d3833</text>
+  </g>
+</svg>

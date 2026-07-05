@@ -5,11 +5,19 @@
   "preferGlobal": true,
   "type": "commonjs",
   "main": "./dist/index.js",
+  "files": [
+    "dist/",
+    "config/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "bin": {
     "sky": "dist/cli/main.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-web-assets.js",
     "dev": "tsc --watch",
     "start": "node ./dist/cli/main.js",
     "chat": "node ./dist/cli/main.js chat",
@@ -17,6 +25,7 @@
     "web": "node ./dist/cli/main.js web",
     "test": "vitest",
     "test:coverage": "vitest --coverage",
+    "test:package": "node scripts/package-smoke.js",
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",

@@ -138,8 +138,8 @@
 
 - [x] **P7.1 设计 token 单一源**：新建 [`src/core/theme.ts`](../src/core/theme.ts)（`PALETTE` + `AGENT_THEMES`：矿物色/汉字/天气符号/诗句/动势）。CLI 已接入；TUI/Web 待接（Web 仍内联 PIGMENTS，P7.3 抽取时统一）。
 - [x] **P7.2 CLI 视觉升级（部分）**：欢迎横幅六灵各显矿物真彩 + 活动灵印章 `▣`；切灵时落朱印 + 诗句；流式正文矿物色、工具调用天气符号。"墨迹晕染"逐字过场待做。
-- [ ] **P7.3 Web 抽出静态资源**：`server.ts` 内联 HTML 拆为 `web/ui/`（html/css/js），加构建步骤，便于演进与缓存。
-- [ ] **P7.4 品牌资产**：SVG logo（印章风）、社交卡片、`docs/` 截图。
+- [x] **P7.3 Web 抽出静态资源**：`server.ts` 内联 HTML 拆为 `src/web/ui/`（`index.html`/`styles.css`/`app.ts`/`assets`），并由 `scripts/copy-web-assets.js` 随 `npm run build` 复制到 `dist`。
+- [x] **P7.4 品牌资产（首批）**：SVG logo（印章风）、favicon、README hero、社交卡片、配色规范图已落地；截图/录屏仍待真实浏览器环境补充。
 
 ---
 

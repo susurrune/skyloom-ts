@@ -11,7 +11,7 @@ import { LLMClient, type LLMResponse, type ToolCall } from './llm';
 import { getLogger } from './logger';
 import { Memory, Message } from './memory';
 import { Skill, SkillRegistry } from './skill';
-import { type ToolDefinition, ToolRegistry } from './tool';
+import { safeStableStringify, type ToolDefinition, ToolRegistry } from './tool';
 import {
   parseToolArgs,
   extractFilePathsFromMessages,
@@ -87,6 +87,8 @@ export class BaseAgent {
   protected _tools: ToolDefinition[] = [];
   protected _skills: Skill[] = [];
   protected _activeSkills: Set<string> = new Set();
+  /** Skills selected from the previous user message; replaced on the next turn. */
+  protected _autoActiveSkills: Set<string> = new Set();
   protected _skillTools: Map<string, string[]> = new Map();
   protected _skillConfigOverrides: Map<string, Record<string, any>> = new Map();
   protected _baseSystemPrompt: string = '';
@@ -109,6 +111,7 @@ export class BaseAgent {
   protected _turnLock: Promise<void> = Promise.resolve();
   private _turnLockCounter: number = 0;
   private _turnLockResolve: (() => void) | null = null;
+  private _initPromise: Promise<void> | null = null;
 
   // Time-tag cache (shared across all instances, 30s TTL)
   private static _timeTag: string | null = null;
@@ -119,7 +122,8 @@ export class BaseAgent {
     llm: LLMClient,
     bus: MessageBus,
     toolRegistry: ToolRegistry,
-    skillRegistry?: SkillRegistry | null
+    skillRegistry?: SkillRegistry | null,
+    runtimeName?: string,
   ) {
     this.config = config;
     this.llm = llm;
@@ -130,11 +134,16 @@ export class BaseAgent {
     // while Memory expects camelCase. Tolerate both so a preserved config block
     // doesn't break construction.
     const mc: any = (config as any).memory || {};
+    // Derived class fields are initialized only after super() returns, so
+    // `this.name` is still empty here. Resolve the identity before Memory is
+    // constructed or every agent silently shares the legacy `.db` file.
+    const memoryAgentName = runtimeName || this.constructor.name.replace(/Agent$/, '').toLowerCase();
+    this.name = memoryAgentName;
     this.memory = new Memory({
       dbPath: mc.dbPath || mc.db_path || '~/.skyloom',
       shortTermLimit: mc.shortTermLimit || mc.short_term_limit || 100,
       maxPersistedMessages: mc.maxPersistedMessages || mc.max_persisted_messages,
-    }, this.name);
+    }, memoryAgentName);
 
     // Stopping is PROGRESS-based, not round-count based (OpenClaw-style): a task
     // runs as long as it keeps making progress. The agent stops when it makes no
@@ -283,6 +292,16 @@ export class BaseAgent {
   }
 
   async init(): Promise<void> {
+    if (!this._initPromise) {
+      this._initPromise = this.initialize().catch((error) => {
+        this._initPromise = null;
+        throw error;
+      });
+    }
+    return this._initPromise;
+  }
+
+  private async initialize(): Promise<void> {
     await this.memory.initDb();
 
     // Always try to resume the last session (persistent memory across sky restarts)
@@ -399,7 +418,7 @@ export class BaseAgent {
     });
   }
 
-  activateSkill(name: string): boolean {
+  activateSkill(name: string, source: 'manual' | 'auto' = 'manual'): boolean {
     let skill = this._skills.find(s => s.name === name);
     if (!skill) {
       const globalSkill = this.skillRegistry.get(name);
@@ -410,7 +429,13 @@ export class BaseAgent {
     }
     if (!skill) return false;
 
+    if (this._activeSkills.has(name)) {
+      if (source === 'manual') this._autoActiveSkills.delete(name);
+      return true;
+    }
+
     this._activeSkills.add(name);
+    if (source === 'auto') this._autoActiveSkills.add(name);
     if (skill.handler) {
       const handlerTools = skill.handler(this, this.toolRegistry);
       if (handlerTools) {
@@ -433,6 +458,7 @@ export class BaseAgent {
   deactivateSkill(name: string): boolean {
     if (!this._activeSkills.has(name)) return false;
     this._activeSkills.delete(name);
+    this._autoActiveSkills.delete(name);
 
     const toolNames = this._skillTools.get(name);
     if (toolNames) {
@@ -453,7 +479,10 @@ export class BaseAgent {
   }
 
   protected autoActivateSkills(message: string): string[] {
+    for (const name of [...this._autoActiveSkills]) this.deactivateSkill(name);
+    this._autoActiveSkills.clear();
     if (!message) return [];
+
     const lowered = message.toLowerCase();
     const candidates = [...this._skills];
     for (const s of this.skillRegistry.getSkills()) {
@@ -462,20 +491,37 @@ export class BaseAgent {
       }
     }
 
-    const activated: string[] = [];
-    for (const skill of candidates) {
+    const preferred = new Map(this.skillNames.map((name, index) => [name, index]));
+    const matches: Array<{ skill: Skill; score: number; order: number }> = [];
+    for (let order = 0; order < candidates.length; order++) {
+      const skill = candidates[order];
       if (this._activeSkills.has(skill.name)) continue;
       if (!skill.triggers || !skill.triggers.length) continue;
       for (const trig of skill.triggers) {
-        if (trig && lowered.includes(trig.toLowerCase())) {
-          if (this.activateSkill(skill.name)) {
-            activated.push(skill.name);
-          }
+        if (this.skillTriggerMatches(lowered, trig)) {
+          const preferredIndex = preferred.get(skill.name);
+          const score = (preferredIndex === undefined ? 0 : 1000 - preferredIndex) + trig.length;
+          matches.push({ skill, score, order });
           break;
         }
       }
     }
+
+    matches.sort((a, b) => b.score - a.score || a.order - b.order);
+    const activated: string[] = [];
+    for (const { skill } of matches.slice(0, 2)) {
+      if (this.activateSkill(skill.name, 'auto')) activated.push(skill.name);
+    }
     return activated;
+  }
+
+  private skillTriggerMatches(message: string, rawTrigger: string): boolean {
+    const trigger = rawTrigger.trim().toLowerCase();
+    if (!trigger) return false;
+    if (!/^[a-z0-9][a-z0-9 ._+\/-]*$/i.test(trigger)) return message.includes(trigger);
+
+    const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'i').test(message);
   }
 
   protected runtimeIdentityBlock(): string {
@@ -565,11 +611,22 @@ export class BaseAgent {
     return merged;
   }
 
-  getAvailableSkills(): Array<{ name: string; description: string; active: boolean }> {
-    return this._skills.map(s => ({
+  getAvailableSkills(): Array<{ name: string; description: string; active: boolean; recommended: boolean }> {
+    const preferred = new Map(this.skillNames.map((name, index) => [name, index]));
+    return [...this._skills]
+      .sort((a, b) => {
+        const ai = preferred.get(a.name);
+        const bi = preferred.get(b.name);
+        if (ai !== undefined && bi !== undefined) return ai - bi;
+        if (ai !== undefined) return -1;
+        if (bi !== undefined) return 1;
+        return 0;
+      })
+      .map(s => ({
       name: s.name,
       description: s.description,
       active: this._activeSkills.has(s.name),
+      recommended: preferred.has(s.name),
     }));
   }
 
@@ -644,7 +701,12 @@ export class BaseAgent {
       // share the result. Safe because one round observes one world state.
       const td = p.tool as ToolDefinition | undefined;
       if (options?.dedupCacheable && p.toolArgs && td && (td.idempotent || td.cacheable) && !td.dangerous) {
-        const key = `${p.toolName}:${JSON.stringify(p.toolArgs, Object.keys(p.toolArgs).sort())}`;
+        const serialized = safeStableStringify(p.toolArgs);
+        if (serialized === undefined) {
+          execPlan.push({ idx: i, prep: p, isDuplicate: false });
+          continue;
+        }
+        const key = `${p.toolName}:${serialized}`;
         if (seenDedupKeys.has(key)) {
           execPlan.push({ idx: i, prep: p, isDuplicate: true });
           continue;
@@ -658,7 +720,8 @@ export class BaseAgent {
     // Unbounded Promise.all let one LLM round saturate sockets/FDs/CPU; the cap
     // bounds in-flight work. `signal` enables cooperative cancel: once the user
     // interrupts, queued (not-yet-started) tools short-circuit to [cancelled]
-    // instead of running — in-flight tools are left to settle.
+    // instead of running. In-flight tools receive the same signal so handlers
+    // that support cooperative cancellation can stop their own work promptly.
     const results = new Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null>(parsed.length).fill(null);
     const uniquePlan = execPlan.filter(e => !e.isDuplicate);
     const concurrency = resolveConcurrency((this.config as any)?.llm?.tool_concurrency);
@@ -714,7 +777,7 @@ export class BaseAgent {
         // Leaf span: tools run concurrently, so they must not nest under each other.
         const span = this.tracer.startSpan(p.toolName, 'tool', { args: argsPreview(p.toolArgs) }, { leaf: true });
         try {
-          const toolResult = await this.toolRegistry.execute(p.toolName, p.toolArgs || {});
+          const toolResult = await this.toolRegistry.execute(p.toolName, p.toolArgs || {}, { signal });
           const resultStr = toolResult.result || toolResult.error || '(no output)';
           if (toolResult.success && WRITE_TOOL_RE.test(p.toolName)) this._turnWroteFiles = true;
           if (hooks.postTool.length > 0) {
@@ -739,7 +802,9 @@ export class BaseAgent {
     // Fill in dedup results from originals
     for (const e of execPlan) {
       if (e.isDuplicate && e.prep.toolArgs) {
-        const dedupKey = `${e.prep.toolName}:${JSON.stringify(e.prep.toolArgs, Object.keys(e.prep.toolArgs).sort())}`;
+        const serialized = safeStableStringify(e.prep.toolArgs);
+        if (serialized === undefined) continue;
+        const dedupKey = `${e.prep.toolName}:${serialized}`;
         const originalIdx = seenDedupKeys.get(dedupKey);
         if (originalIdx !== undefined && results[originalIdx]) {
           results[e.idx] = { ...results[originalIdx]!, tc: e.prep.tc };
@@ -845,6 +910,7 @@ export class BaseAgent {
     message: string,
     onStatus?: ((status: string) => void) | null
   ): Promise<string> {
+    this.autoActivateSkills(message);
     await this.setState(AgentState.THINKING);
     this.memory.addMessage('user', message);
 
@@ -876,22 +942,57 @@ export class BaseAgent {
   }
 
   async *chatStream(message: string, signal?: AbortSignal): AsyncGenerator<Record<string, any>> {
-    const activatedNow = this.autoActivateSkills(message);
-    const self = this;
+    yield* this.chatStreamForSession(message, signal);
+  }
 
-    this.tracer.startTrace(message.replace(/\s+/g, ' ').slice(0, 80), this.name);
+  async *chatStreamInSession(
+    sessionId: string,
+    message: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<Record<string, any>> {
+    yield* this.chatStreamForSession(message, signal, async () => {
+      if (!await this.memory.loadSession(sessionId)) throw new Error('session not found');
+    });
+  }
+
+  async *chatStreamInNamedSession(
+    sessionName: string,
+    message: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<Record<string, any>> {
+    yield* this.chatStreamForSession(message, signal, async () => {
+      await this.memory.loadOrCreateNamedSession(sessionName);
+    });
+  }
+
+  private async *chatStreamForSession(
+    message: string,
+    signal?: AbortSignal,
+    selectSession?: () => Promise<void>
+  ): AsyncGenerator<Record<string, any>> {
+    const releaseTurn = await this.acquireTurnLock();
+    const self = this;
+    let turnStarted = false;
+
     try {
+      if (selectSession) await selectSession();
+      const activatedNow = this.autoActivateSkills(message);
+      this.tracer.startTrace(message.replace(/\s+/g, ' ').slice(0, 80), this.name);
+      turnStarted = true;
       for await (const ev of self.chatStreamImpl(message, activatedNow.length > 0 ? activatedNow : undefined, signal)) {
         yield ev;
       }
     } catch (err) {
-      const st = this.memory.shortTerm;
-      if (st.length > 0 && st[st.length - 1].role === 'user') {
-        this.popLastUserMessage();
+      if (turnStarted) {
+        const st = this.memory.shortTerm;
+        if (st.length > 0 && st[st.length - 1].role === 'user') {
+          this.popLastUserMessage();
+        }
       }
       throw err;
     } finally {
-      this.tracer.endTrace();
+      if (turnStarted) this.tracer.endTrace();
+      releaseTurn();
     }
   }
 
@@ -1677,7 +1778,7 @@ export class BaseAgent {
 
   // ── Turn lock ──
 
-  private async withTurnLock<T>(fn: () => Promise<T>): Promise<T> {
+  private async acquireTurnLock(): Promise<() => void> {
     while (this._turnLockCounter > 0) {
       await new Promise<void>(resolve => {
         const oldResolve = this._turnLockResolve;
@@ -1685,15 +1786,29 @@ export class BaseAgent {
       });
     }
     this._turnLockCounter++;
-    try {
-      return await fn();
-    } finally {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
       this._turnLockCounter--;
       if (this._turnLockResolve) {
         const r = this._turnLockResolve;
         this._turnLockResolve = null;
         r();
       }
+    };
+  }
+
+  getToolStats() {
+    return this.toolRegistry.getStats();
+  }
+
+  private async withTurnLock<T>(fn: () => Promise<T>): Promise<T> {
+    const release = await this.acquireTurnLock();
+    try {
+      return await fn();
+    } finally {
+      release();
     }
   }
 }

@@ -112,7 +112,7 @@ export function mdToHtml(src: string): string {
       const code = buf.join('\n');
       html += '<div class="codeblock"><div class="cb-head"><span class="cb-lang">' +
         escapeHtml(lang || 'text') +
-        '</span><button class="cb-copy" type="button">复制</button></div>' +
+        '</span><button class="cb-copy" type="button" title="复制代码" aria-label="复制代码"><span class="ui-icon img2-icon icon-copy" aria-hidden="true"></span></button></div>' +
         '<pre><code>' + highlightCode(code, lang) + '</code></pre></div>';
       continue;
     }

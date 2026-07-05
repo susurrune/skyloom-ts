@@ -11,8 +11,35 @@ import { LLMClient } from './llm';
 import { getLogger } from './logger';
 import { SkillRegistry } from './skill';
 import { ToolRegistry } from './tool';
+import { getBackgroundManager } from './bgproc';
+import { loadHooks, runSessionStartHooks } from './hooks';
+import { resolveWorkspacePath, initWorkspace } from './workspace';
+import { MCPManager, loadPersistedServers, loadProjectMcpJson } from './mcp';
+import { matchPipeline, buildTasksFromPipeline } from './pipelines';
+import { registerBuiltinTools } from '../tools/builtin';
+import { registerAllSkills } from '../skills/loader';
+import { PluginLoader } from '../plugins/loader';
+import { createDelegateTool } from '../tools/delegate';
+import { createSpawnAgentTool } from '../tools/spawn';
+import { createModelTools } from '../tools/model_tool';
+import { createTodoTool } from '../tools/todo';
+import { FogAgent } from '../agents/fog';
+import { RainAgent } from '../agents/rain';
+import { FrostAgent } from '../agents/frost';
+import { SnowAgent } from '../agents/snow';
+import { DewAgent } from '../agents/dew';
+import { FairAgent } from '../agents/fair';
 
 const log = getLogger('factory');
+
+const AGENT_CLASSES: Record<string, new (...args: any[]) => BaseAgent> = {
+  fog: FogAgent,
+  rain: RainAgent,
+  frost: FrostAgent,
+  snow: SnowAgent,
+  dew: DewAgent,
+  fair: FairAgent,
+};
 
 export class SystemContext {
   config: ReturnType<typeof loadConfig>;
@@ -70,10 +97,7 @@ export class SystemContext {
 
   async closeAll(): Promise<void> {
     // Terminate any background shell jobs started this session.
-    try {
-      const { getBackgroundManager } = require('./bgproc');
-      getBackgroundManager().killAll();
-    } catch { /* best-effort */ }
+    getBackgroundManager().killAll();
     for (const agent of this.agentMap.values()) {
       await agent.close();
     }
@@ -91,14 +115,12 @@ export function createSystemContext(): SystemContext {
 
   // session_start hooks — user-configured shell commands (see core/hooks)
   try {
-    const { loadHooks, runSessionStartHooks } = require('./hooks');
     const hooks = loadHooks(config);
     if (hooks.sessionStart.length > 0) runSessionStartHooks(hooks);
   } catch { /* hooks must never block startup */ }
 
   let workspacePath = '';
   try {
-    const { resolveWorkspacePath, initWorkspace } = require('./workspace');
     const wsRoot = resolveWorkspacePath((config as any).workspace?.path || 'auto');
     initWorkspace(wsRoot);
     workspacePath = wsRoot;
@@ -113,7 +135,6 @@ export function createSystemContext(): SystemContext {
 
   // Register builtin tools
   try {
-    const { registerBuiltinTools } = require('../tools/builtin');
     registerBuiltinTools(baseToolRegistry);
   } catch (e) {
     log.warn('builtin_tools_not_available', { error: String(e) });
@@ -121,16 +142,14 @@ export function createSystemContext(): SystemContext {
 
   // Register all skills
   try {
-    const { registerAllSkills } = require('../skills/loader');
     registerAllSkills(baseSkillRegistry);
   } catch (e) {
     log.warn('skills_not_available', { error: String(e) });
   }
 
   // Load plugins (ordered hook lifecycle — see plugins/loader)
-  let pluginLoader: any = null;
+  let pluginLoader: PluginLoader | null = null;
   try {
-    const { PluginLoader } = require('../plugins/loader');
     pluginLoader = new PluginLoader(baseToolRegistry, config);
     const pluginConfig = (config as any).plugins;
     const pluginDirs = pluginConfig?.enabled ? (pluginConfig.directories || []) : [];
@@ -140,9 +159,8 @@ export function createSystemContext(): SystemContext {
   }
 
   // Configure MCP manager
-  let mcpManager: any = null;
+  let mcpManager: MCPManager | null = null;
   try {
-    const { MCPManager, loadPersistedServers, loadProjectMcpJson } = require('./mcp');
     mcpManager = new MCPManager(baseToolRegistry);
     const persisted = loadPersistedServers();
     const mcpServers = (config as any).mcp?.servers || [];
@@ -166,8 +184,7 @@ export function createSystemContext(): SystemContext {
   // Per-agent registries
   const agents = new Map<string, BaseAgent>();
 
-  // Try to dynamically load agent classes
-  const agentNames = ['fog', 'rain', 'frost', 'snow', 'dew', 'fair'];
+  const agentNames = Object.keys(AGENT_CLASSES);
 
   for (const name of agentNames) {
     const agentRegistry = new ToolRegistry();
@@ -176,22 +193,7 @@ export function createSystemContext(): SystemContext {
     agentSkills.merge(baseSkillRegistry);
 
     try {
-      // Try dynamic import
-      const clsName = name.charAt(0).toUpperCase() + name.slice(1) + 'Agent';
-      // Use require for now since dynamic imports are async
-      let AgentClass: any = null;
-      try {
-        const mod = require(`../agents/${name}`);
-        AgentClass = mod[clsName];
-      } catch {
-        log.warn('agent_class_missing', { agent: name });
-        continue;
-      }
-
-      if (!AgentClass) {
-        log.warn('agent_class_not_found', { agent: name, class: clsName });
-        continue;
-      }
+      const AgentClass = AGENT_CLASSES[name];
 
       const agent = new AgentClass(
         config,
@@ -203,7 +205,6 @@ export function createSystemContext(): SystemContext {
 
       // Register delegate_to tool
       try {
-        const { createDelegateTool } = require('../tools/delegate');
         agentRegistry.register(createDelegateTool(agents, agent));
       } catch (e) {
         log.warn('delegate_tool_not_available', { agent: name, error: String(e) });
@@ -211,7 +212,6 @@ export function createSystemContext(): SystemContext {
 
       // Register the spawn_agent tool — isolated-context subagents (Task tool).
       try {
-        const { createSpawnAgentTool } = require('../tools/spawn');
         agentRegistry.register(createSpawnAgentTool({
           config,
           llm,
@@ -225,7 +225,6 @@ export function createSystemContext(): SystemContext {
 
       // Register model self-service tools (list_models / set_my_model)
       try {
-        const { createModelTools } = require('../tools/model_tool');
         for (const t of createModelTools(name, config)) agentRegistry.register(t);
       } catch (e) {
         log.warn('model_tools_not_available', { agent: name, error: String(e) });
@@ -233,7 +232,6 @@ export function createSystemContext(): SystemContext {
 
       // Register the task-checklist tool (todo_write)
       try {
-        const { createTodoTool } = require('../tools/todo');
         agentRegistry.register(createTodoTool(agent));
       } catch (e) {
         log.warn('todo_tool_not_available', { agent: name, error: String(e) });
@@ -567,7 +565,6 @@ export async function orchestrateTask(
   // Try pipeline match first
   let tasks: any[];
   try {
-    const { matchPipeline, buildTasksFromPipeline } = require('./pipelines');
     const matched = matchPipeline(goal);
     if (matched) {
       tasks = buildTasksFromPipeline(matched, goal);

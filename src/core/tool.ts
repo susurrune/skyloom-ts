@@ -23,7 +23,19 @@ export interface ToolParameter {
 /**
  * Tool handler function
  */
-export type ToolHandler = (params: Record<string, unknown>) => Promise<string>;
+export interface ToolExecutionContext {
+  signal: AbortSignal;
+  attempt: number;
+}
+
+export interface ToolExecuteOptions {
+  signal?: AbortSignal;
+}
+
+export type ToolHandler = (
+  params: Record<string, unknown>,
+  context: ToolExecutionContext,
+) => Promise<string>;
 
 /**
  * Tool definition
@@ -65,6 +77,15 @@ export function stableStringify(value: unknown): string {
   );
 }
 
+/** Cache/dedup keys are an optimization and must never break execution. */
+export function safeStableStringify(value: unknown): string | undefined {
+  try {
+    return stableStringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Tool execution result
  */
@@ -80,6 +101,15 @@ const CACHE_MAXSIZE = 128;
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 0.5; // seconds
+const MAX_RETRIES = 10;
+const MAX_TIMEOUT = 10 * 60 * 1000;
+const MAX_RETRY_DELAY = 60;
+
+function boundedNumber(value: unknown, fallback: number, min: number, max: number, integer = false): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min) return fallback;
+  const bounded = Math.min(max, value);
+  return integer ? Math.floor(bounded) : bounded;
+}
 
 /**
  * Tool result cache
@@ -92,7 +122,7 @@ class ToolResultStore {
     if (!bucket) return undefined;
 
     const value = bucket.get(key);
-    if (value) {
+    if (value !== undefined) {
       // Move to end (LRU)
       bucket.delete(key);
       bucket.set(key, value);
@@ -125,8 +155,6 @@ class ToolResultStore {
   }
 }
 
-const resultStore = new ToolResultStore();
-
 /**
  * Type coercion for tool parameters
  */
@@ -140,7 +168,7 @@ function coerceValue(value: unknown, targetType: string): [boolean, unknown] {
     return [true, value];
   }
   if (targetType === "number" && typeof value === "number") {
-    return [true, value];
+    return Number.isFinite(value) ? [true, value] : [false, value];
   }
   if (targetType === "boolean" && typeof value === "boolean") {
     return [true, value];
@@ -167,7 +195,7 @@ function coerceValue(value: unknown, targetType: string): [boolean, unknown] {
       // ("3.5" -> 3), silently corrupting numeric args.
       if (stripped === "") return [false, value];
       const num = Number(stripped);
-      if (!isNaN(num)) return [true, targetType === "integer" ? Math.trunc(num) : num];
+      if (Number.isFinite(num)) return [true, targetType === "integer" ? Math.trunc(num) : num];
       return [false, value];
     }
 
@@ -214,6 +242,7 @@ function describeType(v: unknown): string {
 export class ToolRegistry extends EventEmitter {
   private tools: Map<string, ToolDefinition> = new Map();
   private breakers: Map<string, CircuitBreaker> = new Map();
+  private resultStore = new ToolResultStore();
   /** Per-tool runtime stats for the /tools observability command. */
   private stats: Map<string, { calls: number; failures: number; totalMs: number; cacheHits: number }> = new Map();
 
@@ -250,19 +279,18 @@ export class ToolRegistry extends EventEmitter {
       throw new Error("Tool must have name and description");
     }
 
+    if (this.tools.has(def.name)) this.resultStore.clear(def.name);
     this.tools.set(def.name, def);
 
     // Create circuit breaker for the tool
-    if (!this.breakers.has(def.name)) {
-      this.breakers.set(
-        def.name,
-        new CircuitBreaker({
-          name: `tool_${def.name}`,
-          failureThreshold: 5,
-          resetTimeout: 60000,
-        })
-      );
-    }
+    this.breakers.set(
+      def.name,
+      new CircuitBreaker({
+        name: `tool_${def.name}`,
+        failureThreshold: 5,
+        resetTimeout: 60000,
+      })
+    );
 
     log.info("Tool registered", { tool: def.name });
     this.emit("registered", def.name);
@@ -273,6 +301,9 @@ export class ToolRegistry extends EventEmitter {
    */
   unregister(toolName: string): void {
     this.tools.delete(toolName);
+    this.breakers.delete(toolName);
+    this.resultStore.clear(toolName);
+    this.stats.delete(toolName);
     this.emit("unregistered", toolName);
     log.info("Tool unregistered", { tool: toolName });
   }
@@ -317,18 +348,22 @@ export class ToolRegistry extends EventEmitter {
     const out: Record<string, unknown> = { ...params };
     for (const param of tool.parameters) {
       const has = param.name in params && params[param.name] !== null && params[param.name] !== undefined;
+      let rawValue: unknown;
       if (!has) {
         if (param.required) {
           return { ok: false, error: `Missing required parameter '${param.name}' (expected ${param.type}).` };
         }
-        continue;
+        if (param.default === undefined) continue;
+        rawValue = param.default;
+      } else {
+        rawValue = params[param.name];
       }
 
-      const [valid, coerced] = coerceValue(params[param.name], param.type);
+      const [valid, coerced] = coerceValue(rawValue, param.type);
       if (!valid) {
         return {
           ok: false,
-          error: `Invalid type for parameter '${param.name}': expected ${param.type}, got ${describeType(params[param.name])}.`,
+          error: `Invalid type for parameter '${param.name}': expected ${param.type}, got ${describeType(rawValue)}.`,
         };
       }
 
@@ -357,7 +392,11 @@ export class ToolRegistry extends EventEmitter {
   /**
    * Execute a tool with retry support
    */
-  async execute(toolName: string, params: Record<string, unknown>): Promise<ToolResult> {
+  async execute(
+    toolName: string,
+    params: Record<string, unknown>,
+    options: ToolExecuteOptions = {},
+  ): Promise<ToolResult> {
     const tool = this.tools.get(toolName);
     if (!tool) {
       return {
@@ -389,11 +428,19 @@ export class ToolRegistry extends EventEmitter {
     }
     params = validated.params!;
 
+    if (options.signal?.aborted) {
+      return {
+        success: false,
+        result: "",
+        error: "Tool execution cancelled",
+      };
+    }
+
     // Check cache
+    const cacheKey = tool.cacheable ? safeStableStringify(params) : undefined;
     if (tool.cacheable) {
-      const cacheKey = stableStringify(params);
-      const cached = resultStore.get(toolName, cacheKey);
-      if (cached) {
+      const cached = cacheKey === undefined ? undefined : this.resultStore.get(toolName, cacheKey);
+      if (cached !== undefined) {
         log.debug("Tool cache hit", { tool: toolName });
         this.bumpStats(toolName, { cacheHit: true });
         return {
@@ -404,9 +451,10 @@ export class ToolRegistry extends EventEmitter {
     }
 
     // Execute with retries
-    const maxRetries = tool.maxRetries ?? DEFAULT_RETRIES;
-    const retryDelay = (tool.retryDelay ?? DEFAULT_RETRY_DELAY) * 1000;
-    const timeout = tool.timeout ?? DEFAULT_TIMEOUT;
+    const defaultRetries = tool.idempotent || tool.cacheable ? DEFAULT_RETRIES : 0;
+    const maxRetries = boundedNumber(tool.maxRetries, defaultRetries, 0, MAX_RETRIES, true);
+    const retryDelay = boundedNumber(tool.retryDelay, DEFAULT_RETRY_DELAY, 0, MAX_RETRY_DELAY) * 1000;
+    const timeout = boundedNumber(tool.timeout, DEFAULT_TIMEOUT, 1, MAX_TIMEOUT, true);
 
     let lastError: Error | null = null;
     let retries = 0;
@@ -414,7 +462,7 @@ export class ToolRegistry extends EventEmitter {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         if (attempt > 0) {
-          await new Promise((resolve) => setTimeout(resolve, retryDelay * attempt));
+          await waitForDelay(retryDelay * attempt, options.signal);
         }
 
         if (!tool.handler) {
@@ -427,15 +475,50 @@ export class ToolRegistry extends EventEmitter {
         // Promise.race left the timeout's setTimeout pending whenever the
         // handler won — a dangling 30s timer per tool call that kept the event
         // loop alive (delaying process exit) and accumulated under load.
+        const controller = new AbortController();
         let timer: ReturnType<typeof setTimeout> | undefined;
-        const timeoutPromise = new Promise<string>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("Tool execution timeout")), timeout);
+        let rejectGuard: ((error: Error) => void) | undefined;
+        const guardPromise = new Promise<string>((_, reject) => {
+          rejectGuard = reject;
+          timer = setTimeout(() => {
+            const error = new Error("Tool execution timeout");
+            reject(error);
+            controller.abort(error);
+          }, timeout);
         });
+        const cancelFromCaller = () => {
+          const error = new Error("Tool execution cancelled");
+          rejectGuard?.(error);
+          controller.abort(options.signal?.reason ?? error);
+        };
+        options.signal?.addEventListener('abort', cancelFromCaller, { once: true });
+        if (options.signal?.aborted) cancelFromCaller();
         let result: string;
         try {
-          result = await Promise.race([tool.handler(params), timeoutPromise]);
+          result = await Promise.race([
+            tool.handler(params, { signal: controller.signal, attempt }),
+            guardPromise,
+          ]);
         } finally {
           if (timer) clearTimeout(timer);
+          options.signal?.removeEventListener('abort', cancelFromCaller);
+        }
+
+        // Built-in tools use an explicit error prefix for expected failures
+        // (missing files, blocked paths, invalid requests). Preserve the text
+        // for the model, but do not report it as a successful tool event or
+        // retry a deterministic failure.
+        if (/^\s*(?:error:|\[blocked\])/i.test(result)) {
+          const duration = Date.now() - startTime;
+          breaker?.recordFailure();
+          this.bumpStats(toolName, { ms: duration, failed: true });
+          return {
+            success: false,
+            result: '',
+            error: result.trim(),
+            duration,
+            retries: attempt,
+          };
         }
 
         // Output guard: a non-null message means the result is invalid. Throw so
@@ -448,9 +531,8 @@ export class ToolRegistry extends EventEmitter {
         const duration = Date.now() - startTime;
 
         // Cache result
-        if (tool.cacheable) {
-          const cacheKey = stableStringify(params);
-          resultStore.set(toolName, cacheKey, result);
+        if (tool.cacheable && cacheKey !== undefined) {
+          this.resultStore.set(toolName, cacheKey, result);
         }
 
         breaker?.recordSuccess();
@@ -472,6 +554,8 @@ export class ToolRegistry extends EventEmitter {
         lastError = error as Error;
         retries = attempt;
 
+        if (lastError.message === "Tool execution cancelled") break;
+
         if (attempt < maxRetries) {
           log.warn("Tool execution failed, retrying", {
             tool: toolName,
@@ -480,6 +564,16 @@ export class ToolRegistry extends EventEmitter {
           });
         }
       }
+    }
+
+    if (lastError?.message === "Tool execution cancelled") {
+      log.debug("Tool execution cancelled", { tool: toolName });
+      return {
+        success: false,
+        result: "",
+        error: lastError.message,
+        retries,
+      };
     }
 
     breaker?.recordFailure();
@@ -518,7 +612,7 @@ export class ToolRegistry extends EventEmitter {
    */
   merge(other: ToolRegistry): void {
     for (const tool of other.list()) {
-      this.tools.set(tool.name, tool);
+      this.register(tool);
     }
   }
 
@@ -526,13 +620,29 @@ export class ToolRegistry extends EventEmitter {
    * Clear result cache for a tool or all tools
    */
   clearCache(toolName?: string): void {
-    resultStore.clear(toolName);
+    this.resultStore.clear(toolName);
     if (toolName) {
       log.info("Tool cache cleared", { tool: toolName });
     } else {
       log.info("All tool caches cleared");
     }
   }
+}
+
+function waitForDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new Error("Tool execution cancelled"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', cancel);
+      resolve();
+    }, ms);
+    const cancel = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      reject(new Error("Tool execution cancelled"));
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+  });
 }
 
 /**

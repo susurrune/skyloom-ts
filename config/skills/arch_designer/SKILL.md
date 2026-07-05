@@ -6,6 +6,9 @@ triggers:
   - "design"
   - "system design"
   - "patterns"
+  - "架构"
+  - "系统设计"
+  - "技术选型"
 ---
 
 ## Software architecture design

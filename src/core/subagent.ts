@@ -181,7 +181,7 @@ export class GenericSubagent extends BaseAgent {
     skillRegistry: SkillRegistry,
     runtimeName: string,
   ) {
-    super(config, llm, bus, toolRegistry, skillRegistry);
+    super(config, llm, bus, toolRegistry, skillRegistry, runtimeName);
     this.name = runtimeName;
     this.displayName = def.name;
     this.emoji = '◇';

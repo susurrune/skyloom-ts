@@ -73,6 +73,7 @@ export class Memory {
   public working: Record<string, any> = {};
 
   private dbPath: string;
+  private migrateLegacySharedDb = false;
   private db: SqlJsDatabase | null = null;
   private SQL: SqlJsStatic | null = null;
   private loaded = false;
@@ -90,6 +91,15 @@ export class Memory {
 
     const base = expandUserPath(config.dbPath);
     this.dbPath = path.join(path.dirname(base), `${agentName}.db`);
+    const legacyPath = path.join(path.dirname(base), '.db');
+    if (agentName === 'fog' && !fs.existsSync(this.dbPath) && fs.existsSync(legacyPath)) {
+      try {
+        fs.copyFileSync(legacyPath, this.dbPath);
+        this.migrateLegacySharedDb = true;
+      } catch (err) {
+        logger.warn('legacy_memory_copy_failed', { from: legacyPath, to: this.dbPath, error: String(err) });
+      }
+    }
   }
 
   /**
@@ -215,6 +225,21 @@ export class Memory {
         PRIMARY KEY (agent, key)
       )
     `);
+
+    if (this.migrateLegacySharedDb) {
+      try {
+        this.db.run('BEGIN');
+        for (const table of ['memories', 'messages', 'sessions', 'working_data']) {
+          this.db.run(`UPDATE ${table} SET agent = ? WHERE agent = ''`, [this.agentName]);
+        }
+        this.db.run('COMMIT');
+        this.persistDb();
+        logger.info('legacy_memory_migrated', { agent: this.agentName, path: this.dbPath });
+      } catch (err) {
+        try { this.db.run('ROLLBACK'); } catch { /* best-effort */ }
+        logger.warn('legacy_memory_migration_failed', { agent: this.agentName, error: String(err) });
+      }
+    }
 
     this.loadShortTerm();
     this.loadWorking();
@@ -598,9 +623,14 @@ export class Memory {
       );
 
       if (sessionId) {
+        const preview = role === 'user' ? content.trim().slice(0, 80) : '';
         this.dbRun(
-          'UPDATE sessions SET message_count = message_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-          [sessionId]
+          `UPDATE sessions
+           SET message_count = message_count + 1,
+               updated_at = CURRENT_TIMESTAMP,
+               preview = CASE WHEN preview = '' AND ? != '' THEN ? ELSE preview END
+           WHERE id = ?`,
+          [preview, preview, sessionId]
         );
       }
 
@@ -1036,7 +1066,17 @@ export class Memory {
     }
 
     const rows = this.dbAll(
-      'SELECT id, agent, name, preview, message_count, created_at, updated_at FROM sessions WHERE agent = ? ORDER BY updated_at DESC LIMIT 50',
+      `SELECT s.id, s.agent, s.name,
+              COALESCE(NULLIF(s.preview, ''), (
+                SELECT SUBSTR(m.content, 1, 80)
+                FROM messages m
+                WHERE m.agent = s.agent AND m.session_id = s.id AND m.role = 'user'
+                ORDER BY m.id ASC LIMIT 1
+              ), '') AS preview,
+              s.message_count, s.created_at, s.updated_at
+       FROM sessions s
+       WHERE s.agent = ?
+       ORDER BY s.updated_at DESC LIMIT 50`,
       [this.agentName]
     );
 
@@ -1099,6 +1139,22 @@ export class Memory {
     await this.loadShortTerm();
 
     return true;
+  }
+
+  /** Load the latest session with this stable external name, or create it. */
+  async loadOrCreateNamedSession(name: string): Promise<string> {
+    const normalized = name.trim().slice(0, 240);
+    if (!normalized || !this.db) return this.createSession(normalized || null);
+
+    const row = this.dbGet(
+      'SELECT id FROM sessions WHERE agent = ? AND name = ? ORDER BY updated_at DESC LIMIT 1',
+      [this.agentName, normalized]
+    );
+    if (row?.id) {
+      await this.loadSession(String(row.id));
+      return String(row.id);
+    }
+    return this.createSession(normalized);
   }
 
   /**

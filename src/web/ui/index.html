@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-agent="fog">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f2e9">
+<title>水墨气象台 · Skyloom</title>
+<link rel="icon" type="image/png" href="/ui/assets/image2-favicon.png?v={{CACHE_BUST}}">
+<link rel="preload" href="/ui/styles.css?v={{CACHE_BUST}}" as="style">
+<link rel="stylesheet" href="/ui/styles.css?v={{CACHE_BUST}}">
+<script>window.__SKYLOOM__ = {{BOOT}};</script>
+<script defer src="/ui/app.js?v={{CACHE_BUST}}"></script>
+</head>
+<body>
+
+<div id="grain" aria-hidden="true"></div>
+<div id="mountain-wash" aria-hidden="true"></div>
+<div id="ambient-layer" aria-hidden="true"></div>
+<div id="kanji-seal" aria-hidden="true">霧</div>
+
+<nav id="sidebar" aria-label="六灵切换">
+  <div id="logo"><span class="logo-mark img2-icon icon-brand" aria-hidden="true"></span><b>水墨气象台</b><small>SKYLOOM FIELD NOTES</small></div>
+  <div id="agents-list" role="listbox" aria-label="选择灵"></div>
+  <div id="side-foot">
+    <div id="side-dock">
+      <div id="side-status"><span id="conn-dot" aria-hidden="true"></span><span id="ws-name"></span></div>
+      <div id="side-actions" aria-label="界面工具">
+        <button class="side-btn theme-tool" id="theme-btn" type="button" title="切换主题" aria-label="切换主题"><span class="ui-icon img2-icon icon-moon" aria-hidden="true"></span></button>
+        <button class="side-btn help-tool" id="keys-btn" type="button" title="快捷键 (?)" aria-label="快捷键"><span class="ui-icon img2-icon icon-help" aria-hidden="true"></span></button>
+      </div>
+    </div>
+    <div id="verse">山色有无中</div>
+  </div>
+</nav>
+
+<main id="main">
+  <header id="strip">
+    <span id="strip-weather" class="weather-doodle img2-icon icon-fog" aria-hidden="true"></span>
+    <span id="strip-name">雾 Fog</span>
+    <span id="strip-pig">松烟墨 · 探索洞察</span>
+    <span id="strip-sp"></span>
+    <div id="strip-actions" aria-label="会话操作">
+      <button class="strip-btn history-btn" id="sessions-btn" type="button" title="聊天历史" aria-label="聊天历史" aria-haspopup="dialog" aria-expanded="false"><span class="ui-icon img2-icon icon-brand" aria-hidden="true"></span><span class="history-label">历史</span></button>
+      <button class="strip-btn" id="retry-btn" type="button" title="重新发送上一条消息" aria-label="重试" disabled><span class="ui-icon img2-icon icon-retry" aria-hidden="true"></span></button>
+      <button class="strip-btn" id="export-btn" type="button" title="导出会话为 Markdown" aria-label="导出"><span class="ui-icon img2-icon icon-download" aria-hidden="true"></span></button>
+      <button class="strip-btn" id="clear-btn" type="button" title="开始新会话" aria-label="新会话"><span class="ui-icon img2-icon icon-plus" aria-hidden="true"></span></button>
+    </div>
+  </header>
+  <section id="messages" aria-live="polite" aria-label="会话消息"></section>
+  <button id="scroll-pill" type="button"><span class="ui-icon img2-icon icon-down" aria-hidden="true"></span><span>回到底部</span></button>
+  <form id="composer" action="javascript:void(0)">
+    <div id="input-card">
+      <textarea id="chat-input" rows="1" placeholder="写下你想说的话…" aria-label="消息内容" autofocus></textarea>
+      <span id="char-count" aria-live="polite"></span>
+      <button id="send-btn" type="button" title="发送 (Enter)" aria-label="发送"><span class="ui-icon img2-icon icon-send send-ico" aria-hidden="true"></span></button>
+    </div>
+    <div id="hint">Enter 发送 · Shift+Enter 换行 · Esc 停止 · ? 快捷键</div>
+  </form>
+</main>
+
+<div id="sessions-panel" role="dialog" aria-modal="true" aria-labelledby="sessions-title">
+  <section id="sessions-sheet">
+    <header class="sessions-head">
+      <div><span class="sheet-kicker">FIELD ARCHIVE</span><h2 id="sessions-title">历史会话</h2></div>
+      <button id="sessions-close" type="button">关闭</button>
+    </header>
+    <div id="sessions-list" aria-live="polite"></div>
+  </section>
+</div>
+
+<div id="keys-modal" role="dialog" aria-modal="true" aria-labelledby="keys-title"><div id="keys-card">
+  <h3 id="keys-title">快捷键</h3>
+  <div class="key-row"><span>发送</span><kbd>Enter</kbd></div>
+  <div class="key-row"><span>换行</span><kbd>Shift + Enter</kbd></div>
+  <div class="key-row"><span>停止生成</span><kbd>Esc</kbd></div>
+  <div class="key-row"><span>切换灵</span><kbd id="kbd-agents"></kbd></div>
+  <div class="key-row"><span>聚焦输入</span><kbd id="kbd-focus"></kbd></div>
+  <div class="key-row"><span>快速聚焦</span><kbd>/</kbd></div>
+  <div class="key-row"><span>本面板</span><kbd>?</kbd></div>
+</div></div>
+
+<div id="toasts" aria-live="polite"></div>
+</body>
+</html>

@@ -211,4 +211,10 @@ describe("websearch · readPage", () => {
   it("rejects a non-http url", async () => {
     await expect(readPage("ftp://x", {})).rejects.toThrow(/http/);
   });
+
+  it("blocks private targets before invoking the page reader", async () => {
+    const http = stubHttp([]);
+    await expect(readPage("http://127.0.0.1/admin", { env: {}, http })).rejects.toThrow(/private|loopback/);
+    expect(http.calls).toEqual([]);
+  });
 });

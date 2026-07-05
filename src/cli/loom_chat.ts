@@ -12,8 +12,8 @@ import chalk from "chalk";
 import { agentTheme, PALETTE } from "../core/theme";
 import { orchestrateTask } from "../core/factory";
 import { appendQuickMemory, INIT_PROMPT } from "../core/skymd";
-import { resolveVerifyConfig, runVerify } from "../core/verify";
 import { InteractiveMode, ModeController } from "./mode";
+import { executeSlashCommand, type CommandRuntime } from "./command_handlers";
 import { expandFileRefs, isBangCommand, bangCommand, runBang, isHashMemory, hashNote } from "./input_macros";
 import { loadCustomCommands, resolveCustomCommand } from "./commands_md";
 import { getFileCheckpoints } from "../core/file_checkpoint";
@@ -266,7 +266,7 @@ export interface LoomChatDeps {
 
 export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): Promise<void> {
   let agent = startAgent;
-  let lastSessions: any[] = [];
+  const sessionCache: CommandRuntime["sessionCache"] = { items: [] };
   const ui = new LoomUI();
   ui.agentName = agent.name;
 
@@ -333,7 +333,7 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
   ui.extraCommands = customCommands.map((c) => ["/" + c.name, c.description] as [string, string]);
 
   // Pre-load the session list so the /resume wizard has choices from the start.
-  try { lastSessions = await agent.memory.listSessions(); } catch { /* best-effort */ }
+  try { sessionCache.items = await agent.memory.listSessions(); } catch { /* best-effort */ }
 
   // Guided argument wizard for structured commands (/model · /apikey · /connect · /resume):
   // pick a provider/model/session from a ↑↓ list, paste a key — no syntax to memorize.
@@ -357,7 +357,7 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         id: m.id, provider: m.provider, label: m.id,
         hint: m.local ? "本地/免费" : (m.costIn != null ? `$${m.costIn}/$${m.costOut}` : undefined),
       }));
-      const sessions = lastSessions.map((s: any) => ({
+      const sessions = sessionCache.items.map((s) => ({
         id: String(s.id),
         label: (s.preview || "(空)").replace(/\s+/g, " ").slice(0, 40),
       }));
@@ -390,6 +390,8 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
             agent = a;
             applyMode(); // plan mode follows the session, not the agent instance
             ui.agentName = n;
+            try { sessionCache.items = await agent.memory.listSessions(); }
+            catch { sessionCache.items = []; }
             const t = agentTheme(n);
             ui.blank();
             say(" " + chalk.bgHex(t.hex).hex(PALETTE.paper).bold(` ${t.kanji} `) + " " + chalk.bold.hex(t.hex)(t.pigment) + chalk.dim(` · ${t.specialty}`));
@@ -415,6 +417,27 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
           }
         } catch { dim("（命令注册中心不可用）"); }
         dim("输入 / 筛选 · ↑↓ 选择 · Enter 执行/进入向导 · Tab 补全 · Shift+Tab 切模式");
+        ui.blank();
+        continue;
+      }
+      const sharedCommand = await executeSlashCommand(inp, {
+        agent: agent as CommandRuntime["agent"],
+        config: (ctx as any).config,
+        sessionCache,
+        afterNewSession: () => {
+          agent._baseSystemPrompt = "";
+          agent.reinitLanguage();
+          sessionTrust.clear();
+        },
+      });
+      if (sharedCommand.handled) {
+        ui.blank();
+        for (const output of sharedCommand.lines) {
+          if (output.tone === "success") say(" " + chalk.hex(OK_HEX)(output.text));
+          else if (output.tone === "warning" || output.tone === "error") say(" " + chalk.hex(ERR_HEX)(output.text));
+          else if (output.tone === "dim") dim(output.text);
+          else say(" " + output.text);
+        }
         ui.blank();
         continue;
       }
@@ -480,19 +503,6 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         ui.blank();
         continue;
       }
-      if (cmdL === "/verify") {
-        const vc = resolveVerifyConfig((ctx as any).config);
-        if (!vc.commands.length) { dim("未配置验证命令 — 在 config.yaml 的 verify.commands 或 SKY.md 的 ## Verify 小节声明"); continue; }
-        ui.busy = true; ui.busyLabel = "验证";
-        ui.blank();
-        say(" " + chalk.bold("⚙ verify") + chalk.dim(` · ${vc.commands.length} 条命令`));
-        const vr = runVerify(vc);
-        ui.busy = false; ui.busyLabel = "";
-        for (const ln of vr.report.split("\n").slice(0, 30)) ui.line(" " + (ln.startsWith("✓") ? chalk.hex(OK_HEX)(ln) : ln.startsWith("✗") ? chalk.hex(ERR_HEX)(ln) : chalk.dim(cutVisual(ln, 200))));
-        if (!vr.ok) dim(`验证失败 — 直接说「修复 verify 失败」让 ${agent.name} 处理`);
-        ui.blank();
-        continue;
-      }
       if (cmdL === "/init") {
         dim("开始扫描项目，生成 SKY.md 项目记忆 …");
         ui.blank();
@@ -502,7 +512,6 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         continue;
       }
       if (cmdL === "/version") { dim(`Skyloom v${deps.version}`); continue; }
-      if (cmdL === "/status") { dim(`${agent.displayName} (${agent.name}) · ${agent.state} · 记忆 ${agent.memory.shortTerm.length} 条`); continue; }
       if (cmdL === "/cost") { dim(`总费用 ${fmtCost(ctx.llm.getTotalCost())}`); continue; }
       if (cmdL === "/cost reset") { (ctx.llm as any).resetUsageStats?.(); dim("已重置费用统计"); continue; }
       if (cmdL === "/compact") {
@@ -516,113 +525,6 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       if (cmdL === "/memory clear") { await agent.memory.clearShortTerm(); dim("记忆已清空"); continue; }
       if (cmdL === "/workspace") { dim(String(ctx.workspacePath || "default")); continue; }
       if (cmdL === "/mcp") { dim(String(ctx.mcpStatus?.join(", ") || "none")); continue; }
-      if (cmdL === "/model" || cmdL.startsWith("/model ")) {
-        const { setAgentModel, setUnifiedModel, clearAgentModel, setAgentApiKey, describeAgentLLM } = require("../core/model_config");
-        const cfg = (ctx as any).config;
-        const parts = inp.split(/\s+/).slice(1);
-        const t = agentTheme(agent.name);
-        if (parts.length === 0) {
-          const d = describeAgentLLM(cfg, agent.name);
-          const keyLabel = { agent: "独立 key", env: "环境变量", global: "全局 key", missing: chalk.yellow("缺失!") }[d.keySource as string] || d.keySource;
-          ui.blank();
-          say(" " + chalk.bold.hex(t.hex)(`${t.symbol} ${agent.name}`) + chalk.bold(` · ${d.model}`) + chalk.dim(` (${d.source === "agent" ? "独立配置" : "统一配置"} · ${d.provider || "?"} · ${keyLabel})`));
-          dim(`统一默认: ${cfg.default_model || cfg.llm?.default_model || "gpt-4o"}`);
-          dim("/model <id> 给当前灵单独换 · /model unified <id> 改统一默认 · /model reset 回到统一 · /model key <key> 独立 key");
-          ui.blank();
-          continue;
-        }
-        if (parts[0] === "reset") {
-          clearAgentModel(cfg, agent.name);
-          say(" " + chalk.hex(OK_HEX)(`✓ ${agent.name} 已回到统一配置`) + chalk.dim(` · ${describeAgentLLM(cfg, agent.name).model}`));
-          continue;
-        }
-        if (parts[0] === "unified" || parts[0] === "default") {
-          if (!parts[1]) { dim("用法: /model unified <模型id>"); continue; }
-          const r = setUnifiedModel(cfg, parts[1]);
-          if (!r.ok) { dim(`'${parts[1]}' 不在目录中${r.suggestions.length ? " · 可选: " + r.suggestions.join(", ") : ""}`); continue; }
-          say(" " + chalk.hex(OK_HEX)(`✓ 统一默认 → ${parts[1]}`) + chalk.dim(r.provider ? ` (${r.provider})` : ""));
-          continue;
-        }
-        if (parts[0] === "key") {
-          if (!parts[1]) { dim("用法: /model key <api-key> — 仅当前灵使用"); continue; }
-          setAgentApiKey(cfg, agent.name, parts[1]);
-          say(" " + chalk.hex(OK_HEX)(`✓ ${agent.name} 的独立 API key 已保存`));
-          continue;
-        }
-        const r = setAgentModel(cfg, agent.name, parts[0]);
-        if (!r.ok) { dim(`'${parts[0]}' 不在目录中${r.suggestions.length ? " · 可选: " + r.suggestions.join(", ") : " · /setup 查看全部"}`); continue; }
-        say(" " + chalk.hex(OK_HEX)(`✓ ${agent.name} → ${parts[0]}`) + chalk.dim(`${r.provider ? ` (${r.provider})` : ""} · 下一条消息生效 · /model reset 撤销`));
-        const d = describeAgentLLM(cfg, agent.name);
-        if (d.keySource === "missing") dim(`⚠ ${r.provider} 还没有 API key — /apikey set ${r.provider} <key> 或 /model key <key>`);
-        continue;
-      }
-      if (cmdL === "/models" || cmdL.startsWith("/models ")) {
-        const { listProviders, modelsFor, providerLabel } = require("../core/catalog");
-        const args = inp.split(/\s+/).slice(1);
-        const filter = args[0]?.toLowerCase() || "";
-        ui.blank();
-        say(" " + chalk.bold.hex("#3a7a6e")("✦ 模型目录 · Model Catalog"));
-        dim("  ─────────────────────────────────────────────");
-        const providers = listProviders();
-        let totalModels = 0;
-        for (const p of providers) {
-          const models = modelsFor(p);
-          if (!models.length) continue;
-          if (filter && !p.toLowerCase().includes(filter) && !providerLabel(p).toLowerCase().includes(filter)) continue;
-          const label = providerLabel(p);
-          say(" " + chalk.bold.hex("#3a7a6e")(`  ${label}`));
-          for (const m of models) {
-            totalModels++;
-            const costStr = m.costIn === 0 && m.costOut === 0 ? chalk.green("免费") : chalk.dim(`$${m.costIn.toFixed(2)}/$${m.costOut.toFixed(2)}`);
-            const ctxStr = m.context >= 1000000 ? chalk.cyan(`${(m.context / 1000000).toFixed(0)}M`) : m.context >= 1000 ? chalk.cyan(`${(m.context / 1000).toFixed(0)}K`) : chalk.cyan(`${m.context}`);
-            say(`   ${chalk.dim("·")} ${chalk.white(m.id.padEnd(38))} ${ctxStr} ${chalk.dim(" ")} ${costStr} ${chalk.gray(m.desc)}`);
-          }
-        }
-        dim(`  ────────────────────────────────────────────`);
-        dim(`  共 ${providers.length} 个 Provider · ${totalModels} 个模型`);
-        dim("  用法: /models [provider] 筛选 · /model <id> 切换");
-        ui.blank();
-        continue;
-      }
-      if (cmdL === "/sessions") {
-        lastSessions = await agent.memory.listSessions();
-        const active = agent.memory.getActiveSession();
-        const t = agentTheme(agent.name);
-        ui.blank();
-        say(" " + chalk.bold.hex(t.hex)(`${t.symbol} ${t.kanji} 会话`) + chalk.dim(` (${lastSessions.length})`));
-        if (!lastSessions.length) dim("（暂无历史会话）");
-        lastSessions.slice(0, 15).forEach((s: any, i: number) => {
-          const mark = s.id === active ? chalk.hex(t.hex)("●") : chalk.dim("·");
-          const preview = (s.preview || "(空)").replace(/\s+/g, " ").slice(0, 36);
-          say(` ${mark} ${chalk.dim(String(i + 1).padStart(2))} ${preview} ${chalk.dim(`· ${s.messageCount}条 · ${String(s.id).slice(0, 8)}`)}`);
-        });
-        dim("/resume <序号或id> 恢复 · /new 新会话");
-        ui.blank();
-        continue;
-      }
-      if (cmdL === "/new") {
-        await agent.memory.clearShortTerm();
-        agent._baseSystemPrompt = ''; agent.reinitLanguage();
-        sessionTrust.clear(); // a fresh session starts from zero tool trust
-        const id = await agent.memory.createSession();
-        say(" " + chalk.hex(OK_HEX)("✦ 新会话已开始") + chalk.dim(` · ${String(id).slice(0, 8)}`));
-        continue;
-      }
-      if (cmdL === "/resume" || cmdL.startsWith("/resume ")) {
-        const arg = inp.slice(7).trim();
-        if (!lastSessions.length) lastSessions = await agent.memory.listSessions();
-        let target: any = null;
-        if (!arg) target = lastSessions[0];
-        else if (/^\d+$/.test(arg)) target = lastSessions[parseInt(arg) - 1];
-        else target = lastSessions.find((s: any) => String(s.id).startsWith(arg));
-        if (!target) { dim("未找到该会话。先 /sessions 看列表。"); continue; }
-        const ok = await agent.memory.loadSession(target.id);
-        if (!ok) { dim("恢复失败。"); continue; }
-        const n = agent.memory.shortTerm.filter((m: any) => m.role !== "system").length;
-        const t = agentTheme(agent.name);
-        say(" " + chalk.bold.hex(t.hex)("↺ 已恢复会话") + chalk.dim(` · ${n} 条消息 · ${String(target.id).slice(0, 8)}`));
-        continue;
-      }
       if (cmdL.startsWith("/apikey set ")) {
         const p = inp.split(/\s+/);
         if (p.length >= 4) { deps.saveApiKey(p[2], p[3]); say(" " + chalk.hex(OK_HEX)(`✓ 已保存 ${p[2]} API key`)); }

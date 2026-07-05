@@ -37,18 +37,39 @@ interface BgJob extends BgJobView {
   trimmed: number;    // bytes dropped from the front by the rolling cap
 }
 
-class BackgroundManager {
+export class BackgroundManager {
   private jobs = new Map<string, BgJob>();
   private seq = 0;
+  private readonly maxJobs: number;
+
+  constructor(maxJobs = 100) {
+    this.maxJobs = Number.isFinite(maxJobs) && maxJobs > 0 ? Math.floor(maxJobs) : 100;
+  }
+
+  private pruneCompletedForNewJob(): void {
+    if (this.jobs.size < this.maxJobs) return;
+    const completed = [...this.jobs.values()]
+      .filter((job) => job.status !== 'running')
+      .sort((a, b) => a.startedAt - b.startedAt);
+    while (this.jobs.size >= this.maxJobs && completed.length > 0) {
+      this.jobs.delete(completed.shift()!.id);
+    }
+  }
 
   private append(job: BgJob, text: string): void {
     job.log += text;
     job.totalBytes += Buffer.byteLength(text, 'utf8');
-    if (job.log.length > MAX_LOG_BYTES) {
-      const drop = job.log.length - MAX_LOG_BYTES;
-      job.log = job.log.slice(drop);
-      job.trimmed += drop;
-      job.readOffset = Math.max(0, job.readOffset - drop);
+    const bytes = Buffer.from(job.log, 'utf8');
+    if (bytes.length > MAX_LOG_BYTES) {
+      let start = bytes.length - MAX_LOG_BYTES;
+      // Move to the first complete UTF-8 code point so the retained text never
+      // begins with a replacement character after slicing a multibyte sequence.
+      while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+      const previousLength = job.log.length;
+      job.log = bytes.subarray(start).toString('utf8');
+      const droppedChars = previousLength - job.log.length;
+      job.trimmed += start;
+      job.readOffset = Math.max(0, job.readOffset - droppedChars);
     }
   }
 
@@ -56,6 +77,8 @@ class BackgroundManager {
   start(command: string, opts?: { cwd?: string; env?: Record<string, string> }): { id?: string; error?: string } {
     const check = preflightCheck(command);
     if (check) return { error: `[BLOCKED] ${check}` };
+
+    this.pruneCompletedForNewJob();
 
     const id = `bg_${(++this.seq).toString(36)}_${Date.now().toString(36)}`;
     let child: ChildProcess;
