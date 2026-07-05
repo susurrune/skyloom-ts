@@ -74,10 +74,12 @@
 - Produces: `AgentLoop`, `ToolCallExecutor`, `DelegationCoordinator`, `AgentSessionController`
 - Preserves: `BaseAgent.chat()`, `chatStream()`, `executeTask()`, `getStatus()`
 
-- [ ] 为流式工具回合、取消、中途持久化、并发 turn lock、重复工具防循环添加特征测试。
+- [x] 为流式工具回合、取消、中途持久化、并发 turn lock、重复工具防循环添加特征测试。
 - [ ] 先移动纯工具执行代码，再移动委派，再移动流式循环；每次移动后运行 Agent 测试。
 - [ ] `BaseAgent` 只保留生命周期、公共 API 和依赖组合，目标低于 700 行。
 - [ ] 检查所有 span、工具消息和 partial response 的顺序与拆分前一致。
+
+进行中：工具调用的解析、危险操作审批、同轮去重、并发执行、Hook、文件 checkpoint、trace 与结果持久化已迁入独立 `ToolCallExecutor`；`BaseAgent` 保留兼容适配入口，下一步继续拆委派与流式循环。
 
 ### Task 4: 多 Agent 编排与任务恢复
 

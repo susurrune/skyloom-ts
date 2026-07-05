@@ -11,13 +11,11 @@ import { LLMClient, type LLMResponse, type ToolCall } from './llm';
 import { getLogger } from './logger';
 import { Memory, Message } from './memory';
 import { Skill, SkillRegistry } from './skill';
-import { safeStableStringify, type ToolDefinition, ToolRegistry } from './tool';
+import { type ToolDefinition, ToolRegistry } from './tool';
 import {
   parseToolArgs,
   extractFilePathsFromMessages,
   enrichResponseWithArtifacts,
-  formatArgsParseError,
-  suggestToolNames,
   toolStatusLabel,
   synthesizeDelegationSummary,
   parseExtractedFacts,
@@ -26,37 +24,18 @@ import { selectRelevantTools } from './tool_router';
 import { getModelInfo } from './catalog';
 import { estimateTokens } from './estimate';
 import { LoopGuard } from './agent/guard';
+import {
+  ToolCallExecutor,
+  type ToolCallExecutorOptions,
+  type ToolExecutionResult,
+} from './agent/tools';
 import { Tracer, type Trace } from './trace';
-import { mapBounded, resolveConcurrency } from './concurrency';
 
 const log = getLogger('agent');
 
-/** Tools whose success means the filesystem changed (triggers the verify loop). */
-const WRITE_TOOL_RE = /^(write_|edit_|delete_|create_)|^run_bash$|^git_commit$|^apply_patch$/;
-
 /** Tools with side effects, hidden from the model while in plan mode. */
 const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$|^apply_patch$/;
-
-/** Default context budget per recorded tool result (chars; ~3k tokens). */
-const TOOL_RESULT_LIMIT = 12000;
-
-/**
- * Clamp an oversized tool result before it enters the context window:
- * keep head + tail, tell the model what was cut and how to fetch precisely.
- */
-/** A short, single-line preview of tool arguments for trace spans. */
-function argsPreview(args: Record<string, any> | null | undefined): string {
-  if (!args) return '';
-  try { return JSON.stringify(args).replace(/\s+/g, ' ').slice(0, 80); } catch { return ''; }
-}
-
-export function clampToolResult(s: string, limit: number = TOOL_RESULT_LIMIT): string {
-  if (s.length <= limit) return s;
-  const head = s.slice(0, Math.floor(limit * 0.72));
-  const tail = s.slice(-Math.floor(limit * 0.18));
-  const cut = s.length - head.length - tail.length;
-  return `${head}\n…[工具结果过长，中间省略 ${cut} 字符 — 需要该部分时用更精确的参数重新调用（read_file 的 offset/limit、grep 定位、缩小查询范围）]\n${tail}`;
-}
+export { clampToolResult } from './agent/tools';
 
 // Domain model lives in ./agent/task — re-exported here so importers of
 // '../core/agent' are unaffected by the Phase 3 split.
@@ -642,194 +621,20 @@ export class BaseAgent {
    */
   protected async executeToolCalls(
     toolCalls: ToolCall[],
-    options?: {
-      dedupCacheable?: boolean;         // Enable dedup for cacheable tools
-      onStatus?: (label: string) => void;
-      suppressedTools?: Set<string>;     // Tools to mark as suppressed on error
-      ephemeral?: boolean;               // Don't persist tool messages
-      signal?: AbortSignal;              // Cooperative cancel: skip queued tools on Ctrl-C
-    }
-  ): Promise<Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>> {
-    const suppressed = options?.suppressedTools;
-    const ephemeral = options?.ephemeral ?? false;
-    const onStatus = options?.onStatus;
-    const signal = options?.signal;
-
-    // Phase A: Parse all tool calls and resolve tools
-    const parsed = toolCalls.map((tc) => {
-      const toolName = tc.function.name;
-      const rawArgs = tc.function.arguments;
-      let toolArgs: Record<string, any> | null = null;
-      let parseError: string | null = null;
-
-      if (typeof rawArgs === 'string') {
-        toolArgs = parseToolArgs(rawArgs);
-        if (toolArgs === null) parseError = formatArgsParseError(toolName, rawArgs);
-      } else {
-        toolArgs = rawArgs;
-      }
-
-      this.bus.addEvent(new Event(EventType.TOOL_CALL, this.name, null, {
-        tool: toolName, args: toolArgs || {},
-      }));
-
-      const tool = this.toolRegistry.get(toolName);
-      const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
-
-      return { tc, toolName, toolArgs, tool, parseError, label, denied: false };
-    });
-
-    // Phase B: Approve dangerous tools (serial — may prompt user)
-    const dangerousCalls = parsed.filter(p => p.tool && (p.tool as ToolDefinition).dangerous);
-    if (dangerousCalls.length > 0) {
-      for (const p of dangerousCalls) {
-        if (!await this.checkToolApproval(p.toolName, p.toolArgs || {})) {
-          p.denied = true;
-        }
-      }
-    }
-
-    // Build execution plan with optional dedup
-    const execPlan: Array<{ idx: number; prep: typeof parsed[0]; isDuplicate: boolean }> = [];
-    const seenDedupKeys = new Map<string, number>();
-
-    for (let i = 0; i < parsed.length; i++) {
-      const p = parsed[i];
-      // Dedup identical calls within this round for read-only tools (idempotent
-      // or cacheable, never dangerous): the model often emits the same
-      // read_file / web_search twice in one parallel batch — run it once and
-      // share the result. Safe because one round observes one world state.
-      const td = p.tool as ToolDefinition | undefined;
-      if (options?.dedupCacheable && p.toolArgs && td && (td.idempotent || td.cacheable) && !td.dangerous) {
-        const serialized = safeStableStringify(p.toolArgs);
-        if (serialized === undefined) {
-          execPlan.push({ idx: i, prep: p, isDuplicate: false });
-          continue;
-        }
-        const key = `${p.toolName}:${serialized}`;
-        if (seenDedupKeys.has(key)) {
-          execPlan.push({ idx: i, prep: p, isDuplicate: true });
-          continue;
-        }
-        seenDedupKeys.set(key, i);
-      }
-      execPlan.push({ idx: i, prep: p, isDuplicate: false });
-    }
-
-    // Phase C: Execute all unique tool calls with bounded concurrency.
-    // Unbounded Promise.all let one LLM round saturate sockets/FDs/CPU; the cap
-    // bounds in-flight work. `signal` enables cooperative cancel: once the user
-    // interrupts, queued (not-yet-started) tools short-circuit to [cancelled]
-    // instead of running. In-flight tools receive the same signal so handlers
-    // that support cooperative cancellation can stop their own work promptly.
-    const results = new Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null>(parsed.length).fill(null);
-    const uniquePlan = execPlan.filter(e => !e.isDuplicate);
-    const concurrency = resolveConcurrency((this.config as any)?.llm?.tool_concurrency);
-    // Enter ACTING once for the whole batch rather than per-tool (each parallel
-    // worker re-setting the same state was a redundant async no-op).
-    if (uniquePlan.some(e => e.prep.tool && !e.prep.parseError && !e.prep.denied)) {
-      await this.setState(AgentState.ACTING);
-    }
-    const completed = await mapBounded(
-      uniquePlan,
-      async ({ idx, prep }, _i, aborted) => {
-        const p = prep;
-
-        if (aborted) {
-          return { idx, result: { tc: p.tc, result: `[cancelled] '${p.toolName}' skipped — interrupted before execution`, success: false, toolName: p.toolName } };
-        }
-        if (p.parseError) {
-          return { idx, result: { tc: p.tc, result: p.parseError, success: false, toolName: p.toolName } };
-        }
-        if (p.denied) {
-          return { idx, result: { tc: p.tc, result: `[denied] dangerous tool '${p.toolName}' blocked`, success: false, toolName: p.toolName } };
-        }
-        if (!p.tool) {
-          if (suppressed) suppressed.add(p.toolName);
-          const suggestions = suggestToolNames(p.toolName, this.toolRegistry);
-          const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
-          return { idx, result: { tc: p.tc, result: `Error: Tool '${p.toolName}' does not exist.${hint}`, success: false, toolName: p.toolName } };
-        }
-
-        if (onStatus) onStatus(p.label);
-
-        // File checkpoint: snapshot the target before any mutating file tool
-        // runs, so /rewind can restore the pre-turn state.
-        try {
-          const { getFileCheckpoints } = require('./file_checkpoint');
-          const cp = getFileCheckpoints();
-          const snapPath = cp.pathToSnapshot(p.toolName, p.toolArgs || {});
-          if (snapPath) cp.snapshot(snapPath);
-        } catch { /* checkpointing must never block execution */ }
-
-        // pre_tool hooks are enforced policy: a non-zero exit blocks the call.
-        const hooks = this.getHooks();
-        if (hooks.preTool.length > 0) {
-          try {
-            const { runPreToolHooks } = require('./hooks');
-            const pre = runPreToolHooks(hooks, p.toolName, p.toolArgs || {}, this.name);
-            if (!pre.allowed) {
-              return { idx, result: { tc: p.tc, result: `[blocked by pre_tool hook] ${pre.reason}`, success: false, toolName: p.toolName } };
-            }
-          } catch { /* hook machinery must never break tool execution */ }
-        }
-
-        // Leaf span: tools run concurrently, so they must not nest under each other.
-        const span = this.tracer.startSpan(p.toolName, 'tool', { args: argsPreview(p.toolArgs) }, { leaf: true });
-        try {
-          const toolResult = await this.toolRegistry.execute(p.toolName, p.toolArgs || {}, { signal });
-          const resultStr = toolResult.result || toolResult.error || '(no output)';
-          if (toolResult.success && WRITE_TOOL_RE.test(p.toolName)) this._turnWroteFiles = true;
-          if (hooks.postTool.length > 0) {
-            try {
-              const { runPostToolHooks } = require('./hooks');
-              runPostToolHooks(hooks, p.toolName, p.toolArgs || {}, this.name);
-            } catch { /* best-effort */ }
-          }
-          span.end(toolResult.success ? 'ok' : 'error', toolResult.success ? undefined : { error: (toolResult.error || resultStr).slice(0, 120) });
-          return { idx, result: { tc: p.tc, result: resultStr, success: toolResult.success, toolName: p.toolName } };
-        } catch (e) {
-          span.end('error', { error: String(e).slice(0, 120) });
-          return { idx, result: { tc: p.tc, result: `Tool '${p.toolName}' execution failed: ${e}`, success: false, toolName: p.toolName } };
-        }
-      },
-      { concurrency, signal },
-    );
-    for (const { idx, result } of completed) {
-      results[idx] = result;
-    }
-
-    // Fill in dedup results from originals
-    for (const e of execPlan) {
-      if (e.isDuplicate && e.prep.toolArgs) {
-        const serialized = safeStableStringify(e.prep.toolArgs);
-        if (serialized === undefined) continue;
-        const dedupKey = `${e.prep.toolName}:${serialized}`;
-        const originalIdx = seenDedupKeys.get(dedupKey);
-        if (originalIdx !== undefined && results[originalIdx]) {
-          results[e.idx] = { ...results[originalIdx]!, tc: e.prep.tc };
-        }
-      }
-    }
-
-    // Phase D: Record results to memory (clamped — one runaway read_file or
-    // http_get must not flood the context window)
-    const resultLimit = Number((this.config as any)?.llm?.tool_result_limit) || undefined;
-    for (const r of results) {
-      if (!r) continue;
-
-      if (typeof r.result === 'string' && r.result.includes('[CircuitBreakerOpen]')) {
-        if (suppressed) suppressed.add(r.toolName);
-      }
-
-      this.memory.addMessage('tool', clampToolResult(r.result, resultLimit), {
-        name: r.toolName,
-        toolCallId: r.tc.id,
-        ephemeral,
-      });
-    }
-
-    return results.filter(Boolean) as Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>;
+    options?: ToolCallExecutorOptions,
+  ): Promise<ToolExecutionResult[]> {
+    return new ToolCallExecutor({
+      agentName: this.name,
+      config: this.config,
+      bus: this.bus,
+      registry: this.toolRegistry,
+      tracer: this.tracer,
+      approve: (toolName, args) => this.checkToolApproval(toolName, args),
+      setActing: () => this.setState(AgentState.ACTING),
+      getHooks: () => this.getHooks(),
+      markFilesWritten: () => { this._turnWroteFiles = true; },
+      addToolMessage: (content, metadata) => this.memory.addMessage('tool', content, metadata),
+    }).execute(toolCalls, options);
   }
 
   async close(): Promise<void> {

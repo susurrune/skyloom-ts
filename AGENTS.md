@@ -42,3 +42,12 @@ npm run build
 ```
 
 If a check cannot run, document the reason and the next-best validation.
+
+## Delivery Workflow
+
+For each completed optimization batch:
+
+1. Run targeted tests, then type-check, lint, the full test suite, build, and package smoke tests.
+2. Commit and push the current pull-request branch to GitHub.
+3. Wait for every required GitHub Actions check to pass; diagnose and fix failures before reporting completion.
+4. Rebuild locally, run `npm link`, verify `sky version`, then restart and health-check the local Web service on `127.0.0.1:7777`.
