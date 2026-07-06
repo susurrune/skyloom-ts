@@ -632,7 +632,7 @@ body{
 #settings-close{appearance:none;padding:6px 0;border:0;border-bottom:1px solid var(--ink-3);background:transparent;color:var(--ink-3);font-family:inherit;cursor:pointer}
 #settings-form{min-height:calc(100% - 72px);display:flex;flex-direction:column}
 #settings-loading{padding:52px 2px;color:var(--ink-3);text-align:center}
-#settings-content{flex:1}
+#settings-content{flex:1;padding-bottom:10px}
 .settings-section{padding:22px 2px 24px;border-bottom:1px dashed var(--line)}
 .settings-section-head{min-height:52px;display:grid;grid-template-columns:48px minmax(0,1fr) auto;align-items:center;gap:12px;margin-bottom:12px}
 .settings-section-head.compact{min-height:auto;grid-template-columns:minmax(0,1fr) auto;margin-bottom:14px}
@@ -642,7 +642,7 @@ body{
 #settings-agent-name{font-size:.72rem;color:var(--notebook-blue);white-space:nowrap}
 .setting-row{min-width:0;display:flex;flex-direction:column;gap:5px;padding:10px 0;color:var(--ink-3);font-size:.7rem}
 .setting-row>span{display:flex;justify-content:space-between;gap:12px;letter-spacing:.04em}
-.setting-row select,.setting-row input[type=number],.setting-row input[type=password]{width:100%;height:39px;padding:0 10px;border:0;border-bottom:1.5px solid var(--ink);
+.setting-row select,.setting-row input[type=number],.setting-row input[type=password],.setting-row input[type=text],.setting-row input[type=url]{width:100%;height:39px;padding:0 10px;border:0;border-bottom:1.5px solid var(--ink);
   border-radius:0;background:var(--line-soft);color:var(--ink);font:inherit;font-size:.82rem;outline:none}
 .setting-row select:focus,.setting-row input:focus{border-color:var(--pigment);box-shadow:0 2px 0 var(--pigment-soft)}
 .setting-row input[type=range]{width:100%;height:22px;accent-color:var(--pigment)}
@@ -657,16 +657,21 @@ body{
 .setting-toggle input:focus-visible+i{outline:2px solid var(--pigment);outline-offset:3px}
 .runtime-toggle{margin-top:5px;border-top:1px dashed var(--line)}
 .credential-row{display:grid;grid-template-columns:minmax(150px,.75fr) minmax(0,1.25fr);gap:22px}
+.credential-actions{display:flex;align-items:center;justify-content:space-between;gap:18px;padding-top:7px}
+.credential-actions small{max-width:340px;color:var(--ink-3);font-size:.62rem;line-height:1.45}
+#setting-clear-key{appearance:none;flex:0 0 auto;padding:5px 0;border:0;border-bottom:1px solid var(--annotation);background:transparent;color:var(--annotation);font-family:inherit;font-size:.68rem;cursor:pointer}
+#setting-clear-key:disabled{border-color:var(--line);color:var(--ink-4);cursor:default}
+#setting-clear-key.pending{border-color:var(--err);color:var(--err)}
 #setting-key-state{padding:2px 7px;border:1px dashed var(--annotation);color:var(--annotation);font-size:.62rem;transform:rotate(1deg)}
 #setting-key-state.configured{border-color:var(--ok);color:var(--ok)}
-.settings-foot{position:sticky;bottom:-1px;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px 0 3px;
-  background:linear-gradient(180deg,transparent 0,var(--card-solid) 18%)}
+.settings-foot{position:sticky;z-index:2;bottom:-1px;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:13px 2px 4px;
+  border-top:1.5px solid var(--ink);background:var(--card-solid);box-shadow:0 -7px 0 var(--line-soft)}
 #settings-result{min-height:1.4em;color:var(--ink-3);font-size:.68rem;line-height:1.4}
 #settings-save{height:42px;padding:0 16px;display:flex;align-items:center;gap:7px;border:1.5px solid var(--ink);border-radius:2px;background:var(--annotation);
   color:#fffdf6;box-shadow:3px 3px 0 var(--ink);font-family:inherit;cursor:pointer;transform:rotate(-1deg)}
 #settings-save:hover{transform:translateY(-2px) rotate(1deg)}#settings-save:disabled{opacity:.45;box-shadow:none;cursor:default}
 #settings-save .ui-icon{width:24px;height:20px}
-#settings-close:focus-visible,#settings-save:focus-visible{outline:2px solid var(--pigment);outline-offset:3px}
+#settings-close:focus-visible,#settings-save:focus-visible,#setting-clear-key:focus-visible{outline:2px solid var(--pigment);outline-offset:3px}
 
 @media(max-width:760px){
   #sidebar{padding:7px 9px;background:rgba(230,238,233,.9);border-right:0;border-bottom:2px solid var(--ink)}
@@ -711,6 +716,7 @@ body{
   #settings-sheet{width:100%;height:min(88vh,780px);padding:19px 18px max(18px,env(safe-area-inset-bottom));
     border-left:0;border-top:2px solid var(--ink);box-shadow:0 -7px 0 var(--line);transform:translateY(28px)}
   .settings-grid,.credential-row{grid-template-columns:1fr;gap:0}
+  .credential-actions{align-items:flex-start}
   .settings-section{padding:17px 1px 18px}
   .settings-foot{padding-top:13px}
 }

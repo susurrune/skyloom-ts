@@ -94,7 +94,7 @@ export const AGENTS_META: AgentMeta[] = AGENT_ORDER.map((name) => toAgentMeta(AG
 
 export const SKYLOOM_FAVICON_PNG = readWebAssetBuffer("assets/image2-favicon.png");
 
-const CACHE_BUST = "workshop-v1";
+const CACHE_BUST = "workshop-v2";
 
 function assetCandidates(relativePath: string): string[] {
   return [

@@ -95,7 +95,7 @@ describe("web · page", () => {
 
   it("ships the enterprise interaction surface", () => {
     // stop-generation, theme toggle, retry/export/new session, shortcuts, scroll pill, toasts
-    for (const marker of ["send-btn", "theme-btn", "settings-btn", "settings-panel", "setting-dark-mode", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
+    for (const marker of ["send-btn", "theme-btn", "settings-btn", "settings-panel", "setting-unified-model", "setting-workspace", "setting-provider-endpoint", "setting-clear-key", "setting-dark-mode", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
       expect(shipped, `missing: ${marker}`).toContain(marker);
     }
     // tool timeline + reasoning + markdown body classes exist in CSS

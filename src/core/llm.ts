@@ -774,6 +774,11 @@ export class LLMClient {
     const key = process.env[envVar];
     if (key) return key;
 
+    // Runtime config may have been updated by the Web workshop. Read it before
+    // falling back to disk so a credential change affects the next request.
+    const configuredKey = (this.config as any).api_keys?.[provider];
+    if (configuredKey) return String(configuredKey);
+
     // 2. Check config file (~/.skyloom/config.yaml)
     try {
       const fs = require("fs"); const path = require("path"); const yaml = require("yaml");
@@ -790,7 +795,16 @@ export class LLMClient {
 
   private getBaseUrl(model: string): string {
     let provider = "openai"; const [pr] = splitProvider(model); if (pr) provider = pr;
-    else { const l = model.toLowerCase(); if (l.includes("claude")) return "https://api.anthropic.com/v1"; else if (l.includes("deepseek")) return "https://api.deepseek.com/v1"; else if (l.includes("groq")) return "https://api.groq.com/openai/v1"; else if (l.includes("openrouter")) return "https://openrouter.ai/api/v1"; else if (l.includes("ollama")) return ((process.env.OLLAMA_HOST || "http://localhost:11434") + "/v1"); }
+    else {
+      const l = model.toLowerCase();
+      if (l.includes("claude")) provider = "anthropic";
+      else if (l.includes("deepseek")) provider = "deepseek";
+      else if (l.includes("groq")) provider = "groq";
+      else if (l.includes("openrouter")) provider = "openrouter";
+      else if (l.includes("ollama")) provider = "ollama";
+    }
+    const configured = (this.config as any).providers?.[provider]?.base_url;
+    if (typeof configured === "string" && configured.trim()) return configured.trim().replace(/\/+$/, "");
     const urls: Record<string, string> = {
       openai: "https://api.openai.com/v1",
       anthropic: "https://api.anthropic.com/v1",

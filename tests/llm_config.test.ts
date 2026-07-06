@@ -3,6 +3,22 @@ import { LLMClient } from "../src/core/llm";
 import { ToolRegistry } from "../src/core/tool";
 
 describe("LLM request settings", () => {
+  it("uses runtime credentials and provider endpoint overrides", () => {
+    const client = new LLMClient({
+      default_model: "gpt-4o",
+      api_keys: { openai: "runtime-only-key" },
+      providers: {
+        openai: { base_url: "http://127.0.0.1:8787/v1" },
+        deepseek: { base_url: "http://127.0.0.1:8788/v1" },
+      },
+      agents: {},
+    }, new ToolRegistry());
+
+    expect((client as any).getApiKey("gpt-4o")).toBe("runtime-only-key");
+    expect((client as any).getBaseUrl("gpt-4o")).toBe("http://127.0.0.1:8787/v1");
+    expect((client as any).getBaseUrl("deepseek-chat")).toBe("http://127.0.0.1:8788/v1");
+  });
+
   it("uses per-agent YAML settings and lets explicit overrides win", async () => {
     const client = new LLMClient({
       default_model: "gpt-4o",

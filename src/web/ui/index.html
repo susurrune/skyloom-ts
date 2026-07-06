@@ -79,10 +79,16 @@
     <form id="settings-form">
       <div id="settings-loading" aria-live="polite">正在展开设置卷册…</div>
       <div id="settings-content" hidden>
+        <section class="settings-section" aria-labelledby="default-settings-title">
+          <div class="settings-section-head compact"><div><span class="section-no">01 · DEFAULT</span><h3 id="default-settings-title">全局与工作区</h3></div></div>
+          <label class="setting-row setting-wide"><span>统一默认模型</span><select id="setting-unified-model"></select></label>
+          <label class="setting-row setting-wide"><span>工作区路径</span><input id="setting-workspace" type="text" autocomplete="off" spellcheck="false"></label>
+        </section>
+
         <section class="settings-section agent-settings" aria-labelledby="agent-settings-title">
           <div class="settings-section-head">
             <span id="settings-agent-icon" class="weather-doodle img2-icon icon-fog" aria-hidden="true"></span>
-            <div><span class="section-no">01 · AGENT</span><h3 id="agent-settings-title">当前灵</h3></div>
+            <div><span class="section-no">02 · AGENT</span><h3 id="agent-settings-title">当前灵</h3></div>
             <span id="settings-agent-name"></span>
           </div>
           <label class="setting-row setting-wide"><span>模型</span><select id="setting-model"></select></label>
@@ -92,7 +98,7 @@
         </section>
 
         <section class="settings-section" aria-labelledby="runtime-settings-title">
-          <div class="settings-section-head compact"><div><span class="section-no">02 · RUNTIME</span><h3 id="runtime-settings-title">运行织法</h3></div></div>
+          <div class="settings-section-head compact"><div><span class="section-no">03 · RUNTIME</span><h3 id="runtime-settings-title">运行织法</h3></div></div>
           <div class="settings-grid">
             <label class="setting-row"><span>回复语言</span><select id="setting-language"><option value="zh">中文</option><option value="en">English</option></select></label>
             <label class="setting-row"><span>权限模式</span><select id="setting-approval"><option value="interactive">询问确认</option><option value="auto">自动判断</option><option value="acceptEdits">接受编辑</option><option value="strict">严格只读</option><option value="bypass">放行模式</option></select></label>
@@ -103,11 +109,13 @@
         </section>
 
         <section class="settings-section" aria-labelledby="credential-settings-title">
-          <div class="settings-section-head compact"><div><span class="section-no">03 · CREDENTIAL</span><h3 id="credential-settings-title">模型凭据</h3></div><span id="setting-key-state"></span></div>
+          <div class="settings-section-head compact"><div><span class="section-no">04 · CONNECTION</span><h3 id="credential-settings-title">模型连接</h3></div><span id="setting-key-state"></span></div>
           <div class="credential-row">
             <label class="setting-row"><span>Provider</span><select id="setting-key-provider"></select></label>
             <label class="setting-row key-field"><span>新 API Key</span><input id="setting-api-key" type="password" autocomplete="new-password" placeholder="••••••••"></label>
           </div>
+          <label class="setting-row setting-wide"><span>兼容端点</span><input id="setting-provider-endpoint" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1"></label>
+          <div class="credential-actions"><small>仅保存本机配置，端点不得包含账号或密码。</small><button id="setting-clear-key" type="button">清除已存 Key</button></div>
         </section>
       </div>
       <footer class="settings-foot">

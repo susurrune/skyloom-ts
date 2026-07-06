@@ -27,6 +27,7 @@ export function clientMain(): void {
   let panelActiveSessionId: string | null = null;
   let settingsData: any = null;
   let settingsBusy = false;
+  let clearKeyProvider: string | null = null;
 
   /* ── platform-aware shortcuts ──
      Apple: ⌘1-6 / ⌘K. Elsewhere: Alt+1-6 (Ctrl+digit is reserved by browsers
@@ -477,6 +478,7 @@ export function clientMain(): void {
     if (!panel) return;
     panel.classList.remove('show');
     $('#settings-btn').setAttribute('aria-expanded', 'false');
+    clearKeyProvider = null;
   }
 
   function setSelectValue(select: any, value: string, label?: string) {
@@ -489,6 +491,30 @@ export function clientMain(): void {
     select.value = value;
   }
 
+  function fillModelSelect(select: any, data: any, inheritedModel?: string) {
+    select.innerHTML = '';
+    if (inheritedModel) {
+      const inherited = el('option');
+      inherited.value = '';
+      inherited.textContent = '跟随统一模型 · ' + inheritedModel;
+      select.appendChild(inherited);
+    }
+    const providerNames = new Map((data.providers || []).map((provider: any) => [provider.id, provider.name]));
+    const groups = new Map();
+    for (const model of data.models || []) {
+      if (!groups.has(model.provider)) {
+        const group = el('optgroup');
+        group.label = providerNames.get(model.provider) || model.provider;
+        groups.set(model.provider, group);
+        select.appendChild(group);
+      }
+      const option = el('option');
+      option.value = model.id;
+      option.textContent = model.id + (model.local ? ' · 本地' : '');
+      groups.get(model.provider).appendChild(option);
+    }
+  }
+
   function renderSettings(data: any) {
     settingsData = data;
     const agent = (data.agents || []).find((item: any) => item.name === cur.name);
@@ -498,27 +524,15 @@ export function clientMain(): void {
     $('#settings-save').disabled = false;
     $('#settings-agent-icon').className = 'weather-doodle img2-icon icon-' + cur.name;
     $('#settings-agent-name').textContent = cur.label;
+    clearKeyProvider = null;
+
+    const unifiedSelect = $('#setting-unified-model');
+    fillModelSelect(unifiedSelect, data);
+    setSelectValue(unifiedSelect, data.defaults.model, data.defaults.model);
+    $('#setting-workspace').value = data.runtime.workspacePath || '';
 
     const modelSelect = $('#setting-model');
-    modelSelect.innerHTML = '';
-    const inherited = el('option');
-    inherited.value = '';
-    inherited.textContent = '跟随统一模型 · ' + agent.model;
-    modelSelect.appendChild(inherited);
-    const providerNames = new Map((data.providers || []).map((provider: any) => [provider.id, provider.name]));
-    const groups = new Map();
-    for (const model of data.models || []) {
-      if (!groups.has(model.provider)) {
-        const group = el('optgroup');
-        group.label = providerNames.get(model.provider) || model.provider;
-        groups.set(model.provider, group);
-        modelSelect.appendChild(group);
-      }
-      const option = el('option');
-      option.value = model.id;
-      option.textContent = model.id + (model.local ? ' · 本地' : '');
-      groups.get(model.provider).appendChild(option);
-    }
+    fillModelSelect(modelSelect, data, data.defaults.model);
     setSelectValue(modelSelect, agent.modelSource === 'agent' ? agent.model : '', agent.model);
     $('#setting-temperature').value = String(agent.temperature);
     $('#setting-temperature-value').textContent = Number(agent.temperature).toFixed(2);
@@ -540,15 +554,31 @@ export function clientMain(): void {
       providerSelect.appendChild(option);
     }
     if ([...providerSelect.options].some((option: any) => option.value === previousProvider)) providerSelect.value = previousProvider;
-    updateKeyState();
+    updateKeyState(true);
   }
 
-  function updateKeyState() {
+  function updateKeyState(syncEndpoint = false) {
     if (!settingsData) return;
     const provider = (settingsData.providers || []).find((item: any) => item.id === $('#setting-key-provider').value);
     const state = $('#setting-key-state');
-    state.textContent = provider && provider.configured ? '已配置' : '待配置';
+    const labels: any = { environment: '环境变量', config: '已存本机', local: '本地免密', missing: '待配置' };
+    state.textContent = provider ? labels[provider.credentialSource] || '待配置' : '待配置';
     state.className = provider && provider.configured ? 'configured' : '';
+    if (syncEndpoint) $('#setting-provider-endpoint').value = provider ? provider.baseUrl || '' : '';
+    const clear = $('#setting-clear-key');
+    const pending = Boolean(provider && clearKeyProvider === provider.id);
+    clear.disabled = !provider || (!provider.canClearKey && !pending);
+    clear.classList.toggle('pending', pending);
+    clear.textContent = pending ? '撤销清除' : '清除已存 Key';
+  }
+
+  function toggleClearKey() {
+    if (!settingsData) return;
+    const provider = (settingsData.providers || []).find((item: any) => item.id === $('#setting-key-provider').value);
+    if (!provider || (!provider.canClearKey && clearKeyProvider !== provider.id)) return;
+    clearKeyProvider = clearKeyProvider === provider.id ? null : provider.id;
+    if (clearKeyProvider) $('#setting-api-key').value = '';
+    updateKeyState(false);
   }
 
   async function openSettings() {
@@ -587,6 +617,8 @@ export function clientMain(): void {
     const apiKey = $('#setting-api-key').value.trim();
     const payload: any = {
       agent: cur.name,
+      unifiedModel: $('#setting-unified-model').value,
+      workspacePath: $('#setting-workspace').value.trim(),
       model: $('#setting-model').value || null,
       temperature: Number($('#setting-temperature').value),
       maxTokens: Number($('#setting-max-tokens').value),
@@ -595,8 +627,13 @@ export function clientMain(): void {
       approvalMode: $('#setting-approval').value,
       toolConcurrency: Number($('#setting-concurrency').value),
       toolResultLimit: Number($('#setting-result-limit').value),
+      providerEndpoint: {
+        provider: $('#setting-key-provider').value,
+        baseUrl: $('#setting-provider-endpoint').value.trim() || null,
+      },
     };
-    if (apiKey) payload.apiKey = { provider: $('#setting-key-provider').value, value: apiKey };
+    if (clearKeyProvider) payload.clearApiKey = { provider: clearKeyProvider };
+    else if (apiKey) payload.apiKey = { provider: $('#setting-key-provider').value, value: apiKey };
     try {
       const response = await fetch('/api/settings', {
         method: 'PATCH',
@@ -606,6 +643,7 @@ export function clientMain(): void {
       const data: any = await response.json();
       if (!response.ok) throw new Error(data.error || 'save failed');
       $('#setting-api-key').value = '';
+      clearKeyProvider = null;
       renderSettings(data);
       $('#settings-result').textContent = '已保存 · 下次对话生效';
       toast('工坊设置已保存');
@@ -858,7 +896,15 @@ export function clientMain(): void {
     $('#setting-temperature').addEventListener('input', () => {
       $('#setting-temperature-value').textContent = Number($('#setting-temperature').value).toFixed(2);
     });
-    $('#setting-key-provider').addEventListener('change', updateKeyState);
+    $('#setting-key-provider').addEventListener('change', () => {
+      clearKeyProvider = null;
+      updateKeyState(true);
+    });
+    $('#setting-clear-key').addEventListener('click', toggleClearKey);
+    $('#setting-unified-model').addEventListener('change', () => {
+      const inherited = $('#setting-model').options[0];
+      if (inherited && inherited.value === '') inherited.textContent = '跟随统一模型 · ' + $('#setting-unified-model').value;
+    });
     $('#setting-dark-mode').addEventListener('change', () => {
       setTheme($('#setting-dark-mode').checked ? 'dark' : 'light');
     });

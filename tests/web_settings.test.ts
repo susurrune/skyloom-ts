@@ -26,6 +26,7 @@ function fakeContext() {
     state: "idle",
   };
   return {
+    workspacePath: "D:\\workspace",
     config: {
       default_model: "gpt-4o",
       api_keys: { openai: "sk-global-secret" },
@@ -70,7 +71,9 @@ describe("web settings", () => {
       approvalMode: "interactive",
       toolConcurrency: 4,
       toolResultLimit: 50000,
+      workspacePath: "D:\\workspace",
     });
+    expect(snapshot.defaults).toEqual({ model: "gpt-4o" });
     expect(snapshot.agents[0]).toMatchObject({
       name: "fog",
       model: "gpt-4o",
@@ -80,11 +83,31 @@ describe("web settings", () => {
       planMode: false,
       keyConfigured: true,
     });
-    expect(snapshot.providers.find((provider) => provider.id === "openai")?.configured).toBe(true);
+    expect(snapshot.providers.find((provider) => provider.id === "openai")).toMatchObject({
+      configured: true,
+      credentialSource: "config",
+      canClearKey: true,
+      baseUrl: "https://api.openai.com/v1",
+    });
     expect(serialized).not.toContain("sk-global-secret");
     expect(serialized).not.toContain("sk-agent-secret");
     expect(serialized).not.toContain("api_keys");
     expect(serialized).not.toContain("api_key");
+  });
+
+  it("allows deleting a stored key even when an environment key takes precedence", () => {
+    const previous = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "environment-secret";
+    try {
+      const provider = buildWebSettings(fakeContext()).providers.find((item) => item.id === "openai");
+      expect(provider).toMatchObject({
+        credentialSource: "environment",
+        canClearKey: true,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previous;
+    }
   });
 
   it("validates the full patch before applying and persists only allowlisted fields", () => {
@@ -149,6 +172,38 @@ describe("web settings", () => {
     expect(saved.workspace).toBeUndefined();
   });
 
+  it("updates unified model, workspace, provider endpoint, and stored credential atomically", () => {
+    const context = fakeContext();
+    const dir = tempConfigDir();
+    const workspacePath = path.join(dir, "project-workspace");
+
+    const snapshot = applyWebSettings(context, {
+      agent: "fog",
+      unifiedModel: "gpt-4o-mini",
+      workspacePath,
+      providerEndpoint: { provider: "openai", baseUrl: "http://127.0.0.1:8080/v1/" },
+      clearApiKey: { provider: "openai" },
+    }, { configDir: dir });
+
+    expect(context.config.default_model).toBe("gpt-4o-mini");
+    expect(context.config.default_provider).toBe("openai");
+    expect(context.config.providers.openai.base_url).toBe("http://127.0.0.1:8080/v1");
+    expect(context.config.api_keys.openai).toBeUndefined();
+    expect(context.workspacePath).toBe(path.resolve(workspacePath));
+    expect(fs.existsSync(path.join(workspacePath, ".workspace"))).toBe(true);
+    expect(snapshot.defaults.model).toBe("gpt-4o-mini");
+    expect(snapshot.runtime.workspacePath).toBe(path.resolve(workspacePath));
+
+    const saved = yaml.parse(fs.readFileSync(path.join(dir, "config.yaml"), "utf8"));
+    expect(saved).toMatchObject({
+      default_model: "gpt-4o-mini",
+      default_provider: "openai",
+      workspace: { path: workspacePath },
+      providers: { openai: { base_url: "http://127.0.0.1:8080/v1" } },
+    });
+    expect(saved.api_keys?.openai).toBeUndefined();
+  });
+
   it("rejects unknown fields, agents, providers, and invalid numeric ranges", () => {
     const context = fakeContext();
     const cases = [
@@ -157,6 +212,14 @@ describe("web settings", () => {
       { agent: "fog", temperature: 3 },
       { agent: "fog", maxTokens: 100 },
       { agent: "fog", apiKey: { provider: "unknown", value: "secret-value" } },
+      { agent: "fog", workspacePath: "bad\0path" },
+      { agent: "fog", providerEndpoint: { provider: "openai", baseUrl: "javascript:alert(1)" } },
+      { agent: "fog", providerEndpoint: { provider: "openai", baseUrl: "https://user:secret@example.com/v1" } },
+      {
+        agent: "fog",
+        apiKey: { provider: "openai", value: "secret-value" },
+        clearApiKey: { provider: "openai" },
+      },
     ];
 
     for (const patch of cases) {
