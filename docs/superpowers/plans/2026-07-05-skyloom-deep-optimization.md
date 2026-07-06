@@ -22,10 +22,10 @@
 ## Current Baseline
 
 - 版本：`1.26.0`
-- 源码：`src/` 约 113 个文件、32,000 行
-- 自动测试：57 个测试文件、608 项测试
+- 源码：`src/` 约 114 个文件、32,000 行
+- 自动测试：58 个测试文件、609 项测试
 - 已有入口：CLI、全屏 TUI、Web、MCP Server、飞书/企业微信/QQ Gateway
-- 当前主要结构风险：`agent.ts` 1249 行、`memory.ts` 1257 行、`mcp.ts` 1178 行、`loom.ts` 1219 行；`main.ts` 已降至 499 行
+- 当前主要结构风险：`agent.ts` 1207 行、`memory.ts` 1257 行、`mcp.ts` 1178 行、`loom.ts` 1219 行；`main.ts` 已降至 499 行
 
 ### Task 1: 统一运行健康与状态契约
 
@@ -79,7 +79,7 @@
 - [ ] `BaseAgent` 只保留生命周期、公共 API 和依赖组合，目标低于 700 行。
 - [x] 检查所有 span、工具消息和 partial response 的顺序与拆分前一致。
 
-进行中：工具执行已迁入 `ToolCallExecutor`；跨 Agent 请求关联、响应路由、超时回收和后台任务排空已迁入 `DelegationCoordinator`；流式与批处理推理热路径已迁入 `AgentLoop`，取消、工具事件、Trace、进度停止和部分结果持久化均由特征测试保护。`agent.ts` 已从 1566 行降至 1249 行，下一步拆分 session/记忆与任务生命周期。
+进行中：工具执行已迁入 `ToolCallExecutor`；跨 Agent 请求关联、响应路由、超时回收和后台任务排空已迁入 `DelegationCoordinator`；流式与批处理推理热路径已迁入 `AgentLoop`；会话选择、FIFO turn lock、Trace 生命周期与异常清理已迁入 `AgentSessionController`。取消、工具事件、Trace、进度停止和部分结果持久化均由特征测试保护。`agent.ts` 已从 1566 行降至 1207 行，下一步拆分记忆与任务生命周期。
 
 ### Task 4: 多 Agent 编排与任务恢复
 

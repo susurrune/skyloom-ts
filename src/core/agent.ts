@@ -20,6 +20,7 @@ import { getModelInfo } from './catalog';
 import { estimateTokens } from './estimate';
 import { DelegationCoordinator } from './agent/delegation';
 import { AgentLoop, type BatchLoopOptions } from './agent/loop';
+import { AgentSessionController } from './agent/session';
 import {
   ToolCallExecutor,
   type ToolCallExecutorOptions,
@@ -80,9 +81,7 @@ export class BaseAgent {
   /** Set when this turn executed a tool that mutates the filesystem (verify trigger). */
   protected _turnWroteFiles: boolean = false;
   private _hooks: import('./hooks').Hooks | null = null;
-  protected _turnLock: Promise<void> = Promise.resolve();
-  private _turnLockCounter: number = 0;
-  private _turnLockResolve: (() => void) | null = null;
+  private _sessionController: AgentSessionController | null = null;
   private _initPromise: Promise<void> | null = null;
 
   // Time-tag cache (shared across all instances, 30s TTL)
@@ -721,7 +720,7 @@ export class BaseAgent {
     message: string,
     onStatus?: ((status: string) => void) | null
   ): Promise<string> {
-    return this.withTurnLock(() => this.chatImpl(message, onStatus));
+    return this.sessionController.withTurn(() => this.chatImpl(message, onStatus));
   }
 
   protected async chatImpl(
@@ -760,7 +759,10 @@ export class BaseAgent {
   }
 
   async *chatStream(message: string, signal?: AbortSignal): AsyncGenerator<Record<string, any>> {
-    yield* this.chatStreamForSession(message, signal);
+    yield* this.sessionController.runStream(
+      message,
+      (activated) => this.chatStreamImpl(message, activated, signal),
+    );
   }
 
   async *chatStreamInSession(
@@ -768,9 +770,13 @@ export class BaseAgent {
     message: string,
     signal?: AbortSignal
   ): AsyncGenerator<Record<string, any>> {
-    yield* this.chatStreamForSession(message, signal, async () => {
-      if (!await this.memory.loadSession(sessionId)) throw new Error('session not found');
-    });
+    yield* this.sessionController.runStream(
+      message,
+      (activated) => this.chatStreamImpl(message, activated, signal),
+      async () => {
+        if (!await this.memory.loadSession(sessionId)) throw new Error('session not found');
+      },
+    );
   }
 
   async *chatStreamInNamedSession(
@@ -778,40 +784,11 @@ export class BaseAgent {
     message: string,
     signal?: AbortSignal
   ): AsyncGenerator<Record<string, any>> {
-    yield* this.chatStreamForSession(message, signal, async () => {
-      await this.memory.loadOrCreateNamedSession(sessionName);
-    });
-  }
-
-  private async *chatStreamForSession(
-    message: string,
-    signal?: AbortSignal,
-    selectSession?: () => Promise<void>
-  ): AsyncGenerator<Record<string, any>> {
-    const releaseTurn = await this.acquireTurnLock();
-    const self = this;
-    let turnStarted = false;
-
-    try {
-      if (selectSession) await selectSession();
-      const activatedNow = this.autoActivateSkills(message);
-      this.tracer.startTrace(message.replace(/\s+/g, ' ').slice(0, 80), this.name);
-      turnStarted = true;
-      for await (const ev of self.chatStreamImpl(message, activatedNow.length > 0 ? activatedNow : undefined, signal)) {
-        yield ev;
-      }
-    } catch (err) {
-      if (turnStarted) {
-        const st = this.memory.shortTerm;
-        if (st.length > 0 && st[st.length - 1].role === 'user') {
-          this.popLastUserMessage();
-        }
-      }
-      throw err;
-    } finally {
-      if (turnStarted) this.tracer.endTrace();
-      releaseTurn();
-    }
+    yield* this.sessionController.runStream(
+      message,
+      (activated) => this.chatStreamImpl(message, activated, signal),
+      async () => { await this.memory.loadOrCreateNamedSession(sessionName); },
+    );
   }
 
   /** The most recently completed (or in-progress) run trace. */
@@ -1064,7 +1041,7 @@ export class BaseAgent {
     task: Task,
     onStatus?: ((status: string) => void) | null
   ): Promise<TaskResult> {
-    return this.withTurnLock(() => this.executeTaskImpl(task, onStatus));
+    return this.sessionController.withTurn(() => this.executeTaskImpl(task, onStatus));
   }
 
   private async executeTaskImpl(
@@ -1200,6 +1177,19 @@ export class BaseAgent {
     return this._delegationCoordinator;
   }
 
+  private get sessionController(): AgentSessionController {
+    if (!this._sessionController) {
+      this._sessionController = new AgentSessionController({
+        agentName: () => this.name,
+        tracer: this.tracer,
+        getShortTerm: () => this.memory.shortTerm,
+        autoActivateSkills: (message) => this.autoActivateSkills(message),
+        popLastUserMessage: () => this.popLastUserMessage(),
+      });
+    }
+    return this._sessionController;
+  }
+
   getStatus(): Record<string, any> {
     return {
       name: this.name,
@@ -1211,39 +1201,7 @@ export class BaseAgent {
     };
   }
 
-  // ── Turn lock ──
-
-  private async acquireTurnLock(): Promise<() => void> {
-    while (this._turnLockCounter > 0) {
-      await new Promise<void>(resolve => {
-        const oldResolve = this._turnLockResolve;
-        this._turnLockResolve = () => { oldResolve?.(); resolve(); };
-      });
-    }
-    this._turnLockCounter++;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this._turnLockCounter--;
-      if (this._turnLockResolve) {
-        const r = this._turnLockResolve;
-        this._turnLockResolve = null;
-        r();
-      }
-    };
-  }
-
   getToolStats() {
     return this.toolRegistry.getStats();
-  }
-
-  private async withTurnLock<T>(fn: () => Promise<T>): Promise<T> {
-    const release = await this.acquireTurnLock();
-    try {
-      return await fn();
-    } finally {
-      release();
-    }
   }
 }
