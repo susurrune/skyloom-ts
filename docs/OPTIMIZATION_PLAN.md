@@ -100,16 +100,16 @@
 - [x] **P2.2 Web 流式**：`/api/chat` 改 SSE（`text/event-stream`），前端 `fetch` + `ReadableStream` 真流式替换假打字机，工具调用呈现为"气象事件"系统消息。已 curl + 真实 API 验证。
 - [x] **P2.3 中断**：`AbortSignal` 从 CLI 贯穿 `chatStream → streamWithTools → callOpenAIStream → fetch`。Ctrl-C 中断当前 turn 并**保留已产出内容**（轮间检测 abort → `interrupted` 事件 + 落库部分内容），二次 Ctrl-C 强退。实测 DeepSeek：abort 后 ~26ms 内停流（不再跑满整段生成）。
 
-### Phase 3 — `agent.ts` 分层（可维护性）｜~1.5 天 🔵 进行中（1549 → 1396 行）
+### Phase 3 — `agent.ts` 分层（可维护性）｜~1.5 天 🔵 进行中（1549 → 1249 行）
 
 把巨石拆成职责单一的模块（保持对外 API 不变，re-export 兜底）：
 
 - [x] `core/agent/task.ts` — 域模型 `Task`/`TaskState`/`TaskResult`/`AgentState`（纯、可测，re-export 验证身份一致）。
 - [x] `agent_helpers.ts` += `parseExtractedFacts`（纯解析器，移出 BaseAgent）。
-- [ ] `core/agent/loop.ts` — LLM 推理循环（`llmLoop` / `chatStreamImpl`，~275 行热路径）
-- [ ] `core/agent/tools.ts` — 工具选择/执行/结果记录
+- [x] `core/agent/loop.ts` — 流式与批处理 LLM 推理循环（工具回合、取消、进度停止、Trace 与部分结果持久化）。
+- [x] `core/agent/tools.ts` — 工具选择/执行/结果记录
 - [x] `core/agent/guard.ts` — 防循环启发式抽成 `LoopGuard` 类（持有每轮状态，`observe()` 返回 hints/stop 决策，无副作用）。忠实迁移行为；agent 守卫终止测试仍通过。新增 [`tests/guard.test.ts`](../tests/guard.test.ts) 单测各分支（叙述循环/签名循环/失败堆积/搜索风暴）——这些此前**零覆盖**。期间发现并**修复**两处死安全网：all-failed 硬停（`>=8`）的 outcomes 缓冲上限 6→8；search-storm 硬停（`>=12`）改用**每轮累计搜索计数**（不再受 SIG_WINDOW=8 截断）。两个安全网现在如设计般触发，单测覆盖。
-- [ ] `core/agent/delegate.ts` — 跨 Agent 委派与汇总
+- [x] `core/agent/delegation.ts` — 跨 Agent 委派、请求关联、超时清理与后台任务排空
 - [ ] `core/agent.ts` — 仅保留 `BaseAgent` 编排与公共 API（目标 < 500 行）
 
 > ✅ **热路径测试网已就位**：[`tests/agent.test.ts`](../tests/agent.test.ts) 用**脚本化 mock LLM** 特征化了核心循环 —— 简单对话、阻塞 `chat()`、推理流、**工具调用回合**、**防循环 guard 终止**（模型重复同一工具 60 次仍能有界终止）。`loop/tools/guard/delegate` 的拆分现在可以安全进行（每步跑这套网 + 真实 API 抽查）。纯单元（task/helpers）已先抽出。

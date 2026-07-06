@@ -22,10 +22,10 @@
 ## Current Baseline
 
 - 版本：`1.26.0`
-- 源码：`src/` 约 112 个文件、32,000 行
-- 自动测试：54 个测试文件、598 项测试
+- 源码：`src/` 约 113 个文件、32,000 行
+- 自动测试：57 个测试文件、608 项测试
 - 已有入口：CLI、全屏 TUI、Web、MCP Server、飞书/企业微信/QQ Gateway
-- 当前主要结构风险：`agent.ts` 1566 行、`memory.ts` 1257 行、`mcp.ts` 1178 行、`loom.ts` 1219 行；`main.ts` 已降至 499 行
+- 当前主要结构风险：`agent.ts` 1249 行、`memory.ts` 1257 行、`mcp.ts` 1178 行、`loom.ts` 1219 行；`main.ts` 已降至 499 行
 
 ### Task 1: 统一运行健康与状态契约
 
@@ -75,11 +75,11 @@
 - Preserves: `BaseAgent.chat()`, `chatStream()`, `executeTask()`, `getStatus()`
 
 - [x] 为流式工具回合、取消、中途持久化、并发 turn lock、重复工具防循环添加特征测试。
-- [ ] 先移动纯工具执行代码，再移动委派，再移动流式循环；每次移动后运行 Agent 测试。
+- [x] 先移动纯工具执行代码，再移动委派，再移动流式与批处理循环；每次移动后运行 Agent 测试。
 - [ ] `BaseAgent` 只保留生命周期、公共 API 和依赖组合，目标低于 700 行。
-- [ ] 检查所有 span、工具消息和 partial response 的顺序与拆分前一致。
+- [x] 检查所有 span、工具消息和 partial response 的顺序与拆分前一致。
 
-进行中：工具执行已迁入 `ToolCallExecutor`；跨 Agent 请求关联、响应路由、超时回收和后台任务排空已迁入 `DelegationCoordinator`，并修复成功响应后超时计时器未清理、缺失 payload source 时误广播响应的问题。下一步继续拆流式循环。
+进行中：工具执行已迁入 `ToolCallExecutor`；跨 Agent 请求关联、响应路由、超时回收和后台任务排空已迁入 `DelegationCoordinator`；流式与批处理推理热路径已迁入 `AgentLoop`，取消、工具事件、Trace、进度停止和部分结果持久化均由特征测试保护。`agent.ts` 已从 1566 行降至 1249 行，下一步拆分 session/记忆与任务生命周期。
 
 ### Task 4: 多 Agent 编排与任务恢复
 

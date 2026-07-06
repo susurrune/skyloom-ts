@@ -6,25 +6,20 @@
  */
 
 import { Event, EventType, MessageBus } from './bus';
-import { TASK_DONE_SENTINEL } from './constants';
-import { LLMClient, type LLMResponse, type ToolCall } from './llm';
+import { LLMClient, type ToolCall } from './llm';
 import { getLogger } from './logger';
 import { Memory, Message } from './memory';
 import { Skill, SkillRegistry } from './skill';
 import { type ToolDefinition, ToolRegistry } from './tool';
 import {
-  parseToolArgs,
   extractFilePathsFromMessages,
   enrichResponseWithArtifacts,
-  toolStatusLabel,
-  synthesizeDelegationSummary,
   parseExtractedFacts,
 } from './agent_helpers';
-import { selectRelevantTools } from './tool_router';
 import { getModelInfo } from './catalog';
 import { estimateTokens } from './estimate';
-import { LoopGuard } from './agent/guard';
 import { DelegationCoordinator } from './agent/delegation';
+import { AgentLoop, type BatchLoopOptions } from './agent/loop';
 import {
   ToolCallExecutor,
   type ToolCallExecutorOptions,
@@ -34,8 +29,6 @@ import { Tracer, type Trace } from './trace';
 
 const log = getLogger('agent');
 
-/** Tools with side effects, hidden from the model while in plan mode. */
-const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$|^apply_patch$/;
 export { clampToolResult } from './agent/tools';
 
 // Domain model lives in ./agent/task — re-exported here so importers of
@@ -637,6 +630,32 @@ export class BaseAgent {
     }).execute(toolCalls, options);
   }
 
+  private createAgentLoop(): AgentLoop {
+    return new AgentLoop({
+      name: this.name,
+      llm: this.llm,
+      bus: this.bus,
+      memory: this.memory,
+      toolRegistry: this.toolRegistry,
+      tracer: this.tracer,
+      getActiveSkills: () => this._activeSkills,
+      getSkills: () => this._skills,
+      activeToolNames: () => this.activeToolNames(),
+      getSkillConfigOverrides: () => this.getSkillConfigOverrides(),
+      executeToolCalls: (calls, options) => this.executeToolCalls(calls, options),
+      setState: (state) => this.setState(state),
+      maybeExtractFacts: () => this.maybeExtractFacts(),
+      messagesWithRecall: () => this.messagesWithRecall(),
+      popLastUserMessage: () => this.popLastUserMessage(),
+      shouldAutoCompact: () => this.shouldAutoCompact(),
+      compact: () => this.compact(),
+      resolveModelId: () => this.resolveModelId(),
+      getPlanMode: () => this.planMode,
+      maxToolRoundsHardCap: this._maxToolRoundsHardCap,
+      maxNoProgressRounds: this._maxNoProgressRounds,
+    });
+  }
+
   async close(): Promise<void> {
     // Drain all in-flight work before closing memory so background writes land.
     const pending = [...this._pendingExtracts];
@@ -803,269 +822,7 @@ export class BaseAgent {
     autoActivated?: string[],
     signal?: AbortSignal
   ): AsyncGenerator<Record<string, any>> {
-    await this.setState(AgentState.THINKING);
-    // Plan mode: the tag travels with the message so the model plans instead
-    // of acting, and the read-only tool filter below removes the temptation.
-    const userMessage = this.planMode
-      ? `[计划模式] 只读调研，不要执行任何修改。请输出一份编号的执行计划（涉及哪些文件、每步做什么、风险点），等待用户批准后再实施。\n\n${message}`
-      : message;
-    this.memory.addMessage('user', userMessage);
-    try {
-      require('./file_checkpoint').getFileCheckpoints().beginTurn(message);
-    } catch { /* optional */ }
-    let assistantStored = false;
-
-    if (this.shouldAutoCompact()) {
-      try { await this.compact(); } catch (e) { log.warn('auto_compact_failed', { error: String(e) }); }
-    }
-
-    const delegations: Array<[string, boolean]> = [];
-    const suppressedTools = new Set<string>();
-
-    if (autoActivated && autoActivated.length > 0) {
-      suppressedTools.add('list_skills');
-      this.memory.addMessage('system',
-        '[Auto-activated skills: ' + autoActivated.join(', ') +
-        '] These were chosen from your message\'s keywords. Do NOT call list_skills.'
-      );
-    }
-
-    const guard = new LoopGuard();
-
-    let toolNamesCache: string[] | null = null;
-    let cacheKey: string | null = null;
-
-    const resolveToolNames = (): string[] => {
-      const key = JSON.stringify([[...suppressedTools].sort(), [...this._activeSkills].sort(), this.planMode]);
-      if (toolNamesCache !== null && cacheKey === key) return toolNamesCache;
-      let candidates = this.activeToolNames().filter(t => !suppressedTools.has(t));
-      if (this.planMode) {
-        candidates = candidates.filter(n => {
-          if (SIDE_EFFECT_TOOL_RE.test(n)) return false;
-          const t = this.toolRegistry.get(n);
-          return !(t as any)?.dangerous;
-        });
-      }
-      const must = new Set<string>();
-      for (const s of this._skills) {
-        if (this._activeSkills.has(s.name)) {
-          for (const t of s.requiredTools) must.add(t);
-        }
-      }
-      toolNamesCache = selectRelevantTools(this.toolRegistry, candidates, message, { mustInclude: must });
-      cacheKey = key;
-      return toolNamesCache;
-    };
-
-    try {
-      let fullContent = '';
-      let roundCount = 0;
-      // Progress-based stopping (OpenClaw-style): we don't cap by round count —
-      // a long task that keeps making progress runs as long as it needs. We
-      // stop when the agent makes no progress for several rounds in a row (pure
-      // spinning), or when the LoopGuard detects a genuine loop. The hard round
-      // cap is only a last-resort backstop against pathological runaway.
-      let consecutiveNoProgress = 0;
-
-      while (true) {
-        // User interrupt between rounds (Ctrl-C): stop before another LLM call.
-        if (signal?.aborted) {
-          if (!assistantStored && fullContent.trim()) {
-            this.memory.addMessage('assistant', fullContent);
-            assistantStored = true;
-          } else if (!assistantStored) {
-            this.popLastUserMessage();
-          }
-          await this.setState(AgentState.IDLE);
-          yield { type: 'interrupted' };
-          yield { type: 'done' };
-          return;
-        }
-        // Last-resort backstop: only trips in pathological cases the progress
-        // detector and LoopGuard both miss. Normal long tasks never reach it.
-        if (roundCount >= this._maxToolRoundsHardCap) break;
-        roundCount++;
-
-        const messages = await this.messagesWithRecall();
-        const toolNames = resolveToolNames();
-        const toolCallsReceived: ToolCall[] = [];
-        let streamingReasoning: string | undefined;
-        let streamUsage: any = null;
-        let roundContent = '';
-
-        const llmSpan = this.tracer.startSpan('chat', 'llm', { model: this.resolveModelId(), round: roundCount });
-        for await (const event of this.llm.streamWithTools(
-          messages,
-          this.name,
-          toolNames.length > 0 ? toolNames : undefined,
-          toolNames.length > 0 ? this.toolRegistry : undefined,
-          Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined,
-          signal
-        )) {
-          if (event.type === 'content') {
-            fullContent += event.text;
-            roundContent += event.text;
-            yield { type: 'content', text: event.text };
-          } else if (event.type === 'tool_call' && event.toolCall) {
-            toolCallsReceived.push(event.toolCall);
-          } else if (event.type === 'error') {
-            llmSpan.end('error', { error: String(event.text).slice(0, 120) });
-            yield { type: 'content', text: `\n[Error: ${event.text}]` };
-            if (!assistantStored) this.popLastUserMessage();
-            await this.setState(AgentState.IDLE);
-            return;
-          } else if (event.type === 'reasoning' && event.text) {
-            yield { type: 'reasoning', text: event.text };
-          } else if (event.type === 'done') {
-            streamUsage = event.usage;
-            streamingReasoning = event.reasoningContent;
-          }
-        }
-        llmSpan.end('ok', streamUsage ? {
-          promptTokens: streamUsage.promptTokens ?? streamUsage.prompt_tokens,
-          completionTokens: streamUsage.completionTokens ?? streamUsage.completion_tokens,
-          cost: streamUsage.cost,
-          toolCalls: toolCallsReceived.length,
-        } : { toolCalls: toolCallsReceived.length });
-
-        if (toolCallsReceived.length === 0) {
-          let finalContent = roundContent;
-          if (!fullContent.trim() && delegations.length > 0) {
-            finalContent = synthesizeDelegationSummary(delegations);
-          }
-          this.memory.addMessage('assistant', finalContent, { reasoningContent: streamingReasoning });
-          assistantStored = true;
-          await this.setState(AgentState.IDLE);
-          this.maybeExtractFacts();
-          if (finalContent !== roundContent) yield { type: 'content', text: finalContent };
-          yield { type: 'done' };
-          return;
-        }
-
-        // Record assistant message with tool calls
-        this.memory.addMessage('assistant', roundContent, {
-          toolCalls: toolCallsReceived,
-          reasoningContent: streamingReasoning,
-        });
-        assistantStored = true;
-
-        if (streamUsage) {
-          this.bus.addEvent(new Event(EventType.LLM_CALL, this.name, null, {
-            model: '', usage: streamUsage,
-          }));
-        }
-
-        // ── Execute all tools via shared pipeline ──
-        // Emit tool_status events before execution
-        for (const tc of toolCallsReceived) {
-          const toolName = tc.function.name;
-          const rawArgs = tc.function.arguments;
-          const toolArgs = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
-          const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
-          yield { type: 'tool_status', label, tool_name: toolName, args: toolArgs || {} };
-        }
-
-        const execResults = await this.executeToolCalls(toolCallsReceived, {
-          dedupCacheable: true,
-          suppressedTools,
-          signal,
-        });
-
-        // ── Record results with streaming ──
-        let taskCompleted = false;
-        for (const r of execResults) {
-          if (r.toolName === 'task_done' && r.result === TASK_DONE_SENTINEL) {
-            taskCompleted = true;
-            const tc = toolCallsReceived.find(t => t.id === r.tc.id);
-            const rawArgs = tc?.function?.arguments;
-            const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
-            const summary = (args?.summary as string) || '';
-            const displayResult = summary ? `[Task completed: ${summary}]` : '[Task completed]';
-            this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
-            yield { type: 'tool_done', label: `task_done: ${summary}` || 'task_done', success: true, tool_name: 'task_done', result: displayResult };
-            continue;
-          }
-
-          const tc = toolCallsReceived.find(t => t.id === r.tc.id);
-          const rawArgs = tc?.function?.arguments;
-          const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
-          const label = args ? toolStatusLabel(r.toolName, args) : r.toolName;
-          const truncated = (r.result || '').slice(0, 800);
-          yield { type: 'tool_done', label, success: r.success, tool_name: r.toolName, result: truncated };
-          if (r.toolName === 'delegate_to') {
-            const target = (args?.agent as string) || '?';
-            delegations.push([target, r.success]);
-          }
-        }
-
-        if (taskCompleted) {
-          if (!assistantStored) this.popLastUserMessage();
-          await this.setState(AgentState.IDLE);
-          yield { type: 'done' };
-          return;
-        }
-
-        // ── Anti-loop guard (narration / tool-signature / stuck / search-storm) ──
-        const decision = guard.observe(roundContent, toolCallsReceived, execResults);
-        for (const hint of decision.hints) this.memory.addMessage('system', hint);
-        if (decision.stop) {
-          this.memory.addMessage('assistant', decision.stop.note);
-          yield { type: 'content', text: decision.stop.contentLine };
-          await this.setState(AgentState.IDLE);
-          yield { type: 'done' };
-          return;
-        }
-
-        // ── Progress-based stopping ──
-        // A round made progress if at least one tool call SUCCEEDED (state
-        // advanced) or the model produced new text this round. Pure spinning —
-        // no successful tool, no text — increments the no-progress counter; any
-        // progress resets it. Stop only after several no-progress rounds in a
-        // row, so a long, productive task is never cut off by a round count.
-        const madeProgress =
-          execResults.some(r => r.success && r.toolName !== 'task_done') ||
-          roundContent.trim().length > 0;
-        if (madeProgress) {
-          consecutiveNoProgress = 0;
-        } else {
-          consecutiveNoProgress++;
-          if (consecutiveNoProgress === this._maxNoProgressRounds - 1) {
-            this.memory.addMessage('system',
-              '[No progress] Your recent rounds produced no successful tool result and no text. Either take a concrete next action, output the final answer, or call task_done. One more empty round will end the turn.');
-          }
-          if (consecutiveNoProgress >= this._maxNoProgressRounds) {
-            if (!assistantStored && fullContent.trim()) {
-              this.memory.addMessage('assistant', fullContent);
-              assistantStored = true;
-            }
-            await this.setState(AgentState.IDLE);
-            yield { type: 'content', text: `\n\n[stalled] ${consecutiveNoProgress} rounds without progress — stopping.` };
-            yield { type: 'done' };
-            return;
-          }
-        }
-      }
-
-      // Hard-cap backstop reached (pathological runaway only).
-      if (!assistantStored) this.popLastUserMessage();
-      await this.setState(AgentState.IDLE);
-      if (!fullContent.trim() && delegations.length > 0) {
-        const synth = synthesizeDelegationSummary(delegations);
-        this.memory.addMessage('assistant', synth);
-        yield { type: 'content', text: synth };
-      }
-      yield {
-        type: 'truncated',
-        reason: `safety ceiling of ${this._maxToolRoundsHardCap} tool rounds reached — the task may be unfinished. Send "continue" to resume, or raise llm.max_tool_rounds_hard_cap in config.`,
-      };
-      yield { type: 'done' };
-    } catch (e: any) {
-      if (!assistantStored) this.popLastUserMessage();
-      await this.setState(AgentState.ERROR);
-      yield { type: 'content', text: `\n[Error: ${e.message || e}]` };
-    } finally {
-      this.memory.pruneToolMessages();
-    }
+    yield* this.createAgentLoop().runStream(message, autoActivated, signal);
   }
 
   protected popLastUserMessage(): void {
@@ -1299,82 +1056,8 @@ export class BaseAgent {
     return messages;
   }
 
-  protected async llmLoop(options?: {
-    onStatus?: ((status: string) => void) | null;
-    ephemeral?: boolean;
-  }): Promise<LLMResponse> {
-    const ephemeral = options?.ephemeral ?? false;
-    const onStatus = options?.onStatus ?? null;
-
-    let response: LLMResponse = { content: '', toolCalls: [], model: '', usage: { promptTokens: 0, completionTokens: 0 }, cost: 0, truncated: false };
-    const fullToolNames = this.activeToolNames();
-
-    const lastUser = [...this.memory.shortTerm].reverse().find(m => m.role === 'user');
-    const must = new Set<string>();
-    for (const s of this._skills) {
-      if (this._activeSkills.has(s.name)) {
-        for (const t of s.requiredTools) must.add(t);
-      }
-    }
-    const toolNames = selectRelevantTools(
-      this.toolRegistry, fullToolNames, lastUser?.content || '', { mustInclude: must }
-    );
-
-    try {
-      // Progress-based stopping (mirrors chatStreamImpl): no round-count limit —
-      // run while making progress, stop after _maxNoProgressRounds empty rounds.
-      // The hard cap is only a last-resort backstop against runaway.
-      let rounds = 0;
-      let consecutiveNoProgress = 0;
-      while (true) {
-        if (rounds >= this._maxToolRoundsHardCap) break;
-        rounds++;
-
-        const messages = await this.messagesWithRecall();
-        if (onStatus) onStatus('thinking...');
-        response = await this.llm.complete(
-          messages, this.name,
-          toolNames.length > 0 ? toolNames : undefined, false,
-          Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined
-        );
-
-        if (!response.toolCalls || response.toolCalls.length === 0) {
-          return response;
-        }
-
-        this.bus.addEvent(new Event(EventType.LLM_CALL, this.name, null, {
-          model: response.model, usage: response.usage,
-        }));
-
-        // Record assistant message
-        this.memory.addMessage('assistant', response.content || '', {
-          toolCalls: response.toolCalls,
-          reasoningContent: response.reasoningContent,
-          ephemeral,
-        });
-
-        // ── Execute all tools via shared pipeline ──
-        const execResults = await this.executeToolCalls(response.toolCalls, { dedupCacheable: true, onStatus: onStatus ?? undefined, ephemeral });
-        await this.setState(AgentState.THINKING);
-
-        // Progress check: any successful tool or produced text resets the
-        // counter; otherwise count an empty round and stop after the threshold.
-        const madeProgress =
-          execResults.some(r => r.success && r.toolName !== 'task_done') ||
-          (response.content || '').trim().length > 0;
-        consecutiveNoProgress = madeProgress ? 0 : consecutiveNoProgress + 1;
-        if (consecutiveNoProgress >= this._maxNoProgressRounds) break;
-      }
-
-      response.truncated = true;
-      if (!response.content) {
-        response.content = `[stopped] no progress for ${this._maxNoProgressRounds} rounds (or backstop reached).`;
-      }
-      return response;
-    } catch (e) {
-      this.memory.pruneToolMessages();
-      throw e;
-    }
+  protected async llmLoop(options?: BatchLoopOptions) {
+    return this.createAgentLoop().runBatch(options);
   }
 
   async executeTask(
