@@ -62,7 +62,7 @@ describe('enterprise doctor', () => {
 
     const result = spawnSync(process.execPath, [
       '--import', 'tsx',
-      '-e', "import('./src/core/config.ts').then((module) => module.loadUserConfig())",
+      'src/cli/main.ts', 'config',
     ], {
       cwd: path.resolve(__dirname, '..'),
       env: { ...process.env, HOME: root, USERPROFILE: root },
