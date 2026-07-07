@@ -1,5 +1,14 @@
 export type ChatSurface = 'loom' | 'classic';
 
+const TOP_LEVEL_COMMANDS = new Set([
+  'chat', 'task', 'web', 'mcp', 'gateway', 'channels', 'config',
+  'init', 'apikey', 'version', 'doctor', 'help',
+]);
+
+export function isTopLevelCommand(value: string): boolean {
+  return TOP_LEVEL_COMMANDS.has(value);
+}
+
 export interface TerminalCapabilities {
   stdinTTY: boolean;
   stdoutTTY: boolean;

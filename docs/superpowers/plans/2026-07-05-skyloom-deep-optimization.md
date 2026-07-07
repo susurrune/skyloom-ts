@@ -192,7 +192,7 @@
 
 - [ ] 对日志中的 token、authorization、cookie、API key 和常见密钥格式做统一脱敏。
 - [ ] trace 关联 LLM、工具、委派、渠道和会话 ID。
-- [ ] 增加 `sky doctor --json`，检查配置、工作区、数据库、模型凭据存在性、MCP 和端口。
+- [x] 增加 `sky doctor --json`，以版本化、脱敏、只读报告检查配置、工作区、记忆目录、模型凭据、项目 MCP 和 Web/Gateway 端口。
 - [ ] 诊断包默认不包含用户消息和文件正文。
 
 ### Task 12: 配置、文档、CI 与发布质量

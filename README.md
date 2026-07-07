@@ -69,11 +69,12 @@ sky
 | `sky --classic` | 线性滚动界面（管道 / 窄终端自动回退） |
 | `sky fog` | 直接与指定 Agent 对话 |
 | `sky task "写一个CLI"` | 多 Agent DAG 编排 |
-| `sky web` | 启动 Web UI → `http://localhost:3000` |
+| `sky web` | 启动 Web UI → `http://localhost:7777` |
 | `sky mcp` | 启动 MCP Server（供 Claude Desktop 等调用） |
 | `sky channels` | 渠道接入向导（选软件 → 扫码进后台 → 填密钥 → 回调 URL 二维码） |
 | `sky gateway` | 启动渠道网关（飞书 / 企业微信 / QQ 机器人接入） |
 | `sky apikey set <provider> <key>` | 保存 API Key |
+| `sky doctor [--json]` | 检查配置、模型、凭据、存储、MCP 与端口，支持 CI 读取 |
 | `sky -p "问题" [--agent fog] [--json]` | Headless 模式（CI / 管道 / 外部编排） |
 
 ---
@@ -141,7 +142,7 @@ Agent 之间可通过 `delegate_to` 工具相互委托子任务，也可通过�
 
 ```bash
 sky web
-# → http://localhost:3000
+# → http://localhost:7777
 ```
 
 宣纸质感、六矿物颜料、按 Agent 切换的气象粒子与印章汉字。`⌘1-6` 唤灵切换。回复经 SSE **真流式**推送，工具调用呈现为「气象事件」。

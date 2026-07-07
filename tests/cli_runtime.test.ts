@@ -1,12 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import {
   TurnInterrupt,
+  isTopLevelCommand,
   parseHeadlessInvocation,
   readPipedInput,
   selectChatSurface,
 } from '../src/cli/runtime';
 
 describe('CLI runtime boundaries', () => {
+  it('recognizes every registered top-level command before defaulting to chat', () => {
+    for (const command of [
+      'chat', 'task', 'web', 'mcp', 'gateway', 'channels', 'config',
+      'init', 'apikey', 'version', 'doctor', 'help',
+    ]) {
+      expect(isTopLevelCommand(command), command).toBe(true);
+    }
+    expect(isTopLevelCommand('fog')).toBe(false);
+    expect(isTopLevelCommand('review-this-project')).toBe(false);
+  });
+
   it('uses the loom only for a sufficiently large interactive terminal', () => {
     expect(selectChatSurface({ stdinTTY: true, stdoutTTY: true, rows: 24, columns: 80 })).toBe('loom');
     expect(selectChatSurface({ stdinTTY: false, stdoutTTY: true, rows: 24, columns: 80 })).toBe('classic');

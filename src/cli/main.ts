@@ -14,11 +14,12 @@ import { InteractiveMode, ModeController } from "./mode";
 import { readLine, renderPalette } from "./tui";
 import { loomChat } from "./loom_chat";
 import { executeSlashCommand, type CommandRuntime } from "./command_handlers";
-import { parseHeadlessInvocation, readPipedInput, selectChatSurface } from "./runtime";
+import { isTopLevelCommand, parseHeadlessInvocation, readPipedInput, selectChatSurface } from "./runtime";
 import { formatCost, renderClassicCommandLine, streamResponse, welcome } from "./classic_runtime";
 import { runHeadless, runTask } from "./headless";
 import { channelsWizard, checkApiKeys, saveApiKey, setupWizard } from "./setup_wizards";
 import { startWebCommand } from "./web_runtime";
+import { runDoctorCommand } from "./doctor";
 const MODE = new ModeController();
 const VERSION = (() => { try { return require("../../package.json").version; } catch { return "1.5.2"; } })();
 
@@ -53,6 +54,11 @@ program.command("apikey").description("Manage API keys (persisted to ~/.skyloom/
     else { process.stdout.write(chalk.dim("Usage: sky apikey set deepseek YOUR_KEY\n")); }
   });
 program.command("version").action(() => { process.stdout.write(`Skyloom v${VERSION}\n`); });
+program.command("doctor").description("Diagnose configuration and runtime readiness")
+  .option("--json", "machine-readable JSON output")
+  .action(async (options: { json?: boolean }) => {
+    process.exitCode = await runDoctorCommand({ json: options.json });
+  });
 
 /* ═══════════════════════════════════════
    Chat loop
@@ -492,7 +498,7 @@ async function main() {
     for (let i = 1; i < rest.length; i++) if ((rest[i] === "-m" || rest[i] === "--model") && i + 1 < rest.length) m = rest[++i];
     await chat(rest[0], m, classic); return;
   }
-  if (!["chat", "task", "web", "config", "init", "version", "mcp", "help"].includes(rest[0]) && !rest[0].startsWith("-")) { await chat("fog", undefined, classic); return; }
+  if (!isTopLevelCommand(rest[0]) && !rest[0].startsWith("-")) { await chat("fog", undefined, classic); return; }
   await program.parseAsync(process.argv);
 }
 
