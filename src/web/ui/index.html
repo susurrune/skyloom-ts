@@ -67,6 +67,14 @@
       <div><span class="sheet-kicker">FIELD ARCHIVE</span><h2 id="sessions-title">历史会话</h2></div>
       <button id="sessions-close" type="button">关闭</button>
     </header>
+    <div class="sessions-tools">
+      <label class="sessions-search">
+        <span class="ui-icon img2-icon icon-help" aria-hidden="true"></span>
+        <input id="sessions-filter" type="search" autocomplete="off" spellcheck="false" placeholder="搜索问题、日期或条数" aria-label="搜索历史会话">
+      </label>
+      <span id="sessions-count" aria-live="polite">0 段</span>
+    </div>
+    <p id="sessions-empty-filter" class="sessions-empty" hidden>没有找到匹配的会话</p>
     <div id="sessions-list" aria-live="polite"></div>
   </section>
 </div>

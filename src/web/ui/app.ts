@@ -802,6 +802,26 @@ export function clientMain(): void {
     return sameDay ? '今天 ' + time : date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
   }
 
+  function normalizeSessionQuery(value: any): string {
+    return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  function applySessionFilter() {
+    const input = $('#sessions-filter') as any;
+    const query = normalizeSessionQuery(input.value);
+    const rows = Array.from(D.querySelectorAll('#sessions-list .session-row')) as any[];
+    let matched = 0;
+    for (const row of rows) {
+      const ok = !query || normalizeSessionQuery(row.dataset.search).includes(query);
+      row.classList.toggle('hide', !ok);
+      if (ok) matched++;
+    }
+    $('#sessions-count').textContent = rows.length ? matched + '/' + rows.length + ' 段' : '0 段';
+    const empty = $('#sessions-empty-filter');
+    empty.textContent = matched || !rows.length ? '' : '没有找到匹配的会话';
+    empty.hidden = Boolean(matched || !rows.length);
+  }
+
   function setSessionsBusy(busy: boolean) {
     sessionsBusy = busy;
     D.querySelectorAll('#sessions-list button').forEach((button: any) => { button.disabled = busy; });
@@ -814,12 +834,20 @@ export function clientMain(): void {
     const sessions = Array.isArray(data.sessions) ? data.sessions : [];
     if (!sessions.length) {
       list.appendChild(el('p', 'sessions-empty', '尚无历史会话'));
+      applySessionFilter();
       return;
     }
     for (const session of sessions) {
       if (!session || typeof session.id !== 'string') continue;
       const active = session.id === panelActiveSessionId;
       const row = el('div', 'session-row' + (active ? ' active' : ''));
+      row.dataset.search = [
+        session.preview || '空白会话',
+        session.id,
+        session.updatedAt || '',
+        Number(session.messageCount || 0) + ' 条消息',
+        active ? '当前' : '',
+      ].join(' ');
       const open = el('button', 'session-open');
       open.type = 'button';
       open.dataset.sessionId = session.id;
@@ -841,6 +869,7 @@ export function clientMain(): void {
       row.appendChild(remove);
       list.appendChild(row);
     }
+    applySessionFilter();
   }
 
   async function openSessions(refresh?: boolean) {
@@ -855,6 +884,8 @@ export function clientMain(): void {
     panel.classList.add('show');
     $('#sessions-btn').setAttribute('aria-expanded', 'true');
     $('#sessions-list').innerHTML = '<p class="sessions-empty">正在翻阅会话…</p>';
+    $('#sessions-count').textContent = '0 段';
+    $('#sessions-empty-filter').hidden = true;
     sessionsBusy = true;
     try {
       const response = await fetch('/api/sessions?agent=' + encodeURIComponent(cur.name));
@@ -1052,6 +1083,7 @@ export function clientMain(): void {
     $('#retry-btn').addEventListener('click', retryLast);
     $('#sessions-btn').addEventListener('click', () => openSessions());
     $('#sessions-close').addEventListener('click', closeSessions);
+    $('#sessions-filter').addEventListener('input', applySessionFilter);
     $('#sessions-panel').addEventListener('click', (e: any) => {
       if (e.target.id === 'sessions-panel') closeSessions();
     });

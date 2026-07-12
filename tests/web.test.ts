@@ -140,6 +140,11 @@ describe("web · page", () => {
     expect(html).toContain('aria-label="聊天历史"');
     expect(html).toContain('<span class="history-label">历史</span>');
     expect(html).toContain('id="sessions-panel"');
+    expect(html).toContain('id="sessions-filter"');
+    expect(html).toContain('id="sessions-count"');
+    expect(html).toContain('id="sessions-empty-filter"');
+    expect(css).toContain(".sessions-tools");
+    expect(css).toContain(".session-row.hide");
     expect(script).toContain("LEGACY_HKEY");
     expect(script).toMatch(/["']skyweb\.h\.["'] \+ a \+ ["']\.["']/);
     expect(script).toContain("store.getItem(SKEY(a))");
@@ -147,6 +152,10 @@ describe("web · page", () => {
     expect(script).toMatch(/Array\.isArray\(parsed\)/);
     expect(script).toContain("cancelAnimationFrame");
     expect(script).toContain("function openSessions");
+    expect(script).toContain("function normalizeSessionQuery");
+    expect(script).toContain("function applySessionFilter");
+    expect(script).toContain("row.dataset.search");
+    expect(script).toContain("没有找到匹配的会话");
     expect(script).toContain("function openSettings");
     expect(script).toContain("/api/settings");
     expect(script).toContain("function apiErrorText");
