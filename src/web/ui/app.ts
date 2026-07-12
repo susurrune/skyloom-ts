@@ -28,6 +28,7 @@ export function clientMain(): void {
   let settingsData: any = null;
   let settingsBusy = false;
   let clearKeyProvider: string | null = null;
+  let healthBusy = false;
 
   /* ── platform-aware shortcuts ──
      Apple: ⌘1-6 / ⌘K. Elsewhere: Alt+1-6 (Ctrl+digit is reserved by browsers
@@ -472,6 +473,75 @@ export function clientMain(): void {
     $('#sessions-btn').setAttribute('aria-expanded', 'false');
   }
 
+  function closeHealth() {
+    const panel = $('#health-panel');
+    if (!panel) return;
+    panel.classList.remove('show');
+    $('#health-btn').setAttribute('aria-expanded', 'false');
+  }
+
+  function renderHealth(data: any) {
+    const summary = data && data.doctor && data.doctor.summary ? data.doctor.summary : { pass: 0, warn: 0, fail: 0 };
+    const runtime = data && data.runtime ? data.runtime.status || {} : {};
+    const agents = runtime.agents && runtime.agents.summary ? runtime.agents.summary : {};
+    const tools = runtime.tools || {};
+    $('#health-state').textContent = data && data.ok ? '健康' : '需处理';
+    $('#health-agents').textContent = Number(agents.idle || 0) + '/' + Number(agents.total || 0) + ' 空闲';
+    $('#health-tools').textContent = Number(tools.registered || 0) + ' 个 · 失败 ' + Number(tools.failures || 0);
+
+    const actions = $('#health-actions-list');
+    actions.innerHTML = '';
+    const next = Array.isArray(data.nextActions) ? data.nextActions : [];
+    if (!next.length) actions.appendChild(el('p', 'health-empty', '当前没有必须处理的动作'));
+    else for (const action of next) actions.appendChild(el('div', 'health-action', escapeHtml(String(action))));
+
+    const checks = $('#health-checks');
+    checks.innerHTML = '';
+    const items = Array.isArray(data.doctor && data.doctor.checks) ? data.doctor.checks : [];
+    for (const check of items) {
+      const status = String(check.status || 'warn');
+      const row = el('article', 'health-check');
+      row.innerHTML =
+        '<span class="health-badge ' + status + '">' + escapeHtml(status) + '</span>' +
+        '<div><div class="health-check-title"><b>' + escapeHtml(String(check.title || check.id || 'check')) + '</b>' +
+        '<span class="health-check-id">' + escapeHtml(String(check.id || '')) + '</span></div>' +
+        '<p class="health-check-detail">' + escapeHtml(String(check.detail || '')) + '</p>' +
+        (check.action ? '<p class="health-check-action">' + escapeHtml(String(check.action)) + '</p>' : '') +
+        '</div>';
+      checks.appendChild(row);
+    }
+    if (!items.length) checks.appendChild(el('p', 'health-empty', '暂无检查项'));
+    $('#health-state').title = 'pass ' + Number(summary.pass || 0) + ' · warn ' + Number(summary.warn || 0) + ' · fail ' + Number(summary.fail || 0);
+  }
+
+  async function openHealth() {
+    const panel = $('#health-panel');
+    if (panel.classList.contains('show')) { closeHealth(); return; }
+    closeSessions();
+    closeSettings();
+    $('#keys-modal').classList.remove('show');
+    panel.classList.add('show');
+    $('#health-btn').setAttribute('aria-expanded', 'true');
+    $('#health-loading').hidden = false;
+    $('#health-loading').textContent = '正在诊脉…';
+    $('#health-content').hidden = true;
+    if (healthBusy) return;
+    healthBusy = true;
+    try {
+      const response = await fetch('/api/health');
+      if (!response.ok) throw new Error('health unavailable');
+      renderHealth(await response.json());
+      $('#health-loading').hidden = true;
+      $('#health-content').hidden = false;
+      $('#health-close').focus();
+    } catch {
+      $('#health-loading').textContent = '健康中心暂时无法读取';
+      toast('健康中心无法读取', 'err');
+    } finally {
+      healthBusy = false;
+    }
+  }
+
   /* ── workshop settings ── */
   function closeSettings() {
     const panel = $('#settings-panel');
@@ -585,6 +655,7 @@ export function clientMain(): void {
     const panel = $('#settings-panel');
     if (panel.classList.contains('show')) { closeSettings(); return; }
     closeSessions();
+    closeHealth();
     $('#keys-modal').classList.remove('show');
     $('#settings-sheet').scrollTop = 0;
     panel.classList.add('show');
@@ -713,6 +784,7 @@ export function clientMain(): void {
     const panel = $('#sessions-panel');
     if (panel.classList.contains('show') && !refresh) { closeSessions(); return; }
     closeSettings();
+    closeHealth();
     if (streaming || resetting || syncing || sessionsBusy) {
       toast(streaming ? '生成中，先停止再切换会话' : '正在同步会话，请稍候');
       return;
@@ -887,6 +959,11 @@ export function clientMain(): void {
     });
     $('#send-btn').addEventListener('click', () => (streaming ? stop() : send()));
     $('#theme-btn').addEventListener('click', () => setTheme(themeNow() === 'dark' ? 'light' : 'dark'));
+    $('#health-btn').addEventListener('click', openHealth);
+    $('#health-close').addEventListener('click', closeHealth);
+    $('#health-panel').addEventListener('click', (e: any) => {
+      if (e.target.id === 'health-panel') closeHealth();
+    });
     $('#settings-btn').addEventListener('click', openSettings);
     $('#settings-close').addEventListener('click', closeSettings);
     $('#settings-panel').addEventListener('click', (e: any) => {
@@ -952,6 +1029,7 @@ export function clientMain(): void {
       if (e.key === 'Escape') {
         if (streaming) { stop(); return; }
         closeSessions();
+        closeHealth();
         closeSettings();
         $('#keys-modal').classList.remove('show');
         return;

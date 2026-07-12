@@ -9,6 +9,7 @@ import { createServer, IncomingMessage, ServerResponse, type Server } from "http
 import { AgentState, type BaseAgent } from "../core/agent";
 import { createSystemContext } from "../core/factory";
 import { buildRuntimeStatus } from "../core/status";
+import { buildWebHealth } from "./health";
 import {
   readWebAsset,
   readWebAssetBuffer,
@@ -18,6 +19,7 @@ import {
   SKYLOOM_FAVICON_PNG,
 } from "./ui";
 import { applyWebSettings, buildWebSettings, WebSettingsError } from "./settings";
+import { makeApiError, sendApiError, sendJson, sendUnknownError, WebApiError } from "./errors";
 
 const MAX_CHAT_BODY_BYTES = 1024 * 1024;
 type SystemContext = ReturnType<typeof createSystemContext>;
@@ -75,11 +77,17 @@ export async function startWebServer(
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (!hostAllowed(req.headers.host)) {
-      res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Forbidden host" }));
+      sendApiError(res, makeApiError(403, "web.forbidden_host", "Forbidden host", {
+        retryable: false,
+        action: "请使用 localhost、127.0.0.1 或当前 Skyloom Web 页面访问。",
+      }));
       return;
     }
     if (!sameOriginAllowed(req.headers.origin)) {
-      res.writeHead(403, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Forbidden origin" }));
+      sendApiError(res, makeApiError(403, "web.forbidden_origin", "Forbidden origin", {
+        retryable: false,
+        action: "请从当前 Skyloom Web 页面发起请求，或检查浏览器来源。",
+      }));
       return;
     }
     // Same-origin only when loopback-bound (no wildcard CORS that would invite
@@ -109,18 +117,24 @@ export async function startWebServer(
       else if (url.pathname === "/api/history" && req.method === "GET") await handleHistory(url, res, ctx);
       else if (url.pathname === "/api/agents" && req.method === "GET") handleAgents(res, ctx);
       else if (url.pathname === "/api/status" && req.method === "GET") handleStatus(res, ctx);
+      else if (url.pathname === "/api/health" && req.method === "GET") await handleHealth(res, ctx);
       else if (url.pathname === "/api/settings" && req.method === "GET") handleGetSettings(res, ctx);
       else if (url.pathname === "/api/settings" && req.method === "PATCH") {
         if (!isLoopbackAddress(req.socket.remoteAddress)) {
-          res.writeHead(403, { "Content-Type": "application/json" })
-            .end(JSON.stringify({ error: "Settings can only be changed from this machine" }));
+          sendApiError(res, makeApiError(403, "web.settings_remote_forbidden", "Settings can only be changed from this machine", {
+            retryable: false,
+            action: "请在运行 sky web 的本机浏览器中修改设置。",
+          }));
           return;
         }
         await handlePatchSettings(req, res, ctx, options.configDir);
       }
-      else if (url.pathname.startsWith("/api/")) res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Not found" }));
+      else if (url.pathname.startsWith("/api/")) sendApiError(res, makeApiError(404, "web.not_found", "Not found", { retryable: false }));
       else serveUI(res);
-    } catch (e) { res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: String(e) })); }
+    } catch (e) {
+      if (e instanceof WebApiError) sendApiError(res, e);
+      else sendUnknownError(res, e);
+    }
   });
 
   return new Promise((resolve, reject) => {
@@ -142,7 +156,10 @@ async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<
     const buf = chunk as Buffer;
     total += buf.length;
     if (total > MAX_CHAT_BODY_BYTES) {
-      res.writeHead(413, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "request body too large" }));
+      sendApiError(res, makeApiError(413, "web.payload_too_large", "request body too large", {
+        retryable: false,
+        action: "缩短消息或拆成多次发送。",
+      }));
       return null;
     }
     buffers.push(buf);
@@ -151,12 +168,15 @@ async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<
     const raw = Buffer.concat(buffers).toString("utf-8").trim();
     const payload = raw ? JSON.parse(raw) : {};
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "JSON body must be an object" }));
+      sendApiError(res, makeApiError(400, "web.bad_request", "JSON body must be an object", { retryable: false }));
       return null;
     }
     return payload as Record<string, unknown>;
   } catch {
-    res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid JSON" }));
+    sendApiError(res, makeApiError(400, "web.invalid_json", "invalid JSON", {
+      retryable: false,
+      action: "发送有效的 JSON 对象。",
+    }));
     return null;
   }
 }
@@ -165,14 +185,14 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: System
   const payload = await readJsonBody(req, res);
   if (!payload) return;
   const { message, agent: agentName = "fog", sessionId } = payload;
-  if (!message) { res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "message is required" })); return; }
-  if (typeof message !== "string") { res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "message must be a string" })); return; }
-  if (typeof agentName !== "string") { res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "agent must be a string" })); return; }
+  if (!message) { sendApiError(res, makeApiError(400, "web.bad_request", "message is required", { retryable: false })); return; }
+  if (typeof message !== "string") { sendApiError(res, makeApiError(400, "web.bad_request", "message must be a string", { retryable: false })); return; }
+  if (typeof agentName !== "string") { sendApiError(res, makeApiError(400, "web.bad_request", "agent must be a string", { retryable: false })); return; }
   if (sessionId !== undefined && (typeof sessionId !== "string" || !sessionId.trim())) {
-    res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "sessionId must be a non-empty string" })); return;
+    sendApiError(res, makeApiError(400, "web.bad_request", "sessionId must be a non-empty string", { retryable: false })); return;
   }
   const agent = ctx.agentMap.get(agentName);
-  if (!agent) { res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: `Agent '${agentName}' not found` })); return; }
+  if (!agent) { sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false })); return; }
   await agent.init();
 
   // Cancel agent work when the client disconnects (stop button / closed tab).
@@ -193,8 +213,12 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: System
       ? agent.chatStreamInSession(sessionId, message, ac.signal)
       : agent.chatStream(message, ac.signal);
     for await (const ev of stream) send(ev as Record<string, unknown>);
-  } catch (e) {
-    send({ type: "error", text: String(e) });
+  } catch (error) {
+    const apiError = makeApiError(500, "web.chat_failed", error instanceof Error ? error.message : String(error), {
+      retryable: true,
+      action: "重试当前消息；如果持续失败，请打开健康中心查看模型、凭据与工具状态。",
+    });
+    send({ type: "error", text: apiError.payload.message, error: apiError.payload });
   }
   send({ type: "end" });
   res.end();
@@ -205,32 +229,32 @@ async function handleNewSession(req: IncomingMessage, res: ServerResponse, ctx: 
   if (!payload) return;
   const agentName = payload.agent ?? "fog";
   if (typeof agentName !== "string") {
-    res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "agent must be a string" }));
+    sendApiError(res, makeApiError(400, "web.bad_request", "agent must be a string", { retryable: false }));
     return;
   }
   const agent = ctx.agentMap.get(agentName);
   if (!agent) {
-    res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: `Agent '${agentName}' not found` }));
+    sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false }));
     return;
   }
   await agent.init();
   if (agent.state !== AgentState.IDLE && agent.state !== AgentState.ERROR) {
-    res.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "agent is busy" }));
+    sendApiError(res, makeApiError(409, "web.agent_busy", "agent is busy", { retryable: true }));
     return;
   }
   const sessionId = await agent.memory.createSession();
-  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ sessionId }));
+  sendJson(res, 200, { sessionId });
 }
 
 async function getIdleAgent(agentName: string, res: ServerResponse, ctx: SystemContext): Promise<BaseAgent | null> {
   const agent = ctx.agentMap.get(agentName);
   if (!agent) {
-    res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: `Agent '${agentName}' not found` }));
+    sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false }));
     return null;
   }
   await agent.init();
   if (agent.state !== AgentState.IDLE && agent.state !== AgentState.ERROR) {
-    res.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "agent is busy" }));
+    sendApiError(res, makeApiError(409, "web.agent_busy", "agent is busy", { retryable: true }));
     return null;
   }
   return agent;
@@ -240,10 +264,10 @@ async function handleSessions(url: URL, res: ServerResponse, ctx: SystemContext)
   const agent = await getIdleAgent(url.searchParams.get("agent") || "fog", res, ctx);
   if (!agent) return;
   const sessions = await agent.memory.listSessions();
-  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+  sendJson(res, 200, {
     activeSessionId: agent.memory.getActiveSession(),
     sessions,
-  }));
+  });
 }
 
 async function handleLoadSession(req: IncomingMessage, res: ServerResponse, ctx: SystemContext): Promise<void> {
@@ -252,16 +276,16 @@ async function handleLoadSession(req: IncomingMessage, res: ServerResponse, ctx:
   const agentName = payload.agent ?? "fog";
   const sessionId = payload.sessionId;
   if (typeof agentName !== "string" || typeof sessionId !== "string" || !sessionId.trim()) {
-    res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "agent and sessionId must be strings" }));
+    sendApiError(res, makeApiError(400, "web.bad_request", "agent and sessionId must be strings", { retryable: false }));
     return;
   }
   const agent = await getIdleAgent(agentName, res, ctx);
   if (!agent) return;
   if (!await agent.memory.loadSession(sessionId)) {
-    res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "session not found" }));
+    sendApiError(res, makeApiError(404, "web.session_not_found", "session not found", { retryable: false }));
     return;
   }
-  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ sessionId }));
+  sendJson(res, 200, { sessionId });
 }
 
 async function handleDeleteSession(req: IncomingMessage, res: ServerResponse, ctx: SystemContext): Promise<void> {
@@ -270,35 +294,35 @@ async function handleDeleteSession(req: IncomingMessage, res: ServerResponse, ct
   const agentName = payload.agent ?? "fog";
   const sessionId = payload.sessionId;
   if (typeof agentName !== "string" || typeof sessionId !== "string" || !sessionId.trim()) {
-    res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "agent and sessionId must be strings" }));
+    sendApiError(res, makeApiError(400, "web.bad_request", "agent and sessionId must be strings", { retryable: false }));
     return;
   }
   const agent = await getIdleAgent(agentName, res, ctx);
   if (!agent) return;
   const wasActive = agent.memory.getActiveSession() === sessionId;
   if (!await agent.memory.deleteSession(sessionId)) {
-    res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "session not found" }));
+    sendApiError(res, makeApiError(404, "web.session_not_found", "session not found", { retryable: false }));
     return;
   }
   const activeSessionId = wasActive
     ? await agent.memory.createSession()
     : agent.memory.getActiveSession();
-  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+  sendJson(res, 200, {
     deleted: true,
     sessionId: activeSessionId,
-  }));
+  });
 }
 
 async function handleHistory(url: URL, res: ServerResponse, ctx: SystemContext): Promise<void> {
   const agentName = url.searchParams.get("agent") || "fog";
   const agent = ctx.agentMap.get(agentName);
   if (!agent) {
-    res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: `Agent '${agentName}' not found` }));
+    sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false }));
     return;
   }
   await agent.init();
   if (agent.state !== AgentState.IDLE && agent.state !== AgentState.ERROR) {
-    res.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "agent is busy" }));
+    sendApiError(res, makeApiError(409, "web.agent_busy", "agent is busy", { retryable: true }));
     return;
   }
   const messages = agent.memory.getMessages()
@@ -308,23 +332,27 @@ async function handleHistory(url: URL, res: ServerResponse, ctx: SystemContext):
       return !Array.isArray(message.toolCalls) || message.toolCalls.length === 0;
     })
     .map((message: Record<string, unknown>) => ({ role: message.role, content: message.content }));
-  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+  sendJson(res, 200, {
     sessionId: agent.memory.getActiveSession(),
     messages,
-  }));
+  });
 }
 
 function handleAgents(res: ServerResponse, ctx: SystemContext) {
-  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+  sendJson(res, 200, {
     agents: [...ctx.agentMap.entries()].map(([n, a]) => ({ name: n, displayName: a.displayName, emoji: a.emoji, specialty: a.specialty, state: a.state })),
-  }));
+  });
 }
 function handleStatus(res: ServerResponse, ctx: SystemContext) {
-  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(buildRuntimeStatus(ctx)));
+  sendJson(res, 200, buildRuntimeStatus(ctx));
+}
+
+async function handleHealth(res: ServerResponse, ctx: SystemContext): Promise<void> {
+  sendJson(res, 200, await buildWebHealth(ctx));
 }
 
 function handleGetSettings(res: ServerResponse, ctx: SystemContext): void {
-  res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(buildWebSettings(ctx)));
+  sendJson(res, 200, buildWebSettings(ctx));
 }
 
 async function handlePatchSettings(
@@ -337,10 +365,10 @@ async function handlePatchSettings(
   if (!payload) return;
   try {
     const settings = applyWebSettings(ctx, payload, { configDir });
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(settings));
+    sendJson(res, 200, settings);
   } catch (error) {
     if (error instanceof WebSettingsError) {
-      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: error.message }));
+      sendApiError(res, makeApiError(400, "web.settings_invalid", error.message, { retryable: false }));
       return;
     }
     throw error;
@@ -379,7 +407,7 @@ function serveFavicon(res: ServerResponse): void {
 function serveUiAsset(pathname: string, res: ServerResponse): void {
   const name = pathname.slice("/ui/assets/".length);
   if (!/^[a-z0-9._-]+$/i.test(name)) {
-    res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Not found" }));
+    sendApiError(res, makeApiError(404, "web.asset_not_found", "Not found", { retryable: false }));
     return;
   }
   try {
@@ -389,7 +417,7 @@ function serveUiAsset(pathname: string, res: ServerResponse): void {
     });
     res.end(name.endsWith(".png") ? readWebAssetBuffer(`assets/${name}`) : readWebAsset(`assets/${name}`));
   } catch {
-    res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Not found" }));
+    sendApiError(res, makeApiError(404, "web.asset_not_found", "Not found", { retryable: false }));
   }
 }
 

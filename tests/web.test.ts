@@ -95,7 +95,7 @@ describe("web · page", () => {
 
   it("ships the enterprise interaction surface", () => {
     // stop-generation, theme toggle, retry/export/new session, shortcuts, scroll pill, toasts
-    for (const marker of ["send-btn", "theme-btn", "settings-btn", "settings-panel", "setting-unified-model", "setting-workspace", "setting-provider-endpoint", "setting-clear-key", "setting-dark-mode", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
+    for (const marker of ["send-btn", "theme-btn", "settings-btn", "health-btn", "health-panel", "health-checks", "settings-panel", "setting-unified-model", "setting-workspace", "setting-provider-endpoint", "setting-clear-key", "setting-dark-mode", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
       expect(shipped, `missing: ${marker}`).toContain(marker);
     }
     // tool timeline + reasoning + markdown body classes exist in CSS
@@ -250,6 +250,26 @@ describe("web · server", () => {
     expect(sj.agents.summary.total).toBe(6);
     expect(sj.tools.registered).toBeGreaterThan(20);
 
+    const health = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(health.status).toBe(200);
+    const hj: any = await health.json();
+    expect(hj).toMatchObject({
+      schemaVersion: 1,
+      ok: expect.any(Boolean),
+      generatedAt: expect.any(String),
+      runtime: { status: expect.any(Object) },
+      doctor: {
+        summary: {
+          pass: expect.any(Number),
+          warn: expect.any(Number),
+          fail: expect.any(Number),
+        },
+        checks: expect.any(Array),
+      },
+      nextActions: expect.any(Array),
+    });
+    expect(JSON.stringify(hj)).not.toMatch(/sk-[a-z0-9_-]{8,}/i);
+
     const settings = await fetch(`http://127.0.0.1:${port}/api/settings`);
     expect(settings.status).toBe(200);
     const settingsJson: any = await settings.json();
@@ -265,11 +285,22 @@ describe("web · server", () => {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
     });
     expect(bad.status).toBe(400);
+    await expect(bad.json()).resolves.toMatchObject({
+      error: {
+        code: "web.bad_request",
+        message: "message is required",
+        retryable: false,
+        action: expect.any(String),
+      },
+    });
 
     const malformed = await fetch(`http://127.0.0.1:${port}/api/chat`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{",
     });
     expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toMatchObject({
+      error: { code: "web.invalid_json", retryable: false },
+    });
 
     const evilOrigin = await fetch(`http://127.0.0.1:${port}/api/chat`, {
       method: "POST",
@@ -277,6 +308,9 @@ describe("web · server", () => {
       body: JSON.stringify({ message: "hi" }),
     });
     expect(evilOrigin.status).toBe(403);
+    await expect(evilOrigin.json()).resolves.toMatchObject({
+      error: { code: "web.forbidden_origin", retryable: false },
+    });
 
     // Host-header guard: a rebound/evil Host is refused on loopback binding.
     // (fetch/undici silently drops a Host override, so use raw http.)
