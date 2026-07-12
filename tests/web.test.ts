@@ -11,6 +11,11 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
+let nextSafeWebPort = 18080;
+function safeWebPort(): number {
+  return nextSafeWebPort++;
+}
+
 /* ════════ markdown renderer (isomorphic, injected into the page) ════════ */
 
 describe("web · markdown renderer", () => {
@@ -206,7 +211,7 @@ describe("web · server", () => {
 
   it("serves the UI and the JSON API; rejects bad requests", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 3789 + Math.floor(Math.random() * 1000);
+    const port = safeWebPort();
     const server = await startWebServer(port);
     close = () => server.close();
 
@@ -402,7 +407,7 @@ describe("web · server", () => {
 
   it("starts a genuinely new backend session for the selected agent", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 4789 + Math.floor(Math.random() * 1000);
+    const port = safeWebPort();
     const createSession = vi.fn(async () => "session-new");
     const init = vi.fn(async () => undefined);
     const fakeAgent = {
@@ -438,7 +443,7 @@ describe("web · server", () => {
 
   it("serves the active backend conversation without internal tool messages", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 5289 + Math.floor(Math.random() * 1000);
+    const port = safeWebPort();
     const fakeAgent = {
       name: "fog",
       displayName: "雾",
@@ -481,7 +486,7 @@ describe("web · server", () => {
 
   it("rejects a missing chat session before streaming starts", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 5389 + Math.floor(Math.random() * 1000);
+    const port = safeWebPort();
     const sessionExists = vi.fn(async () => false);
     const chatStreamInSession = vi.fn(async function* () {
       yield { type: "content", text: "should-not-stream" };
@@ -528,7 +533,7 @@ describe("web · server", () => {
 
   it("rejects chat requests while the selected agent is busy", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 5489 + Math.floor(Math.random() * 1000);
+    const port = safeWebPort();
     const chatStream = vi.fn(async function* () {
       yield { type: "content", text: "should-not-stream" };
     });
@@ -573,7 +578,7 @@ describe("web · server", () => {
 
   it("lists, restores, and deletes persisted web sessions", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 5489 + Math.floor(Math.random() * 1000);
+    const port = safeWebPort();
     let activeSession = "session-current";
     const loadSession = vi.fn(async (sessionId: string) => {
       if (sessionId !== "session-older") return false;
@@ -645,7 +650,7 @@ describe("web · server", () => {
 
   it("returns a structured not-found error for unknown agents across session APIs", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 5689 + Math.floor(Math.random() * 1000);
+    const port = safeWebPort();
     const fakeAgent = {
       name: "fog",
       displayName: "雾",
@@ -712,7 +717,7 @@ describe("web · server", () => {
 
   it("refuses to reset a session while the agent is busy", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 5789 + Math.floor(Math.random() * 1000);
+    const port = safeWebPort();
     const createSession = vi.fn(async () => "should-not-run");
     const fakeAgent = {
       name: "fog",
