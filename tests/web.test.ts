@@ -209,19 +209,39 @@ describe("web · server", () => {
     const styles = await fetch(`http://127.0.0.1:${port}/ui/styles.css?v=test`);
     expect(styles.status).toBe(200);
     expect(styles.headers.get("content-type")).toContain("text/css");
+    expect(styles.headers.get("cache-control")).toContain("must-revalidate");
+    const stylesEtag = styles.headers.get("etag");
+    expect(stylesEtag).toMatch(/^"[a-f0-9]{16,}"$/);
     const stylesBody = await styles.text();
     expect(stylesBody).toContain("#mountain-wash");
     expect(stylesBody).toContain(".tool-row");
+    const stylesCached = await fetch(`http://127.0.0.1:${port}/ui/styles.css?v=test`, {
+      headers: { "If-None-Match": stylesEtag || "" },
+    });
+    expect(stylesCached.status).toBe(304);
 
     const app = await fetch(`http://127.0.0.1:${port}/ui/app.js?v=test`);
     expect(app.status).toBe(200);
     expect(app.headers.get("content-type")).toContain("application/javascript");
+    const appEtag = app.headers.get("etag");
+    expect(appEtag).toMatch(/^"[a-f0-9]{16,}"$/);
     expect(await app.text()).toContain("function clientMain");
+    const appCached = await fetch(`http://127.0.0.1:${port}/ui/app.js?v=test`, {
+      headers: { "If-None-Match": appEtag || "" },
+    });
+    expect(appCached.status).toBe(304);
 
     const atlas = await fetch(`http://127.0.0.1:${port}/ui/assets/image2-icons.png?v=test`);
     expect(atlas.status).toBe(200);
     expect(atlas.headers.get("content-type")).toContain("image/png");
+    expect(atlas.headers.get("cache-control")).toContain("immutable");
+    const atlasEtag = atlas.headers.get("etag");
+    expect(atlasEtag).toMatch(/^"[a-f0-9]{16,}"$/);
     expect((await atlas.arrayBuffer()).byteLength).toBeGreaterThan(1000);
+    const atlasCached = await fetch(`http://127.0.0.1:${port}/ui/assets/image2-icons.png?v=test`, {
+      headers: { "If-None-Match": atlasEtag || "" },
+    });
+    expect(atlasCached.status).toBe(304);
 
     const icon = await fetch(`http://127.0.0.1:${port}/ui/assets/image2-favicon.png?v=test`);
     expect(icon.status).toBe(200);

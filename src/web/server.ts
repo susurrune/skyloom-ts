@@ -6,6 +6,7 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse, type Server } from "http";
+import { createHash } from "crypto";
 import { AgentState, type BaseAgent } from "../core/agent";
 import { createSystemContext } from "../core/factory";
 import { buildRuntimeStatus } from "../core/status";
@@ -104,11 +105,11 @@ export async function startWebServer(
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
     try {
       if ((url.pathname === "/" || url.pathname === "/index.html") && req.method === "GET") serveUI(res);
-      else if (url.pathname === "/favicon.svg" && req.method === "GET") serveFavicon(res);
-      else if (url.pathname === "/favicon.ico" && req.method === "GET") serveFavicon(res);
-      else if (url.pathname === "/ui/styles.css" && req.method === "GET") serveCSS(res);
-      else if (url.pathname === "/ui/app.js" && req.method === "GET") serveAppJS(res);
-      else if (url.pathname.startsWith("/ui/assets/") && req.method === "GET") serveUiAsset(url.pathname, res);
+      else if (url.pathname === "/favicon.svg" && req.method === "GET") serveFavicon(req, res);
+      else if (url.pathname === "/favicon.ico" && req.method === "GET") serveFavicon(req, res);
+      else if (url.pathname === "/ui/styles.css" && req.method === "GET") serveCSS(req, res);
+      else if (url.pathname === "/ui/app.js" && req.method === "GET") serveAppJS(req, res);
+      else if (url.pathname.startsWith("/ui/assets/") && req.method === "GET") serveUiAsset(req, url.pathname, res);
       else if (url.pathname === "/api/chat" && req.method === "POST") await handleChat(req, res, ctx);
       else if (url.pathname === "/api/session" && req.method === "POST") await handleNewSession(req, res, ctx);
       else if (url.pathname === "/api/session" && req.method === "DELETE") await handleDeleteSession(req, res, ctx);
@@ -380,45 +381,74 @@ function serveUI(res: ServerResponse): void {
   res.end(renderInkWashUI());
 }
 
-function serveCSS(res: ServerResponse): void {
-  res.writeHead(200, {
-    "Content-Type": "text/css; charset=utf-8",
-    "Cache-Control": "no-cache, max-age=0",
+function serveCSS(req: IncomingMessage, res: ServerResponse): void {
+  serveStaticResource(req, res, {
+    content: renderInkWashCSS(),
+    contentType: "text/css; charset=utf-8",
+    cacheControl: "no-cache, max-age=0, must-revalidate",
   });
-  res.end(renderInkWashCSS());
 }
 
-function serveAppJS(res: ServerResponse): void {
-  res.writeHead(200, {
-    "Content-Type": "application/javascript; charset=utf-8",
-    "Cache-Control": "no-cache, max-age=0",
+function serveAppJS(req: IncomingMessage, res: ServerResponse): void {
+  serveStaticResource(req, res, {
+    content: renderInkWashAppJS(),
+    contentType: "application/javascript; charset=utf-8",
+    cacheControl: "no-cache, max-age=0, must-revalidate",
   });
-  res.end(renderInkWashAppJS());
 }
 
-function serveFavicon(res: ServerResponse): void {
-  res.writeHead(200, {
-    "Content-Type": "image/png",
-    "Cache-Control": "no-cache, max-age=0",
+function serveFavicon(req: IncomingMessage, res: ServerResponse): void {
+  serveStaticResource(req, res, {
+    content: SKYLOOM_FAVICON_PNG,
+    contentType: "image/png",
+    cacheControl: "public, max-age=31536000, immutable",
   });
-  res.end(SKYLOOM_FAVICON_PNG);
 }
 
-function serveUiAsset(pathname: string, res: ServerResponse): void {
+function serveUiAsset(req: IncomingMessage, pathname: string, res: ServerResponse): void {
   const name = pathname.slice("/ui/assets/".length);
   if (!/^[a-z0-9._-]+$/i.test(name)) {
     sendApiError(res, makeApiError(404, "web.asset_not_found", "Not found", { retryable: false }));
     return;
   }
   try {
-    res.writeHead(200, {
-      "Content-Type": contentType(name),
-      "Cache-Control": "no-cache, max-age=0",
+    serveStaticResource(req, res, {
+      content: name.endsWith(".png") ? readWebAssetBuffer(`assets/${name}`) : readWebAsset(`assets/${name}`),
+      contentType: contentType(name),
+      cacheControl: name.endsWith(".png")
+        ? "public, max-age=31536000, immutable"
+        : "no-cache, max-age=0, must-revalidate",
     });
-    res.end(name.endsWith(".png") ? readWebAssetBuffer(`assets/${name}`) : readWebAsset(`assets/${name}`));
   } catch {
     sendApiError(res, makeApiError(404, "web.asset_not_found", "Not found", { retryable: false }));
   }
+}
+
+function serveStaticResource(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: { content: string | Buffer; contentType: string; cacheControl: string },
+): void {
+  const body = Buffer.isBuffer(options.content) ? options.content : Buffer.from(options.content, "utf8");
+  const etag = `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
+  const headers = {
+    "Content-Type": options.contentType,
+    "Cache-Control": options.cacheControl,
+    "ETag": etag,
+  };
+  if (matchesIfNoneMatch(req.headers["if-none-match"], etag)) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(200, { ...headers, "Content-Length": String(body.length) });
+  res.end(body);
+}
+
+function matchesIfNoneMatch(header: string | string[] | undefined, etag: string): boolean {
+  const raw = Array.isArray(header) ? header.join(",") : header;
+  if (!raw) return false;
+  return raw.split(",").map((part) => part.trim()).includes(etag);
 }
 
 function contentType(name: string): string {
