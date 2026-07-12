@@ -208,6 +208,10 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: System
   const agent = ctx.agentMap.get(agentName);
   if (!agent) { sendApiError(res, agentNotFoundError(agentName)); return; }
   await agent.init();
+  if (agent.state !== AgentState.IDLE && agent.state !== AgentState.ERROR) {
+    sendApiError(res, makeApiError(409, "web.agent_busy", "agent is busy", { retryable: true }));
+    return;
+  }
   if (typeof sessionId === "string") {
     const sessionExists = (agent.memory as unknown as { sessionExists?: (id: string) => Promise<boolean> }).sessionExists;
     if (sessionExists && !await sessionExists.call(agent.memory, sessionId)) {

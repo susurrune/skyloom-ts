@@ -526,6 +526,51 @@ describe("web · server", () => {
     }
   });
 
+  it("rejects chat requests while the selected agent is busy", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = 5489 + Math.floor(Math.random() * 1000);
+    const chatStream = vi.fn(async function* () {
+      yield { type: "content", text: "should-not-stream" };
+    });
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "thinking",
+      init: vi.fn(async () => undefined),
+      memory: {},
+      chatStream,
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", message: "hello" }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: "web.agent_busy",
+          message: "agent is busy",
+          category: "conflict",
+          retryable: true,
+          action: expect.any(String),
+        },
+      });
+      expect(chatStream).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("lists, restores, and deletes persisted web sessions", async () => {
     const { startWebServer } = await import("../src/web/server");
     const port = 5489 + Math.floor(Math.random() * 1000);
