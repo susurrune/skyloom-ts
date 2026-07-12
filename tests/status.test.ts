@@ -21,6 +21,20 @@ describe('runtime status snapshot', () => {
       ]),
       toolRegistry: { listNames: () => ['read_url', 'write_file', 'grep'] },
       mcpStatus: ['local: 3 tools'],
+      mcp: {
+        getHealthSnapshot: () => [{
+          name: 'local',
+          transport: 'stdio',
+          target: 'node',
+          tools: 3,
+          connected: true,
+          state: 'healthy',
+          healthy: true,
+          details: 'ok',
+          lastCheckedAt: '2026-07-12T00:00:00.000Z',
+          connectedAt: '2026-07-12T00:00:00.000Z',
+        }],
+      },
     };
 
     const status = buildRuntimeStatus(context);
@@ -37,7 +51,22 @@ describe('runtime status snapshot', () => {
       cacheHits: 1,
       openBreakers: ['fog:read_url'],
     });
-    expect(status.mcp).toEqual({ connected: 1, servers: ['local: 3 tools'] });
+    expect(status.mcp).toEqual({
+      connected: 1,
+      servers: ['local: 3 tools'],
+      health: [{
+        name: 'local',
+        transport: 'stdio',
+        target: 'node',
+        tools: 3,
+        connected: true,
+        state: 'healthy',
+        healthy: true,
+        details: 'ok',
+        lastCheckedAt: '2026-07-12T00:00:00.000Z',
+        connectedAt: '2026-07-12T00:00:00.000Z',
+      }],
+    });
     expect(status.background.running).toBeGreaterThanOrEqual(0);
     expect(status.security.denied).toBeGreaterThanOrEqual(0);
     expect(JSON.stringify(status)).not.toMatch(/api[_-]?key|authorization|cookie/i);

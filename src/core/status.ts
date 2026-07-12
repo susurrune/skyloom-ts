@@ -1,5 +1,6 @@
 import { getBackgroundManager } from './bgproc';
 import { getSecurity } from './security';
+import type { MCPServerHealth } from './mcp';
 
 const STARTED_AT_MS = Date.now();
 const VERSION = (() => {
@@ -24,6 +25,7 @@ export interface RuntimeStatusContext {
   }>;
   toolRegistry: { listNames(): string[] };
   mcpStatus?: string[];
+  mcp?: { getHealthSnapshot?: () => MCPServerHealth[] } | null;
 }
 
 export interface RuntimeStatusSnapshot {
@@ -48,7 +50,7 @@ export interface RuntimeStatusSnapshot {
     openBreakers: string[];
   };
   background: { total: number; running: number };
-  mcp: { connected: number; servers: string[] };
+  mcp: { connected: number; servers: string[]; health: MCPServerHealth[] };
   security: ReturnType<ReturnType<typeof getSecurity>['getStats']>;
 }
 
@@ -75,7 +77,11 @@ export function buildRuntimeStatus(context: RuntimeStatusContext): RuntimeStatus
   }
 
   const jobs = getBackgroundManager().list();
+  const mcpHealth = context.mcp?.getHealthSnapshot?.() ?? [];
   const mcpServers = [...(context.mcpStatus ?? [])];
+  const mcpConnected = mcpHealth.length > 0
+    ? mcpHealth.filter((server) => server.connected).length
+    : mcpServers.length;
   const totalAgents = context.agentMap.size;
 
   return {
@@ -103,7 +109,7 @@ export function buildRuntimeStatus(context: RuntimeStatusContext): RuntimeStatus
       total: jobs.length,
       running: jobs.filter((job) => job.status === 'running').length,
     },
-    mcp: { connected: mcpServers.length, servers: mcpServers },
+    mcp: { connected: mcpConnected, servers: mcpServers, health: mcpHealth },
     security: getSecurity().getStats(),
   };
 }

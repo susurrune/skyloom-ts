@@ -20,6 +20,7 @@ import { getFileCheckpoints } from "../core/file_checkpoint";
 import { LoomUI, OrchTask, circled, cutVisual } from "./loom";
 import { PROVIDER_META } from "../core/catalog";
 import { globalSkillRegistry } from "../core/skill";
+import { formatMcpHealthLines } from "../core/mcp";
 
 const OK_HEX = "#3a7a6e"; // 石绿 — success
 const ERR_HEX = "#b3342d"; // 朱砂 — failure
@@ -524,7 +525,12 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       if (cmdL === "/memory") { dim(`短期 ${agent.memory.shortTerm.length} 条 · 工作记忆 ${Object.keys(agent.memory.working).length} 键`); continue; }
       if (cmdL === "/memory clear") { await agent.memory.clearShortTerm(); dim("记忆已清空"); continue; }
       if (cmdL === "/workspace") { dim(String(ctx.workspacePath || "default")); continue; }
-      if (cmdL === "/mcp") { dim(String(ctx.mcpStatus?.join(", ") || "none")); continue; }
+      if (cmdL === "/mcp") {
+        for (const line of formatMcpHealthLines(ctx.mcp?.getHealthSnapshot?.() ?? [], ctx.mcpStatus ?? [])) {
+          dim(line);
+        }
+        continue;
+      }
       if (cmdL.startsWith("/apikey set ")) {
         const p = inp.split(/\s+/);
         if (p.length >= 4) { deps.saveApiKey(p[2], p[3]); say(" " + chalk.hex(OK_HEX)(`✓ 已保存 ${p[2]} API key`)); }

@@ -20,6 +20,7 @@ import { runHeadless, runTask } from "./headless";
 import { channelsWizard, checkApiKeys, saveApiKey, setupWizard } from "./setup_wizards";
 import { startWebCommand } from "./web_runtime";
 import { runDoctorCommand } from "./doctor";
+import { formatMcpHealthLines } from "../core/mcp";
 const MODE = new ModeController();
 const VERSION = (() => { try { return require("../../package.json").version; } catch { return "1.5.2"; } })();
 
@@ -184,7 +185,11 @@ async function chat(agentName: string, modelOverride?: string, classic?: boolean
     if (cmdL === "/memory") { process.stdout.write(chalk.dim("  Short-term: " + currentAgent.memory.shortTerm.length + " msgs  ·  Working: " + Object.keys(currentAgent.memory.working).length + " keys\n")); continue; }
     if (cmdL === "/memory clear") { await currentAgent.memory.clearShortTerm(); process.stdout.write(chalk.dim("  Memory cleared\n")); continue; }
     if (cmdL === "/workspace") { process.stdout.write(chalk.dim("  " + (ctx.workspacePath || "default") + "\n")); continue; }
-    if (cmdL === "/mcp") { process.stdout.write(chalk.dim("  " + (ctx.mcpStatus?.join(", ") || "none") + "\n")); continue; }
+    if (cmdL === "/mcp") {
+      const lines = formatMcpHealthLines(ctx.mcp?.getHealthSnapshot?.() ?? [], ctx.mcpStatus ?? []);
+      process.stdout.write(chalk.dim(lines.map((line) => "  " + line).join("\n") + "\n"));
+      continue;
+    }
     if (cmdL.startsWith("/apikey set ")) { const p = inp.split(/\s+/); if (p.length >= 4) { saveApiKey(p[2], p[3]); process.stdout.write(chalk.green("  ✓ Saved " + p[2] + " API key\n")); } else { process.stdout.write(chalk.yellow("  Usage: /apikey set <provider> <key>\n")); } continue; }
     if (cmdL === "/apikey") { process.stdout.write(chalk.bold("\n  API Keys:\n")); for (const p of ["openai","deepseek","anthropic","groq","openrouter"]) { process.stdout.write(chalk.dim("  " + p.padEnd(14) + (!!process.env[p.toUpperCase() + "_API_KEY"] ? chalk.green("env") : chalk.dim("—")) + "\n")); } process.stdout.write("\n"); continue; }
     if (cmdL === "/plan" || cmdL === "/auto" || cmdL === "/default") {
