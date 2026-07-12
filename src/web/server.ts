@@ -25,6 +25,13 @@ import { makeApiError, sendApiError, sendJson, sendUnknownError, WebApiError } f
 const MAX_CHAT_BODY_BYTES = 1024 * 1024;
 type SystemContext = ReturnType<typeof createSystemContext>;
 
+function payloadTooLargeError(): WebApiError {
+  return makeApiError(413, "web.payload_too_large", "request body too large", {
+    retryable: false,
+    action: "缩短消息或拆成多次发送。",
+  });
+}
+
 export function isLoopbackAddress(address: string | undefined): boolean {
   if (!address) return false;
   const normalized = address.toLowerCase().split("%")[0];
@@ -151,16 +158,18 @@ export async function startWebServer(
 }
 
 async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | null> {
+  const declaredLength = Number(req.headers["content-length"] || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_CHAT_BODY_BYTES) {
+    sendApiError(res, payloadTooLargeError());
+    return null;
+  }
   const buffers: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     total += buf.length;
     if (total > MAX_CHAT_BODY_BYTES) {
-      sendApiError(res, makeApiError(413, "web.payload_too_large", "request body too large", {
-        retryable: false,
-        action: "缩短消息或拆成多次发送。",
-      }));
+      sendApiError(res, payloadTooLargeError());
       return null;
     }
     buffers.push(buf);

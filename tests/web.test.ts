@@ -342,6 +342,42 @@ describe("web · server", () => {
       error: { code: "web.invalid_json", retryable: false },
     });
 
+    const http = await import("http");
+    const tooLarge = await new Promise<{ status: number; body: any }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("large request was not rejected before reading the body")), 500);
+      const request = http.request(
+        {
+          host: "127.0.0.1",
+          port,
+          path: "/api/chat",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": String(1024 * 1024 + 1),
+          },
+        },
+        (response) => {
+          let raw = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => { raw += chunk; });
+          response.on("end", () => {
+            clearTimeout(timer);
+            resolve({ status: response.statusCode || 0, body: JSON.parse(raw) });
+          });
+        },
+      );
+      request.on("error", reject);
+      request.flushHeaders();
+    });
+    expect(tooLarge.status).toBe(413);
+    expect(tooLarge.body).toMatchObject({
+      error: {
+        code: "web.payload_too_large",
+        retryable: false,
+        action: "缩短消息或拆成多次发送。",
+      },
+    });
+
     const evilOrigin = await fetch(`http://127.0.0.1:${port}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Origin: "http://evil.example.com" },
@@ -354,7 +390,6 @@ describe("web · server", () => {
 
     // Host-header guard: a rebound/evil Host is refused on loopback binding.
     // (fetch/undici silently drops a Host override, so use raw http.)
-    const http = await import("http");
     const evilStatus = await new Promise<number>((resolve, reject) => {
       const r = http.request(
         { host: "127.0.0.1", port, path: "/api/agents", headers: { Host: "evil.example.com" } },
