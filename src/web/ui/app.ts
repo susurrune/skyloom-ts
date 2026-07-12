@@ -61,19 +61,33 @@ export function clientMain(): void {
     setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 350); }, 2400);
   }
 
-  function apiErrorText(payload: any, fallback: string): string {
+  function apiErrorPayload(payload: any): any {
     const error = payload && payload.error ? payload.error : payload;
-    if (!error || typeof error !== 'object') return fallback;
+    return error && typeof error === 'object' ? error : null;
+  }
+
+  function apiErrorText(payload: any, fallback: string): string {
+    const error = apiErrorPayload(payload);
+    if (!error) return fallback;
     const message = typeof error.message === 'string' && error.message ? error.message : fallback;
     return typeof error.action === 'string' && error.action ? message + ' · ' + error.action : message;
   }
 
-  async function readApiError(response: any, fallback: string): Promise<string> {
+  async function readApiErrorPayload(response: any): Promise<any> {
     try {
-      return apiErrorText(await response.clone().json(), fallback);
+      return apiErrorPayload(await response.clone().json());
     } catch {
-      return fallback + ' (HTTP ' + response.status + ')';
+      return null;
     }
+  }
+
+  async function readApiError(response: any, fallback: string): Promise<string> {
+    const error = await readApiErrorPayload(response);
+    return error ? apiErrorText(error, fallback) : fallback + ' (HTTP ' + response.status + ')';
+  }
+
+  function isMissingSessionError(error: any): boolean {
+    return Boolean(error && error.code === 'web.session_not_found');
   }
 
   /* ── theme (宣纸 / 夜墨) ── */
@@ -124,6 +138,11 @@ export function clientMain(): void {
   }
   function pushHist(entry: any) {
     const h = loadHist(cur.name); h.push(entry); saveHist(cur.name, h);
+  }
+  function clearCachedSession(agentName: string) {
+    const h = loadHist(agentName);
+    store.removeItem(SKEY(agentName));
+    saveHist(agentName, h);
   }
   function histSignature(h: any[]): string {
     return JSON.stringify(h.map((entry: any) => [entry.r, entry.t]));
@@ -335,6 +354,13 @@ export function clientMain(): void {
   }
 
   /* ── streaming chat ── */
+  function chatRequestBody(text: string, useCachedSession = true): string {
+    const body: any = { message: text, agent: cur.name };
+    const sessionId = useCachedSession ? store.getItem(SKEY(cur.name)) : null;
+    if (sessionId) body.sessionId = sessionId;
+    return JSON.stringify(body);
+  }
+
   async function send() {
     const inp = $('#chat-input');
     const text = inp.value.trim();
@@ -375,13 +401,26 @@ export function clientMain(): void {
 
     aborter = new AbortController();
     let stopped = false;
+    let staleSessionRetried = false;
     try {
-      const resp = await fetch('/api/chat', {
+      let resp = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, agent: cur.name, sessionId: store.getItem(SKEY(cur.name)) }),
+        body: chatRequestBody(text),
         signal: aborter.signal,
       });
+      const apiError = !resp.ok ? await readApiErrorPayload(resp) : null;
+      if (isMissingSessionError(apiError) && !staleSessionRetried) {
+        staleSessionRetried = true;
+        clearCachedSession(cur.name);
+        toast('会话已过期，正在重新接续');
+        resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: chatRequestBody(text, false),
+          signal: aborter.signal,
+        });
+      }
       if (!resp.ok || !resp.body) throw new Error(await readApiError(resp, '连接失败'));
       const reader = resp.body.getReader();
       const dec = new TextDecoder();

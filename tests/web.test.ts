@@ -143,7 +143,7 @@ describe("web · page", () => {
     expect(script).toContain("LEGACY_HKEY");
     expect(script).toMatch(/["']skyweb\.h\.["'] \+ a \+ ["']\.["']/);
     expect(script).toContain("store.getItem(SKEY(a))");
-    expect(script).toContain("sessionId: store.getItem(SKEY(cur.name))");
+    expect(script).toContain("if (sessionId) body.sessionId = sessionId");
     expect(script).toMatch(/Array\.isArray\(parsed\)/);
     expect(script).toContain("cancelAnimationFrame");
     expect(script).toContain("function openSessions");
@@ -151,6 +151,12 @@ describe("web · page", () => {
     expect(script).toContain("/api/settings");
     expect(script).toContain("function apiErrorText");
     expect(script).toContain("function readApiError");
+    expect(script).toContain("function apiErrorPayload");
+    expect(script).toContain("function isMissingSessionError");
+    expect(script).toContain("function chatRequestBody");
+    expect(script).toContain("store.removeItem(SKEY(agentName));");
+    expect(script).toContain("staleSessionRetried");
+    expect(script).toContain("会话已过期，正在重新接续");
     expect(script).toContain("error.action");
     expect(script).toContain("response.clone().json()");
     expect(script).toContain("apiErrorText(ev.error");
