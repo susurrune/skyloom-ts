@@ -61,6 +61,21 @@ export function clientMain(): void {
     setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 350); }, 2400);
   }
 
+  function apiErrorText(payload: any, fallback: string): string {
+    const error = payload && payload.error ? payload.error : payload;
+    if (!error || typeof error !== 'object') return fallback;
+    const message = typeof error.message === 'string' && error.message ? error.message : fallback;
+    return typeof error.action === 'string' && error.action ? message + ' · ' + error.action : message;
+  }
+
+  async function readApiError(response: any, fallback: string): Promise<string> {
+    try {
+      return apiErrorText(await response.clone().json(), fallback);
+    } catch {
+      return fallback + ' (HTTP ' + response.status + ')';
+    }
+  }
+
   /* ── theme (宣纸 / 夜墨) ── */
   function themeNow(): string { return D.documentElement.getAttribute('data-theme') || 'light'; }
   function setTheme(mode: string) {
@@ -367,7 +382,7 @@ export function clientMain(): void {
         body: JSON.stringify({ message: text, agent: cur.name, sessionId: store.getItem(SKEY(cur.name)) }),
         signal: aborter.signal,
       });
-      if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok || !resp.body) throw new Error(await readApiError(resp, '连接失败'));
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
@@ -396,14 +411,22 @@ export function clientMain(): void {
             resolveToolRow(turn, ev.tool_name || '?', !!ev.success);
             tools.push({ name: ev.tool_name || '?', ok: !!ev.success, ms: 0 });
           }
-          else if (ev.type === 'error') addSysLine('✗ ' + (ev.text || '出错了'));
+          else if (ev.type === 'error') {
+            const text = apiErrorText(ev.error || { message: ev.text }, ev.text || '出错了');
+            addSysLine('✗ ' + text);
+            toast(text, 'err');
+          }
           else if (ev.type === 'truncated') addSysLine('⚠ ' + (ev.reason || '已截断'));
           else if (ev.type === 'interrupted') addSysLine('已停止生成');
         }
       }
     } catch (e: any) {
       if (e && e.name === 'AbortError') { stopped = true; addSysLine('已停止生成'); }
-      else { addSysLine('✗ 连接中断'); toast('连接中断，请重试', 'err'); }
+      else {
+        const text = e && e.message ? e.message : '连接中断，请重试';
+        addSysLine('✗ ' + text);
+        toast(text, 'err');
+      }
     }
 
     if (renderFrame !== null) {
@@ -529,14 +552,15 @@ export function clientMain(): void {
     healthBusy = true;
     try {
       const response = await fetch('/api/health');
-      if (!response.ok) throw new Error('health unavailable');
+      if (!response.ok) throw new Error(await readApiError(response, '健康中心暂时无法读取'));
       renderHealth(await response.json());
       $('#health-loading').hidden = true;
       $('#health-content').hidden = false;
       $('#health-close').focus();
-    } catch {
-      $('#health-loading').textContent = '健康中心暂时无法读取';
-      toast('健康中心无法读取', 'err');
+    } catch (error: any) {
+      const text = error && error.message ? error.message : '健康中心暂时无法读取';
+      $('#health-loading').textContent = text;
+      toast(text, 'err');
     } finally {
       healthBusy = false;
     }
@@ -667,11 +691,11 @@ export function clientMain(): void {
     $('#settings-result').textContent = '';
     try {
       const response = await fetch('/api/settings');
-      if (!response.ok) throw new Error('settings unavailable');
+      if (!response.ok) throw new Error(await readApiError(response, '设置卷册暂时无法读取'));
       renderSettings(await response.json());
       $('#settings-close').focus();
-    } catch {
-      $('#settings-loading').textContent = '设置卷册暂时无法读取';
+    } catch (error: any) {
+      $('#settings-loading').textContent = error && error.message ? error.message : '设置卷册暂时无法读取';
     }
   }
 
@@ -712,7 +736,7 @@ export function clientMain(): void {
         body: JSON.stringify(payload),
       });
       const data: any = await response.json();
-      if (!response.ok) throw new Error(data.error || 'save failed');
+      if (!response.ok) throw new Error(apiErrorText(data, '保存失败'));
       $('#setting-api-key').value = '';
       clearKeyProvider = null;
       renderSettings(data);
@@ -795,10 +819,11 @@ export function clientMain(): void {
     sessionsBusy = true;
     try {
       const response = await fetch('/api/sessions?agent=' + encodeURIComponent(cur.name));
-      if (!response.ok) throw new Error('sessions unavailable');
+      if (!response.ok) throw new Error(await readApiError(response, '无法读取历史会话'));
       renderSessions(await response.json());
-    } catch {
-      $('#sessions-list').innerHTML = '<p class="sessions-empty error">无法读取历史会话</p>';
+    } catch (error: any) {
+      $('#sessions-list').innerHTML = '<p class="sessions-empty error">' +
+        escapeHtml(error && error.message ? error.message : '无法读取历史会话') + '</p>';
     } finally {
       sessionsBusy = false;
     }
@@ -813,15 +838,15 @@ export function clientMain(): void {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent: cur.name, sessionId }),
       });
-      if (!response.ok) throw new Error('session load failed');
+      if (!response.ok) throw new Error(await readApiError(response, '无法恢复该会话'));
       const data: any = await response.json();
       if (typeof data.sessionId === 'string') store.setItem(SKEY(cur.name), data.sessionId);
       saveHist(cur.name, []);
       closeSessions();
       await syncHistory(cur);
       toast('历史会话已恢复');
-    } catch {
-      toast('无法恢复该会话', 'err');
+    } catch (error: any) {
+      toast(error && error.message ? error.message : '无法恢复该会话', 'err');
     } finally {
       setSessionsBusy(false);
     }
@@ -838,7 +863,7 @@ export function clientMain(): void {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent: cur.name, sessionId }),
       });
-      if (!response.ok) throw new Error('session delete failed');
+      if (!response.ok) throw new Error(await readApiError(response, '无法删除该会话'));
       const data: any = await response.json();
       if (typeof data.sessionId === 'string') store.setItem(SKEY(cur.name), data.sessionId);
       if (deletingActive) {
@@ -848,8 +873,8 @@ export function clientMain(): void {
       toast('会话已删除');
       sessionsBusy = false;
       await openSessions(true);
-    } catch {
-      toast('无法删除该会话', 'err');
+    } catch (error: any) {
+      toast(error && error.message ? error.message : '无法删除该会话', 'err');
     } finally {
       setSessionsBusy(false);
     }
@@ -885,7 +910,7 @@ export function clientMain(): void {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent: cur.name }),
       });
-      if (!response.ok) throw new Error('session reset failed');
+      if (!response.ok) throw new Error(await readApiError(response, '无法开始新会话'));
       const data: any = await response.json();
       if (typeof data.sessionId === 'string') store.setItem(SKEY(cur.name), data.sessionId);
       saveHist(cur.name, []);
@@ -895,8 +920,8 @@ export function clientMain(): void {
       renderHistory();
       updateRetryButton();
       toast('新会话已就绪');
-    } catch {
-      toast('无法开始新会话，请稍后重试', 'err');
+    } catch (error: any) {
+      toast(error && error.message ? error.message : '无法开始新会话，请稍后重试', 'err');
     } finally {
       resetting = false;
       btn.disabled = false;

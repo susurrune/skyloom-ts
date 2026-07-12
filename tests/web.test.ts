@@ -149,6 +149,11 @@ describe("web · page", () => {
     expect(script).toContain("function openSessions");
     expect(script).toContain("function openSettings");
     expect(script).toContain("/api/settings");
+    expect(script).toContain("function apiErrorText");
+    expect(script).toContain("function readApiError");
+    expect(script).toContain("error.action");
+    expect(script).toContain("response.clone().json()");
+    expect(script).toContain("apiErrorText(ev.error");
     expect(script).toMatch(/fetch\(["']\/api\/sessions\?agent=/);
     expect(script).toMatch(/fetch\(["']\/api\/session\/load["']/);
     expect(script).toMatch(/method:\s*["']DELETE["']/);
