@@ -598,6 +598,73 @@ describe("web · server", () => {
     }
   });
 
+  it("returns a structured not-found error for unknown agents across session APIs", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = 5689 + Math.floor(Math.random() * 1000);
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        listSessions: vi.fn(async () => []),
+        getActiveSession: () => null,
+        getMessages: () => [],
+        createSession: vi.fn(async () => "session-new"),
+        loadSession: vi.fn(async () => false),
+        deleteSession: vi.fn(async () => false),
+      },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const cases = [
+        fetch(`http://127.0.0.1:${port}/api/sessions?agent=ghost`),
+        fetch(`http://127.0.0.1:${port}/api/history?agent=ghost`),
+        fetch(`http://127.0.0.1:${port}/api/session`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent: "ghost" }),
+        }),
+        fetch(`http://127.0.0.1:${port}/api/session/load`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent: "ghost", sessionId: "session-x" }),
+        }),
+        fetch(`http://127.0.0.1:${port}/api/session`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent: "ghost", sessionId: "session-x" }),
+        }),
+      ];
+      for (const response of await Promise.all(cases)) {
+        expect(response.status).toBe(404);
+        await expect(response.json()).resolves.toMatchObject({
+          error: {
+            code: "web.agent_not_found",
+            message: "Agent 'ghost' not found",
+            category: "not_found",
+            retryable: false,
+            action: expect.any(String),
+          },
+        });
+      }
+      expect(fakeAgent.init).not.toHaveBeenCalled();
+      expect(fakeAgent.memory.createSession).not.toHaveBeenCalled();
+      expect(fakeAgent.memory.loadSession).not.toHaveBeenCalled();
+      expect(fakeAgent.memory.deleteSession).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("refuses to reset a session while the agent is busy", async () => {
     const { startWebServer } = await import("../src/web/server");
     const port = 5789 + Math.floor(Math.random() * 1000);

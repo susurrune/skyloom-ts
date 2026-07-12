@@ -32,6 +32,10 @@ function payloadTooLargeError(): WebApiError {
   });
 }
 
+function agentNotFoundError(agentName: string): WebApiError {
+  return makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false });
+}
+
 export function isLoopbackAddress(address: string | undefined): boolean {
   if (!address) return false;
   const normalized = address.toLowerCase().split("%")[0];
@@ -202,7 +206,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: System
     sendApiError(res, makeApiError(400, "web.bad_request", "sessionId must be a non-empty string", { retryable: false })); return;
   }
   const agent = ctx.agentMap.get(agentName);
-  if (!agent) { sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false })); return; }
+  if (!agent) { sendApiError(res, agentNotFoundError(agentName)); return; }
   await agent.init();
   if (typeof sessionId === "string") {
     const sessionExists = (agent.memory as unknown as { sessionExists?: (id: string) => Promise<boolean> }).sessionExists;
@@ -254,7 +258,7 @@ async function handleNewSession(req: IncomingMessage, res: ServerResponse, ctx: 
   }
   const agent = ctx.agentMap.get(agentName);
   if (!agent) {
-    sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false }));
+    sendApiError(res, agentNotFoundError(agentName));
     return;
   }
   await agent.init();
@@ -269,7 +273,7 @@ async function handleNewSession(req: IncomingMessage, res: ServerResponse, ctx: 
 async function getIdleAgent(agentName: string, res: ServerResponse, ctx: SystemContext): Promise<BaseAgent | null> {
   const agent = ctx.agentMap.get(agentName);
   if (!agent) {
-    sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false }));
+    sendApiError(res, agentNotFoundError(agentName));
     return null;
   }
   await agent.init();
@@ -337,7 +341,7 @@ async function handleHistory(url: URL, res: ServerResponse, ctx: SystemContext):
   const agentName = url.searchParams.get("agent") || "fog";
   const agent = ctx.agentMap.get(agentName);
   if (!agent) {
-    sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false }));
+    sendApiError(res, agentNotFoundError(agentName));
     return;
   }
   await agent.init();
