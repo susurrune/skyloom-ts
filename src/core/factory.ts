@@ -23,6 +23,7 @@ import { createDelegateTool } from '../tools/delegate';
 import { createSpawnAgentTool } from '../tools/spawn';
 import { createModelTools } from '../tools/model_tool';
 import { createTodoTool } from '../tools/todo';
+import { registerMcpTools } from '../tools/mcp';
 import { FogAgent } from '../agents/fog';
 import { RainAgent } from '../agents/rain';
 import { FrostAgent } from '../agents/frost';
@@ -162,6 +163,7 @@ export function createSystemContext(): SystemContext {
   let mcpManager: MCPManager | null = null;
   try {
     mcpManager = new MCPManager(baseToolRegistry);
+    registerMcpTools(baseToolRegistry, () => mcpManager);
     const persisted = loadPersistedServers();
     const mcpServers = (config as any).mcp?.servers || [];
     const projectServers = loadProjectMcpJson(); // Claude Code 标准 .mcp.json
