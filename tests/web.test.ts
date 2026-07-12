@@ -429,6 +429,53 @@ describe("web · server", () => {
     }
   });
 
+  it("rejects a missing chat session before streaming starts", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = 5389 + Math.floor(Math.random() * 1000);
+    const sessionExists = vi.fn(async () => false);
+    const chatStreamInSession = vi.fn(async function* () {
+      yield { type: "content", text: "should-not-stream" };
+    });
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: { sessionExists },
+      chatStreamInSession,
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", message: "hello", sessionId: "missing-session" }),
+      });
+      expect(response.status).toBe(404);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: "web.session_not_found",
+          message: "session not found",
+          retryable: false,
+          action: expect.any(String),
+        },
+      });
+      expect(sessionExists).toHaveBeenCalledWith("missing-session");
+      expect(chatStreamInSession).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("lists, restores, and deletes persisted web sessions", async () => {
     const { startWebServer } = await import("../src/web/server");
     const port = 5489 + Math.floor(Math.random() * 1000);

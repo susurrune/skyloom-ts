@@ -1092,6 +1092,20 @@ export class Memory {
   }
 
   /**
+   * Check whether a session exists for this agent without loading it.
+   */
+  async sessionExists(sessionId: string): Promise<boolean> {
+    if (!this.db) {
+      return false;
+    }
+    const row = this.dbGet(
+      'SELECT id FROM sessions WHERE id = ? AND agent = ?',
+      [sessionId, this.agentName]
+    );
+    return Boolean(row);
+  }
+
+  /**
    * Resume the latest session.
    */
   async resumeLatestSession(): Promise<string | null> {

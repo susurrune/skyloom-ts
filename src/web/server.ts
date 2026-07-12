@@ -195,6 +195,16 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: System
   const agent = ctx.agentMap.get(agentName);
   if (!agent) { sendApiError(res, makeApiError(404, "web.agent_not_found", `Agent '${agentName}' not found`, { retryable: false })); return; }
   await agent.init();
+  if (typeof sessionId === "string") {
+    const sessionExists = (agent.memory as unknown as { sessionExists?: (id: string) => Promise<boolean> }).sessionExists;
+    if (sessionExists && !await sessionExists.call(agent.memory, sessionId)) {
+      sendApiError(res, makeApiError(404, "web.session_not_found", "session not found", {
+        retryable: false,
+        action: "请在历史会话中重新选择，或点击新会话开始一段新的对话。",
+      }));
+      return;
+    }
+  }
 
   // Cancel agent work when the client disconnects (stop button / closed tab).
   // Without this the agent kept running tool rounds into a dead socket.
