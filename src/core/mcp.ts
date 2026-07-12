@@ -1030,6 +1030,7 @@ export class MCPManager {
       this.clients.set(name, client);
       this.serverDiagnostics.delete(name);
       this.serverConfigs.push(config);
+      savePersistedServer({ ...config, name });
 
       const count = this.registerMCPTools(name, tools);
       const toolNames = tools
@@ -1059,6 +1060,7 @@ export class MCPManager {
     await client.close();
     this.clients.delete(cleanName);
     this.serverDiagnostics.delete(cleanName);
+    removePersistedServer(cleanName);
     this.serverConfigs = this.serverConfigs.filter(
       (c) => c.name !== cleanName
     );
