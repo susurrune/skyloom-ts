@@ -16,6 +16,7 @@ import { loadHooks, runSessionStartHooks } from './hooks';
 import { resolveWorkspacePath, initWorkspace } from './workspace';
 import { MCPManager, loadPersistedServers, loadProjectMcpJson } from './mcp';
 import { matchPipeline, buildTasksFromPipeline } from './pipelines';
+import { OrchestrationRunStore, type OrchestrationRun } from './run_store';
 import { registerBuiltinTools } from '../tools/builtin';
 import { registerAllSkills } from '../skills/loader';
 import { PluginLoader } from '../plugins/loader';
@@ -275,6 +276,8 @@ export class TaskExecutionResult {
   description: string;
   success: boolean;
   content: string;
+  fullContent: string;
+  traceId: string | null;
 
   constructor(opts: {
     id: string;
@@ -282,12 +285,16 @@ export class TaskExecutionResult {
     description: string;
     success: boolean;
     content: string;
+    fullContent?: string;
+    traceId?: string | null;
   }) {
     this.id = opts.id;
     this.agent = opts.agent;
     this.description = opts.description;
     this.success = opts.success;
     this.content = opts.content;
+    this.fullContent = opts.fullContent ?? opts.content;
+    this.traceId = opts.traceId ?? null;
   }
 }
 
@@ -348,21 +355,24 @@ async function executeWithRetry(
   const originalDescription = aTask.description;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const attemptTask = new AgentTask({
+      id: aTask.id,
+      description: attempt === 1
+        ? originalDescription
+        : `${originalDescription}\n\n[retry ${attempt}/${maxAttempts}] previous attempt did not produce a valid deliverable. You MUST produce the actual deliverable.`,
+      assignedTo: aTask.assignedTo,
+      parentId: aTask.parentId,
+      dependsOn: Array.from(aTask.dependsOn || []),
+      metadata: { ...(aTask.metadata || {}), attempt },
+    });
     try {
-      const result = await agent.executeTask(aTask, onStatus);
+      const result = await agent.executeTask(attemptTask, onStatus);
       const content = (result.content || '').trim();
       const truncated = (result as any).truncated === true;
       const ok = result.success && !isThinContent(content);
 
       if (ok && !truncated) return result;
       lastResult = result;
-
-      if (attempt < maxAttempts) {
-        const reason = truncated
-          ? 'previous attempt was truncated'
-          : 'previous attempt was empty or a placeholder ack';
-        aTask.description = `${originalDescription}\n\n[retry ${attempt + 1}/${maxAttempts}] ${reason}. You MUST produce the actual deliverable.`;
-      }
     } catch (e) {
       lastResult = { success: false, content: `Attempt ${attempt} threw: ${e}` };
     }
@@ -371,7 +381,6 @@ async function executeWithRetry(
     }
   }
 
-  aTask.description = originalDescription;
   return lastResult || { success: false, content: `All ${maxAttempts} attempts failed` };
 }
 
@@ -381,7 +390,7 @@ async function executePending(
   results: TaskExecutionResult[],
   resultsById: Map<string, TaskExecutionResult>,
   fullContentsById: Map<string, string>,
-  completed: Set<string>,
+  succeeded: Set<string>,
   options: {
     onTaskStart?: ((task: any) => Promise<void>) | null;
     onTaskDone?: ((task: any, result: TaskExecutionResult) => Promise<void>) | null;
@@ -391,10 +400,10 @@ async function executePending(
   }
 ): Promise<void> {
   while (pending.length > 0) {
-    const ready = pending.filter(t => t.allDeps.every((dep: string) => completed.has(dep)));
+    const ready = pending.filter(t => t.allDeps.every((dep: string) => succeeded.has(dep)));
     if (ready.length === 0) {
       for (const t of pending) {
-        const missing = t.allDeps.filter((d: string) => !completed.has(d));
+        const missing = t.allDeps.filter((d: string) => !succeeded.has(d));
         t.transitionTo(TaskState.FAILED);
         const r = new TaskExecutionResult({
           id: t.id, agent: t.assignedTo || '',
@@ -403,7 +412,6 @@ async function executePending(
         });
         results.push(r);
         resultsById.set(r.id, r);
-        completed.add(r.id);
         if (options.onTaskDone) await options.onTaskDone(t, r);
       }
       pending.length = 0;
@@ -414,15 +422,17 @@ async function executePending(
 
     const batchResults = await Promise.all(
       ready.map(async (t: any) => {
+        if (options.onTaskStart) await options.onTaskStart(t);
         const agent = agentMap.get(t.assignedTo);
         if (!agent) {
-          return new TaskExecutionResult({
+          const result = new TaskExecutionResult({
             id: t.id, agent: t.assignedTo || '',
             description: t.description, success: false,
             content: `Agent '${t.assignedTo}' not found`,
           });
+          if (options.onTaskDone) await options.onTaskDone(t, result);
+          return result;
         }
-        if (options.onTaskStart) await options.onTaskStart(t);
 
         let description = t.description;
         const upstreamSections: string[] = [];
@@ -475,6 +485,8 @@ async function executePending(
           id: t.id, agent: t.assignedTo || '',
           description: t.description, success: result.success,
           content: tr,
+          fullContent: full,
+          traceId: typeof agent.getLastTrace === 'function' ? agent.getLastTrace()?.traceId ?? null : null,
         });
         if (options.onTaskDone) await options.onTaskDone(t, r);
         return r;
@@ -484,7 +496,7 @@ async function executePending(
     for (const r of batchResults) {
       results.push(r);
       resultsById.set(r.id, r);
-      completed.add(r.id);
+      if (r.success) succeeded.add(r.id);
     }
     for (const t of ready) {
       const idx = pending.indexOf(t);
@@ -553,6 +565,9 @@ export async function orchestrateTask(
     maxReplanRounds?: number;
     maxTotalTasks?: number;
     resume?: boolean;
+    runId?: string;
+    runStore?: OrchestrationRunStore;
+    onRun?: ((run: OrchestrationRun) => void) | null;
   }
 ): Promise<[any[], TaskExecutionResult[], string]> {
   const snowAgent = snow || agentMap.get('snow') || null;
@@ -564,37 +579,88 @@ export async function orchestrateTask(
   const maxReplanRounds = options?.maxReplanRounds ?? 1;
   const maxTotalTasks = options?.maxTotalTasks ?? 6;
   const resultTruncate = options?.resultTruncate ?? 500;
+  const runStore = options?.runStore ?? new OrchestrationRunStore();
+  let run = options?.resume
+    ? options.runId ? runStore.load(options.runId) : runStore.latestRecoverable(goal)
+    : null;
+  if (options?.resume && !run) throw new Error('No recoverable orchestration run was found');
 
   // Try pipeline match first
   let tasks: any[];
-  try {
-    const matched = matchPipeline(goal);
-    if (matched) {
-      tasks = buildTasksFromPipeline(matched, goal);
-    } else {
+  if (run) {
+    if (run.goal !== goal) throw new Error(`Run '${run.runId}' belongs to a different goal`);
+    tasks = run.tasks.map(task => ({
+      id: task.id,
+      description: task.description,
+      assignedTo: task.agent,
+      dependsOn: task.dependsOn,
+      metadata: task.metadata,
+    }));
+  } else {
+    try {
+      const matched = matchPipeline(goal);
+      if (matched) {
+        tasks = buildTasksFromPipeline(matched, goal);
+      } else {
+        tasks = await (snowAgent as any).orchestrate(goal);
+      }
+    } catch {
       tasks = await (snowAgent as any).orchestrate(goal);
     }
-  } catch {
-    tasks = await (snowAgent as any).orchestrate(goal);
   }
 
   if (!tasks || tasks.length === 0) {
     return [[], [], 'No tasks were planned'];
   }
 
+  tasks = tasks.map((task: any) => task instanceof AgentTask ? task : new AgentTask({
+    id: String(task.id),
+    description: String(task.description || ''),
+    assignedTo: task.assignedTo ?? task.assigned_to ?? null,
+    parentId: task.parentId ?? task.parent_id ?? null,
+    dependsOn: Array.from(task.dependsOn ?? task.depends_on ?? []),
+    metadata: { ...(task.metadata || {}) },
+  }));
+  if (!run) run = runStore.create(goal, tasks, options?.runId);
+  for (const task of tasks) task.metadata = { ...(task.metadata || {}), runId: run.runId };
+  options?.onRun?.(run);
+  const releaseLease = options?.resume ? runStore.acquireLease(run.runId) : () => {};
+
+  try {
+  if (run.status === 'completed') {
+    const restored = run.tasks.map(task => new TaskExecutionResult({
+      id: task.id, agent: task.agent, description: task.description,
+      success: true, content: task.result || '', fullContent: task.result || '',
+    }));
+    return [tasks, restored, run.summary || ''];
+  }
+  runStore.start(run);
+
   // Notify caller of the plan
   if (options?.onPlanned) {
     const proceed = await options.onPlanned(tasks);
     if (proceed === false) {
+      runStore.cancel(run, '[CANCELLED] plan rejected before execution');
       return [tasks, [], '[CANCELLED] plan rejected before execution'];
     }
   }
 
-  const completed = new Set<string>();
+  const succeeded = new Set<string>();
   const results: TaskExecutionResult[] = [];
   const resultsById = new Map<string, TaskExecutionResult>();
   const fullContentsById = new Map<string, string>();
-  let pending = tasks.filter((t: any) => t.assignedTo && t.assignedTo !== 'snow');
+  for (const stored of run.tasks) {
+    if (stored.status !== 'completed') continue;
+    const restored = new TaskExecutionResult({
+      id: stored.id, agent: stored.agent, description: stored.description,
+      success: true, content: stored.result || '', fullContent: stored.result || '',
+    });
+    results.push(restored);
+    resultsById.set(restored.id, restored);
+    fullContentsById.set(restored.id, restored.fullContent);
+    succeeded.add(restored.id);
+  }
+  let pending = tasks.filter((t: any) => t.assignedTo && t.assignedTo !== 'snow' && !succeeded.has(t.id));
   let replanRound = 0;
 
   // Cycle detection
@@ -615,16 +681,22 @@ export async function orchestrateTask(
         description: t.description, success: false,
         content: `[cycle detected] task ${t.id} has circular dependency`,
       }));
-      completed.add(t.id);
+      runStore.taskFinished(run!, t.id, false, `[cycle detected] task ${t.id} has circular dependency`);
       return false;
     }
     return true;
   });
 
   while (true) {
-    await executePending(pending, agentMap, results, resultsById, fullContentsById, completed, {
-      onTaskStart: options?.onTaskStart || null,
-      onTaskDone: options?.onTaskDone || null,
+    await executePending(pending, agentMap, results, resultsById, fullContentsById, succeeded, {
+      onTaskStart: async (task) => {
+        runStore.taskStarted(run!, task.id);
+        if (options?.onTaskStart) await options.onTaskStart(task);
+      },
+      onTaskDone: async (task, result) => {
+        runStore.taskFinished(run!, task.id, result.success, result.fullContent, result.traceId);
+        if (options?.onTaskDone) await options.onTaskDone(task, result);
+      },
       onToolStatus: options?.onToolStatus || null,
       resultTruncate,
       maxTaskRetries,
@@ -644,12 +716,20 @@ export async function orchestrateTask(
         new Set(tasks.map((t: any) => t.id)));
       if (!extraTasks || extraTasks.length === 0) break;
       if (tasks.length + extraTasks.length > maxTotalTasks) break;
-      tasks.push(...extraTasks);
+      const hydratedExtraTasks = extraTasks.map((task: any) => task instanceof AgentTask ? task : new AgentTask({
+        id: String(task.id), description: String(task.description || ''),
+        assignedTo: task.assignedTo ?? task.assigned_to ?? null,
+        parentId: task.parentId ?? task.parent_id ?? null,
+        dependsOn: Array.from(task.dependsOn ?? task.depends_on ?? []),
+        metadata: { ...(task.metadata || {}) },
+      }));
+      tasks.push(...hydratedExtraTasks);
+      runStore.appendTasks(run, hydratedExtraTasks);
       if (options?.onPlanned) {
         const proceed = await options.onPlanned(tasks);
         if (proceed === false) break;
       }
-      pending = extraTasks.filter((t: any) => t.assignedTo && t.assignedTo !== 'snow');
+      pending = hydratedExtraTasks.filter((t: any) => t.assignedTo && t.assignedTo !== 'snow');
     } catch {
       break;
     }
@@ -681,5 +761,10 @@ export async function orchestrateTask(
     } catch { /* ignore */ }
   }
 
+  runStore.finish(run, summary);
+
   return [tasks, results, summary];
+  } finally {
+    releaseLease();
+  }
 }

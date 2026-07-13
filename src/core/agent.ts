@@ -27,6 +27,7 @@ import {
   type ToolExecutionResult,
 } from './agent/tools';
 import { Tracer, type Trace } from './trace';
+import { resolveVerifyConfig, runVerify } from './verify';
 
 const log = getLogger('agent');
 
@@ -1041,7 +1042,14 @@ export class BaseAgent {
     task: Task,
     onStatus?: ((status: string) => void) | null
   ): Promise<TaskResult> {
-    return this.sessionController.withTurn(() => this.executeTaskImpl(task, onStatus));
+    return this.sessionController.withTurn(async () => {
+      this.tracer.startTrace(`[task] ${task.description}`.replace(/\s+/g, ' ').slice(0, 80), this.name);
+      try {
+        return await this.executeTaskImpl(task, onStatus);
+      } finally {
+        this.tracer.endTrace();
+      }
+    });
   }
 
   private async executeTaskImpl(
@@ -1052,14 +1060,14 @@ export class BaseAgent {
     task.transitionTo(TaskState.RUNNING);
     this.memory.setWorking('current_task', task);
 
-    const prompt = `Complete this task NOW using your available tools. Then write the actual deliverable content in your final reply.\n\nTask: ${task.description}`;
+    let prompt = `Complete this task NOW using your available tools. Then write the actual deliverable content in your final reply.\n\nTask: ${task.description}`;
     if (task.metadata) {
       const ctxData: Record<string, any> = {};
       for (const [k, v] of Object.entries(task.metadata)) {
         if (k !== 'goal') ctxData[k] = v;
       }
       if (Object.keys(ctxData).length > 0) {
-        prompt + `\nContext: ${JSON.stringify(ctxData)}`;
+        prompt += `\nContext: ${JSON.stringify(ctxData)}`;
       }
     }
 
@@ -1088,7 +1096,6 @@ export class BaseAgent {
       // are configured (config.verify or SKY.md "## Verify"), run them and
       // feed failures back for a bounded number of fix rounds. ──
       try {
-        const { resolveVerifyConfig, runVerify } = require('./verify');
         const vc = resolveVerifyConfig(this.config);
         if (vc.commands.length > 0 && this._turnWroteFiles) {
           for (let round = 0; round <= vc.maxFixRounds; round++) {

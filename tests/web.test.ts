@@ -3,6 +3,11 @@ import type { Server } from "http";
 import { escapeHtml, highlightCode, mdInline, mdToHtml } from "../src/web/markdown";
 import { AGENT_THEMES } from "../src/core/theme";
 import { renderInkWashAppJS, renderInkWashCSS, renderInkWashUI, AGENTS_META } from "../src/web/ui";
+import { isAuthorizedWebRequest, MIN_WEB_TOKEN_LENGTH, resolveWebAccessPolicy } from "../src/web/auth";
+import { OrchestrationRunStore } from "../src/core/run_store";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve) => {
@@ -15,6 +20,24 @@ let nextSafeWebPort = 18080;
 function safeWebPort(): number {
   return nextSafeWebPort++;
 }
+
+describe("web · remote access policy", () => {
+  const token = "a".repeat(MIN_WEB_TOKEN_LENGTH);
+
+  it("refuses non-loopback binding without a strong token", () => {
+    expect(() => resolveWebAccessPolicy("0.0.0.0")).toThrow(/Refusing non-loopback/);
+    expect(() => resolveWebAccessPolicy("192.168.1.8", "short")).toThrow(/minimum/);
+    expect(resolveWebAccessPolicy("127.0.0.1")).toMatchObject({ loopbackOnly: true, token: null });
+  });
+
+  it("accepts bearer, explicit and browser basic authentication", () => {
+    expect(isAuthorizedWebRequest({ authorization: `Bearer ${token}` }, token)).toBe(true);
+    expect(isAuthorizedWebRequest({ "x-skyloom-token": token }, token)).toBe(true);
+    const basic = Buffer.from(`skyloom:${token}`).toString("base64");
+    expect(isAuthorizedWebRequest({ authorization: `Basic ${basic}` }, token)).toBe(true);
+    expect(isAuthorizedWebRequest({ authorization: "Bearer wrong" }, token)).toBe(false);
+  });
+});
 
 /* ════════ markdown renderer (isomorphic, injected into the page) ════════ */
 
@@ -425,6 +448,63 @@ describe("web · server", () => {
     });
     expect(evilStatus).toBe(403);
   }, 15000);
+
+  it("enforces authentication on every remotely-bound surface", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const token = "remote-access-token-with-strong-length";
+    const fakeContext = { agentMap: new Map(), workspacePath: process.cwd() };
+    const server = await (startWebServer as any)(port, fakeContext, { host: "0.0.0.0", token });
+    try {
+      const anonymous = await fetch(`http://127.0.0.1:${port}/`, { redirect: "manual" });
+      expect(anonymous.status).toBe(401);
+      expect(anonymous.headers.get("www-authenticate")).toContain("Basic");
+
+      const basic = Buffer.from(`skyloom:${token}`).toString("base64");
+      const browser = await fetch(`http://127.0.0.1:${port}/`, {
+        headers: { Authorization: `Basic ${basic}` },
+      });
+      expect(browser.status).toBe(200);
+      expect(await browser.text()).toContain("水墨气象台");
+
+      const apiClient = await fetch(`http://127.0.0.1:${port}/ui/styles.css`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(apiClient.status).toBe(200);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("exposes durable run summaries, details and audit events", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "skyloom-web-runs-"));
+    const runStore = new OrchestrationRunStore(root);
+    const run = runStore.create("ship safely", [
+      { id: "1", description: "build", assignedTo: "rain", dependsOn: [] },
+    ], "web-run");
+    runStore.start(run);
+    runStore.taskStarted(run, "1");
+    runStore.taskFinished(run, "1", true, "artifact", "trace-web");
+    runStore.finish(run, "done");
+    const port = safeWebPort();
+    const fakeContext = { agentMap: new Map(), workspacePath: process.cwd() };
+    const server = await (startWebServer as any)(port, fakeContext, { runStore });
+    try {
+      const list = await fetch(`http://127.0.0.1:${port}/api/runs`);
+      expect(await list.json()).toMatchObject({
+        schemaVersion: 1,
+        runs: [{ runId: "web-run", status: "completed", taskSummary: { total: 1, completed: 1 } }],
+      });
+      const detail = await fetch(`http://127.0.0.1:${port}/api/runs/web-run`);
+      expect(await detail.json()).toMatchObject({ runId: "web-run", tasks: [{ traceIds: ["trace-web"] }] });
+      const events = await fetch(`http://127.0.0.1:${port}/api/runs/web-run/events`);
+      expect(await events.json()).toMatchObject({ schemaVersion: 1, runId: "web-run", events: expect.any(Array) });
+    } finally {
+      await closeServer(server);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it("starts a genuinely new backend session for the selected agent", async () => {
     const { startWebServer } = await import("../src/web/server");

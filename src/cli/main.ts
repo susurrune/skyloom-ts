@@ -16,7 +16,7 @@ import { loomChat } from "./loom_chat";
 import { executeSlashCommand, type CommandRuntime } from "./command_handlers";
 import { isTopLevelCommand, parseHeadlessInvocation, readPipedInput, selectChatSurface } from "./runtime";
 import { formatCost, renderClassicCommandLine, streamResponse, welcome } from "./classic_runtime";
-import { runHeadless, runTask } from "./headless";
+import { listTaskRuns, runHeadless, runTask } from "./headless";
 import { channelsWizard, checkApiKeys, saveApiKey, setupWizard } from "./setup_wizards";
 import { startWebCommand } from "./web_runtime";
 import { runDoctorCommand } from "./doctor";
@@ -37,7 +37,19 @@ program.command("chat").argument("[agent]", "agent name", "fog")
   .option("--classic", "linear scrolling UI instead of the full-screen loom")
   .action(async (a: string, o: { model?: string; classic?: boolean }) => { await chat(a, o.model, o.classic); });
 program.command("task").argument("[goal]", "task goal")
-  .action(async (g?: string) => { if (g) await runTask(g); });
+  .option("--resume [run-id]", "resume a failed or interrupted orchestration run")
+  .option("--json", "machine-readable run result")
+  .action(async (g: string | undefined, o: { resume?: boolean | string; json?: boolean }) => {
+    const resume = o.resume !== undefined && o.resume !== false;
+    process.exitCode = await runTask(g, {
+      resume,
+      runId: typeof o.resume === "string" ? o.resume : undefined,
+      json: o.json,
+    });
+  });
+program.command("runs").description("List durable orchestration runs")
+  .option("--json", "machine-readable run list")
+  .action((o: { json?: boolean }) => listTaskRuns(o.json));
 program.command("web").option("-p,--port <p>", "port", "7777")
   .action(async (o: { port?: string }) => { await startWebCommand(parseInt(o.port || "7777")); });
 program.command("mcp").action(() => { import("../core/mcp_server").then(m => m.startMCPServer()); });

@@ -2,6 +2,7 @@ import type { ServerResponse } from "http";
 
 export type ApiErrorCategory =
   | "bad_request"
+  | "unauthorized"
   | "not_found"
   | "conflict"
   | "forbidden"
@@ -64,6 +65,7 @@ export function sendUnknownError(res: ServerResponse, error: unknown): void {
 }
 
 function categoryForStatus(status: number): ApiErrorCategory {
+  if (status === 401) return "unauthorized";
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status === 409) return "conflict";
@@ -72,6 +74,7 @@ function categoryForStatus(status: number): ApiErrorCategory {
 }
 
 function defaultAction(status: number): string {
+  if (status === 401) return "使用 Skyloom Web 访问令牌重新认证。";
   if (status === 403) return "请从本机同源页面访问 Skyloom Web，或检查绑定地址与来源。";
   if (status === 404) return "检查 Agent、会话或 API 路径是否存在。";
   if (status === 409) return "等待当前 Agent 完成，或先停止生成后再重试。";

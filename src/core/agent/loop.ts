@@ -332,13 +332,26 @@ export class AgentLoop {
         rounds++;
         const messages = await deps.messagesWithRecall();
         onStatus?.('thinking...');
-        response = await deps.llm.complete(
-          messages,
-          deps.name,
-          toolNames.length > 0 ? toolNames : undefined,
-          false,
-          Object.keys(deps.getSkillConfigOverrides()).length > 0 ? deps.getSkillConfigOverrides() : undefined,
-        );
+        const llmSpan = deps.tracer.startSpan('complete', 'llm', { model: deps.resolveModelId(), round: rounds });
+        try {
+          response = await deps.llm.complete(
+            messages,
+            deps.name,
+            toolNames.length > 0 ? toolNames : undefined,
+            false,
+            Object.keys(deps.getSkillConfigOverrides()).length > 0 ? deps.getSkillConfigOverrides() : undefined,
+          );
+          llmSpan.end('ok', {
+            model: response.model,
+            promptTokens: response.usage?.promptTokens,
+            completionTokens: response.usage?.completionTokens,
+            cost: response.cost,
+            toolCalls: response.toolCalls?.length || 0,
+          });
+        } catch (error) {
+          llmSpan.end('error', { error: String(error).slice(0, 120) });
+          throw error;
+        }
         if (!response.toolCalls || response.toolCalls.length === 0) return response;
 
         deps.bus.addEvent(new Event(EventType.LLM_CALL, deps.name, null, {

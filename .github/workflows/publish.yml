@@ -20,6 +20,10 @@ permissions:
   id-token: write
   contents: write
 
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -41,7 +45,27 @@ jobs:
       - run: npm --version
 
       - run: npm ci
-      - run: npm run build
+
+      - name: Verify release identity
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$V" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $V" >&2
+            exit 1
+          fi
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Type-check
+        run: npm run type-check
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test -- --run
+      - name: Agent evaluation gate
+        run: npm run eval
+      - name: Verify packed artifact
+        run: npm run test:package
 
       # Refuse to republish an existing version (idempotent dispatches).
       - name: Skip if version already published
@@ -58,7 +82,7 @@ jobs:
 
       - name: Publish
         if: steps.check.outputs.already == 'false'
-        run: npm publish --access public
+        run: npm publish --access public --provenance
 
       # When publishing from a branch (master push or manual dispatch), create
       # the release tag the environment couldn't push. Tag pushes skip this.
@@ -66,8 +90,12 @@ jobs:
         if: github.ref_type == 'branch'
         run: |
           V="v${{ steps.check.outputs.version }}"
-          if git ls-remote --exit-code origin "refs/tags/$V" >/dev/null 2>&1; then
-            echo "$V already exists"
+          REMOTE_SHA=$(git ls-remote origin "refs/tags/$V" | cut -f1)
+          if [[ -n "$REMOTE_SHA" && "$REMOTE_SHA" != "$GITHUB_SHA" ]]; then
+            echo "$V already points to $REMOTE_SHA instead of $GITHUB_SHA" >&2
+            exit 1
+          elif [[ -n "$REMOTE_SHA" ]]; then
+            echo "$V already points to this commit"
           else
             git tag "$V"
             git push origin "$V"

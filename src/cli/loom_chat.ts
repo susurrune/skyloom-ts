@@ -182,14 +182,16 @@ async function runLoomTask(ui: LoomUI, ctx: any, goal: string): Promise<void> {
     }
   };
   const spinner = setInterval(() => { spin++; redraw(); }, 480);
+  let runId = '';
 
   try {
     const [, results, summary] = await orchestrateTask(goal, ctx.agentMap, null, {
+      onRun: run => { runId = run.runId; },
       onPlanned: async (tasks: any[]) => {
         ui.orch.plan(tasks);
         for (const id of ui.orch.order) idxOf.set(id, ui.orch.tasks.get(id)!.index);
         ui.update("orch-head", "");
-        ui.line(chalk.hex(t.hex)("✦ 织谱") + chalk.dim(` · ${ui.orch.order.length} 梭`), "orch-head");
+        ui.line(chalk.hex(t.hex)("✦ 织谱") + chalk.dim(` · ${ui.orch.order.length} 梭 · ${runId.slice(0, 8)}`), "orch-head");
         for (const id of ui.orch.order) {
           const task = ui.orch.tasks.get(id)!;
           ui.line(renderTaskLine(ui, task, 0, idxOf), `task-${id}`);

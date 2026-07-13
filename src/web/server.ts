@@ -21,6 +21,8 @@ import {
 } from "./ui";
 import { applyWebSettings, buildWebSettings, WebSettingsError } from "./settings";
 import { makeApiError, sendApiError, sendJson, sendUnknownError, WebApiError } from "./errors";
+import { isAuthorizedWebRequest, resolveWebAccessPolicy } from "./auth";
+import { OrchestrationRunStore, RunStoreError } from "../core/run_store";
 
 const MAX_CHAT_BODY_BYTES = 1024 * 1024;
 type SystemContext = ReturnType<typeof createSystemContext>;
@@ -50,15 +52,18 @@ export function isLoopbackAddress(address: string | undefined): boolean {
 export async function startWebServer(
   port: number = 7777,
   contextOverride?: SystemContext,
-  options: { configDir?: string } = {},
+  options: { configDir?: string; host?: string; token?: string; runStore?: OrchestrationRunStore } = {},
 ): Promise<Server> {
-  const ctx = contextOverride ?? createSystemContext();
-
   // Bind to loopback by default: the chat API drives the agent (and its tools)
   // with no authentication, so it must not be exposed to the network unless the
   // operator explicitly opts in via SKYLOOM_WEB_HOST=0.0.0.0.
-  const host = process.env.SKYLOOM_WEB_HOST || "127.0.0.1";
-  const loopbackOnly = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  const access = resolveWebAccessPolicy(
+    options.host ?? process.env.SKYLOOM_WEB_HOST ?? "127.0.0.1",
+    options.token ?? process.env.SKYLOOM_WEB_TOKEN,
+  );
+  const { host, loopbackOnly } = access;
+  const ctx = contextOverride ?? createSystemContext();
+  const runStore = options.runStore ?? new OrchestrationRunStore();
 
   // Reject cross-origin / rebound Host headers when bound to loopback. Without
   // this, a malicious web page could POST to http://localhost:<port>/api/chat
@@ -73,10 +78,11 @@ export async function startWebServer(
     return name === "localhost" || name === "127.0.0.1" || name === "[::1]" || name === "::1" || name === "";
   };
 
-  const sameOriginAllowed = (origin: string | undefined): boolean => {
-    if (!loopbackOnly || !origin) return true;
+  const sameOriginAllowed = (origin: string | undefined, requestHost: string | undefined): boolean => {
+    if (!origin) return true;
     try {
       const u = new URL(origin);
+      if (!loopbackOnly) return u.host.toLowerCase() === (requestHost || '').toLowerCase();
       const hostname = u.hostname.toLowerCase();
       const reqPort = u.port || (u.protocol === "https:" ? "443" : "80");
       return u.protocol === "http:" &&
@@ -95,24 +101,26 @@ export async function startWebServer(
       }));
       return;
     }
-    if (!sameOriginAllowed(req.headers.origin)) {
+    if (!sameOriginAllowed(req.headers.origin, req.headers.host)) {
       sendApiError(res, makeApiError(403, "web.forbidden_origin", "Forbidden origin", {
         retryable: false,
         action: "请从当前 Skyloom Web 页面发起请求，或检查浏览器来源。",
       }));
       return;
     }
-    // Same-origin only when loopback-bound (no wildcard CORS that would invite
-    // cross-site requests to a credential-less, tool-executing endpoint).
-    if (loopbackOnly) {
-      res.setHeader("Access-Control-Allow-Origin", req.headers.origin || `http://${req.headers.host || `localhost:${port}`}`);
-      res.setHeader("Vary", "Origin");
-    } else {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-    }
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || `http://${req.headers.host || `localhost:${port}`}`);
+    res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Skyloom-Token");
     if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+    if (!loopbackOnly && access.token && !isAuthorizedWebRequest(req.headers, access.token)) {
+      res.setHeader("WWW-Authenticate", 'Basic realm="Skyloom", charset="UTF-8"');
+      sendApiError(res, makeApiError(401, "web.authentication_required", "Authentication required", {
+        retryable: false,
+        action: "使用用户名 skyloom，并将 SKYLOOM_WEB_TOKEN 作为密码；API 客户端也可发送 Bearer Token。",
+      }));
+      return;
+    }
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
     try {
       if ((url.pathname === "/" || url.pathname === "/index.html") && req.method === "GET") serveUI(res);
@@ -130,6 +138,8 @@ export async function startWebServer(
       else if (url.pathname === "/api/agents" && req.method === "GET") handleAgents(res, ctx);
       else if (url.pathname === "/api/status" && req.method === "GET") handleStatus(res, ctx);
       else if (url.pathname === "/api/health" && req.method === "GET") await handleHealth(res, ctx);
+      else if (url.pathname === "/api/runs" && req.method === "GET") handleRuns(res, runStore);
+      else if (url.pathname.startsWith("/api/runs/") && req.method === "GET") handleRun(url.pathname, res, runStore);
       else if (url.pathname === "/api/settings" && req.method === "GET") handleGetSettings(res, ctx);
       else if (url.pathname === "/api/settings" && req.method === "PATCH") {
         if (!isLoopbackAddress(req.socket.remoteAddress)) {
@@ -155,10 +165,57 @@ export async function startWebServer(
     server.listen(port, host, () => {
       server.removeListener("error", onError);
       const shown = loopbackOnly ? "localhost" : host;
-      console.log(`\n  水墨气象台  ·  Skyloom\n  http://${shown}:${port}${loopbackOnly ? "  (仅本机 · 设 SKYLOOM_WEB_HOST=0.0.0.0 可对外开放)" : "  ⚠ 已对外开放 · 无鉴权"}\n`);
+      console.log(`\n  水墨气象台  ·  Skyloom\n  http://${shown}:${port}${loopbackOnly ? "  (仅本机)" : "  (已启用访问令牌认证)"}\n`);
       resolve(server);
     });
   });
+}
+
+function handleRuns(res: ServerResponse, store: OrchestrationRunStore): void {
+  const runs = store.list().map(run => ({
+    runId: run.runId,
+    goal: run.goal,
+    status: run.status,
+    revision: run.revision,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    endedAt: run.endedAt,
+    taskSummary: {
+      total: run.tasks.length,
+      completed: run.tasks.filter(task => task.status === 'completed').length,
+      failed: run.tasks.filter(task => task.status === 'failed').length,
+      blocked: run.tasks.filter(task => task.status === 'blocked').length,
+      running: run.tasks.filter(task => task.status === 'running').length,
+    },
+  }));
+  sendJson(res, 200, { schemaVersion: 1, runs });
+}
+
+function handleRun(pathname: string, res: ServerResponse, store: OrchestrationRunStore): void {
+  const parts = pathname.split('/').filter(Boolean);
+  const runId = parts[2] ? decodeURIComponent(parts[2]) : '';
+  if (!/^[A-Za-z0-9._-]+$/.test(runId)) {
+    sendApiError(res, makeApiError(400, 'web.invalid_run_id', 'invalid run id', { retryable: false }));
+    return;
+  }
+  try {
+    if (parts[3] === 'events' && parts.length === 4) {
+      store.load(runId);
+      sendJson(res, 200, { schemaVersion: 1, runId, events: store.events(runId) });
+      return;
+    }
+    if (parts.length === 3) {
+      sendJson(res, 200, store.load(runId));
+      return;
+    }
+    sendApiError(res, makeApiError(404, 'web.not_found', 'Not found', { retryable: false }));
+  } catch (error) {
+    if (error instanceof RunStoreError && error.code === 'run.unreadable') {
+      sendApiError(res, makeApiError(404, 'web.run_not_found', 'run not found', { retryable: false }));
+      return;
+    }
+    throw error;
+  }
 }
 
 async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | null> {

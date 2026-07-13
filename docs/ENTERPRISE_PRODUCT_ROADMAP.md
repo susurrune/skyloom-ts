@@ -40,9 +40,9 @@ The six weather agents remain the recognizable product model. Enterprise capabil
 - [ ] Add a shared structured error taxonomy: auth, rate limit, timeout, context overflow, invalid configuration, permission denied, provider failure and cancellation.
 - [x] Add a shared runtime status snapshot for Web and diagnostics.
 - [x] Add `sky doctor --json` for runtime, configuration, model, credential, workspace, memory, MCP and port checks.
-- [ ] Refuse non-loopback Web exposure unless an explicit authentication policy is configured.
+- [x] Refuse non-loopback Web exposure unless an explicit token authentication policy is configured.
 - [ ] Make every tool side effect cancellable and resource-scoped.
-- [ ] Persist orchestration runs and resume only failed nodes and their downstream dependencies.
+- [x] Persist orchestration runs with hash-chained audit events and resume only failed/interrupted nodes and downstream dependencies.
 - [ ] Make session writes awaitable, corruption-aware and recoverable.
 
 Exit criteria: a failed launch or turn yields a stable diagnosis; interrupted work can be resumed; no supported side effect escapes cancellation or policy.
@@ -54,7 +54,7 @@ Exit criteria: a failed launch or turn yields a stable diagnosis; interrupted wo
 - [ ] Expose model capability, cost and privacy information before execution.
 - [ ] Add reusable workflow templates with typed inputs, approval checkpoints and result artifacts.
 - [ ] Add an operations guide and a sanitized support bundle.
-- [ ] Publish and test a supported npm root entrypoint for programmatic integrations.
+- [x] Publish and test a supported npm root entrypoint for programmatic integrations.
 
 Exit criteria: a professional user can configure, monitor, diagnose and export work without editing YAML or reading logs.
 
@@ -71,7 +71,8 @@ Exit criteria: administrators can prove what ran, constrain what may run, rotate
 ### P3 - Platform Excellence
 
 - [ ] Publish versioned automation and Web API contracts.
-- [ ] Add evaluation suites for routing quality, task completion, tool selection and regression detection.
+- [x] Add deterministic CI evaluation baselines for routing, Agent selection, Pipeline validity and tool selection.
+- [ ] Extend evaluations with model-backed task completion quality and curated production traces.
 - [ ] Add organization-ready deployment patterns, SSO adapter boundaries and policy-as-code imports.
 - [ ] Add an extension compatibility matrix and release channels.
 

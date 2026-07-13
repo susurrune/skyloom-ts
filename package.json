@@ -5,6 +5,14 @@
   "preferGlobal": true,
   "type": "commonjs",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "files": [
     "dist/",
     "config/",
@@ -26,6 +34,7 @@
     "test": "vitest",
     "test:coverage": "vitest --coverage",
     "test:package": "node scripts/package-smoke.js",
+    "eval": "npm run build --silent && node dist/evals/cli.js",
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",

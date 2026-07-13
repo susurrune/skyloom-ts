@@ -17,7 +17,7 @@ export * from './mcp';
 export { matchPipeline, buildTasksFromPipeline, listPipelines, getPipelineByName, matchAllPipelines, validateDAG, topologicalSort, type Pipeline, type PipelineStep } from './pipelines';
 export * from './semantic';
 export * from './icons';
-export * from './checkpoint';
+export * from './run_store';
 export * from './workspace';
 export * from './profile';
 export * from './tool_router';

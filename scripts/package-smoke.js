@@ -32,6 +32,8 @@ try {
     }
   }
   for (const required of [
+    "dist/index.js",
+    "dist/index.d.ts",
     "dist/cli/main.js",
     "dist/web/ui/index.html",
     "dist/web/ui/styles.css",
@@ -46,6 +48,17 @@ try {
   const version = run(node, [path.join(installed, "dist", "cli", "main.js"), "version"], installDir);
   if (!/^Skyloom v\d+\.\d+\.\d+$/.test(version)) {
     throw new Error(`unexpected packaged CLI output: ${version}`);
+  }
+  const sdk = JSON.parse(run(node, ["-e", `
+    const skyloom = require("skyloom");
+    process.stdout.write(JSON.stringify({
+      version: skyloom.VERSION,
+      factory: typeof skyloom.createSystemContext,
+      router: typeof skyloom.classify,
+    }));
+  `], installDir));
+  if (sdk.version !== version.replace("Skyloom v", "") || sdk.factory !== "function" || sdk.router !== "function") {
+    throw new Error(`unexpected packaged SDK exports: ${JSON.stringify(sdk)}`);
   }
   process.stdout.write(`${version} package smoke passed\n`);
 } finally {

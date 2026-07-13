@@ -4,7 +4,7 @@ import { RainAgent } from "../src/agents/rain";
 import { Event, EventType, MessageBus } from "../src/core/bus";
 import { ToolRegistry } from "../src/core/tool";
 import { Skill, SkillRegistry } from "../src/core/skill";
-import { TaskResult } from "../src/core/agent/task";
+import { Task, TaskResult } from "../src/core/agent/task";
 
 /**
  * Characterization tests for the agent chat/tool loop, driven by a scripted
@@ -535,6 +535,23 @@ describe("agent · run tracing", () => {
 
     // every span is closed once the turn ends
     expect(trace!.spans.every((s: any) => s.endMs !== null)).toBe(true);
+  });
+
+  it("creates a closed trace for non-streaming orchestration tasks", async () => {
+    const agent = makeAgent([{ content: "actual task deliverable" }]);
+    const task = new Task({
+      id: "task-1",
+      description: "produce a deliverable",
+      assignedTo: "fog",
+      metadata: { runId: "run-1", attempt: 1 },
+    });
+    const outcome = await agent.executeTask(task);
+    const trace = agent.getLastTrace();
+
+    expect(outcome.success).toBe(true);
+    expect(trace?.label).toContain("[task]");
+    expect(trace?.spans.some(span => span.kind === "llm")).toBe(true);
+    expect(trace?.spans.every(span => span.endMs !== null)).toBe(true);
   });
 });
 
