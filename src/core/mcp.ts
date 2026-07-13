@@ -1012,11 +1012,13 @@ export class MCPManager {
       return `MCP server '${name}' is already connected`;
     }
 
-    if (!config.command && !config.url) {
+    const serverConfig: MCPServerConfig = { ...config, name };
+
+    if (!serverConfig.command && !serverConfig.url) {
       return "Error: provide either 'command' (stdio) or 'url' (SSE)";
     }
 
-    const client = new MCPClient(config, this.log);
+    const client = new MCPClient(serverConfig, this.log);
 
     try {
       const tools = await client.initialize();
@@ -1029,8 +1031,9 @@ export class MCPManager {
 
       this.clients.set(name, client);
       this.serverDiagnostics.delete(name);
-      this.serverConfigs.push(config);
-      savePersistedServer({ ...config, name });
+      this.serverConfigs = this.serverConfigs.filter((c) => c.name !== name);
+      this.serverConfigs.push(serverConfig);
+      savePersistedServer(serverConfig);
 
       const count = this.registerMCPTools(name, tools);
       const toolNames = tools
@@ -1053,12 +1056,18 @@ export class MCPManager {
     const cleanName = name?.trim();
     const client = this.clients.get(cleanName);
 
-    if (!client) {
+    const wasConfigured = this.serverConfigs.some((c) => c.name === cleanName);
+    const hadDiagnostics = this.serverDiagnostics.has(cleanName);
+
+    if (!client && !wasConfigured && !hadDiagnostics) {
       return `未连接 MCP server '${cleanName}'`;
     }
 
-    await client.close();
-    this.clients.delete(cleanName);
+    if (client) {
+      await client.close();
+      this.clients.delete(cleanName);
+    }
+
     this.serverDiagnostics.delete(cleanName);
     removePersistedServer(cleanName);
     this.serverConfigs = this.serverConfigs.filter(

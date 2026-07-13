@@ -94,4 +94,36 @@ describe("MCP runtime persistence", () => {
       await mock.close();
     }
   });
+
+  it("removes configured servers even when they are not connected", async () => {
+    const registry = new ToolRegistry();
+    const manager = new MCPManager(registry);
+
+    manager.configure([{ name: "ghost", url: "http://127.0.0.1:9/sse", enabled: true }]);
+    expect(manager.getHealthSnapshot().map((server) => server.name)).toContain("ghost");
+
+    const removed = await manager.removeServer("ghost");
+
+    expect(removed).toContain("已断开 MCP server 'ghost'");
+    expect(manager.getHealthSnapshot().map((server) => server.name)).not.toContain("ghost");
+  });
+
+  it("replaces stale same-name MCP config after a successful retry", async () => {
+    const mock = await startMockSSEServer();
+    const registry = new ToolRegistry();
+    const manager = new MCPManager(registry);
+
+    try {
+      manager.configure([{ name: "mock", url: "http://127.0.0.1:9/sse", enabled: true }]);
+
+      const added = await manager.addServer({ name: "mock", url: mock.url, enabled: true });
+
+      expect(added).toContain("已接入 MCP server 'mock'");
+      expect(manager.getHealthSnapshot().filter((server) => server.name === "mock")).toHaveLength(1);
+      expect(loadPersistedServers()).toEqual([{ name: "mock", url: mock.url, enabled: true }]);
+    } finally {
+      await manager.closeAll();
+      await mock.close();
+    }
+  });
 });
