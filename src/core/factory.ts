@@ -349,12 +349,14 @@ async function executeWithRetry(
   agent: BaseAgent,
   aTask: any,
   maxAttempts: number,
-  onStatus?: ((status: string) => void) | null
+  onStatus?: ((status: string) => void) | null,
+  signal?: AbortSignal,
 ): Promise<any> {
   let lastResult: any = null;
   const originalDescription = aTask.description;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (signal?.aborted) return { success: false, content: '[cancelled] task interrupted by user' };
     const attemptTask = new AgentTask({
       id: aTask.id,
       description: attempt === 1
@@ -366,7 +368,8 @@ async function executeWithRetry(
       metadata: { ...(aTask.metadata || {}), attempt },
     });
     try {
-      const result = await agent.executeTask(attemptTask, onStatus);
+      const result = await agent.executeTask(attemptTask, onStatus, signal);
+      if (signal?.aborted) return { success: false, content: '[cancelled] task interrupted by user' };
       const content = (result.content || '').trim();
       const truncated = (result as any).truncated === true;
       const ok = result.success && !isThinContent(content);
@@ -374,6 +377,9 @@ async function executeWithRetry(
       if (ok && !truncated) return result;
       lastResult = result;
     } catch (e) {
+      if (signal?.aborted || (e as { name?: string })?.name === 'AbortError') {
+        return { success: false, content: '[cancelled] task interrupted by user' };
+      }
       lastResult = { success: false, content: `Attempt ${attempt} threw: ${e}` };
     }
     if (attempt < maxAttempts) {
@@ -397,9 +403,28 @@ async function executePending(
     onToolStatus?: ((status: string) => void) | null;
     resultTruncate?: number | null;
     maxTaskRetries: number;
+    signal?: AbortSignal;
   }
 ): Promise<void> {
   while (pending.length > 0) {
+    if (options.signal?.aborted) {
+      for (const t of pending) {
+        if (t.status !== TaskState.PENDING) continue;
+        t.transitionTo(TaskState.FAILED);
+        const result = new TaskExecutionResult({
+          id: t.id,
+          agent: t.assignedTo || '',
+          description: t.description,
+          success: false,
+          content: '[cancelled] orchestration stopped before this task started',
+        });
+        results.push(result);
+        resultsById.set(result.id, result);
+        if (options.onTaskDone) await options.onTaskDone(t, result);
+      }
+      pending.length = 0;
+      return;
+    }
     const ready = pending.filter(t => t.allDeps.every((dep: string) => succeeded.has(dep)));
     if (ready.length === 0) {
       for (const t of pending) {
@@ -471,7 +496,7 @@ async function executePending(
           metadata: t.metadata,
         });
 
-        const result = await executeWithRetry(agent, aTask, options.maxTaskRetries, options.onToolStatus);
+        const result = await executeWithRetry(agent, aTask, options.maxTaskRetries, options.onToolStatus, options.signal);
 
         if (result.success) t.transitionTo(TaskState.COMPLETED);
         else t.transitionTo(TaskState.FAILED);
@@ -568,6 +593,7 @@ export async function orchestrateTask(
     runId?: string;
     runStore?: OrchestrationRunStore;
     onRun?: ((run: OrchestrationRun) => void) | null;
+    signal?: AbortSignal;
   }
 ): Promise<[any[], TaskExecutionResult[], string]> {
   const snowAgent = snow || agentMap.get('snow') || null;
@@ -700,8 +726,15 @@ export async function orchestrateTask(
       onToolStatus: options?.onToolStatus || null,
       resultTruncate,
       maxTaskRetries,
+      signal: options?.signal,
     });
     pending = [];
+
+    if (options?.signal?.aborted) {
+      const cancelled = '[CANCELLED] orchestration stopped by user; completed task results were preserved';
+      runStore.cancel(run, cancelled);
+      return [tasks, results, cancelled];
+    }
 
     if (!results.length || replanRound >= maxReplanRounds) break;
     if (results.length === 1 && results[0].success) break;

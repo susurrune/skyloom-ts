@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-3a7a6e.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-3a7a6e)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](https://www.typescriptlang.org)
-[![Tests](https://img.shields.io/badge/tests-657%20passed-2ecc71)](https://github.com/susurrune/skyloom-ts/tree/main/tests)
+[![Tests](https://img.shields.io/badge/tests-667%20passed-2ecc71)](https://github.com/susurrune/skyloom-ts/tree/main/tests)
 
 </div>
 
@@ -110,6 +110,9 @@ Agent 之间可通过 `delegate_to` 工具相互委托子任务，也可通过�
 - **左栏**：六灵常驻面板，多灵编排时亮起脉冲与 ✓/✗ 战绩
 - **右侧正文**：真流式逐字「晕染」入场，差量重绘只刷新变化的行
 - **织谱**：`/task` 多灵编排时逐梭列出子任务与依赖，原位更新状态与耗时
+- **响应式工作台**：宽屏完整侧栏，中屏精简导航，紧凑终端自动切为单栏并让出装饰空间
+- **运行上下文**：标题与状态区持续显示工作区、会话、权限模式、模型、费用和上下文占用
+- **可靠交互**：并行工具按调用精确计时，审批参数递归脱敏；首次 `Ctrl-C` 协作取消并保留进度，连续两次强制退出
 
 ```
 ┌─ 天空织机 Skyloom ──────────────────────────────────────── 霧 ─┐
@@ -129,7 +132,7 @@ Agent 之间可通过 `delegate_to` 工具相互委托子任务，也可通过�
 └─ /help 命令 · Tab 补全 · PgUp 回看 · Ctrl-C 退出 ──────────────┘
 ```
 
-**技术要点**：流式文本不直接写终端，而是落入虚拟块缓冲区，每帧在内存中合成后差量重绘。流式与动效互不干扰。CJK 宽度计算贯穿所有排版路径。
+**技术要点**：流式文本不直接写终端，而是落入虚拟块缓冲区，每帧在内存中合成后差量重绘。流式与动效互不干扰。CJK 宽度计算贯穿所有排版路径；布局按终端尺寸动态计算，长状态、审批弹层、命令面板与多行粘贴均有稳定的边界处理。
 
 ### 经典线性模式
 
@@ -559,7 +562,7 @@ skyloom-ts/
 │   ├── providers.yaml        Provider 目录（base URL / env var）
 │   ├── models.yaml           模型目录（上下文窗口 / 成本）
 │   └── skills/               17 个内置技能 (SKILL.md)
-├── tests/                    65 套件 · 657 Vitest 用例
+├── tests/                    65 套件 · 667 Vitest 用例
 ├── docs/
 │   ├── AESTHETIC_DESIGN.md   美学设计系统
 │   └── OPTIMIZATION_PLAN.md  优化路线图
@@ -582,7 +585,7 @@ npm install
 
 npm run build         # tsc 编译
 npm run dev           # watch 模式
-npm test              # Vitest (65 套件 · 657 用例)
+npm test              # Vitest (65 套件 · 667 用例)
 npm run test:coverage # 覆盖率报告
 npm run type-check    # TypeScript 严格模式检查
 npm run lint          # ESLint

@@ -30,10 +30,50 @@ describe("LLM request settings", () => {
     const messages = [{ role: "user", content: "hello" }];
 
     await client.complete(messages, "fog");
-    expect(call).toHaveBeenLastCalledWith("gpt-4o", messages, undefined, 0.25, 2048, "fog");
+    expect(call).toHaveBeenLastCalledWith("gpt-4o", messages, undefined, 0.25, 2048, "fog", undefined);
 
     await client.complete(messages, "fog", undefined, false, { temperature: 1.1, maxTokens: 4096 });
-    expect(call).toHaveBeenLastCalledWith("gpt-4o", messages, undefined, 1.1, 4096, "fog");
+    expect(call).toHaveBeenLastCalledWith("gpt-4o", messages, undefined, 1.1, 4096, "fog", undefined);
+  });
+
+  it("propagates cancellation to the active provider request", async () => {
+    const client = new LLMClient({
+      default_model: "gpt-4o",
+      llm: { max_retries: 2 },
+      agents: {},
+    }, new ToolRegistry());
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    vi.spyOn(client as any, "callOpenAI").mockImplementation(async (
+      _model: string,
+      _messages: unknown[],
+      _tools: unknown,
+      _temperature: number,
+      _maxTokens: number,
+      _agent: string,
+      signal?: AbortSignal,
+    ) => {
+      observedSignal = signal;
+      await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => {
+        const error = new Error("Aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true }));
+      throw new Error("unreachable");
+    });
+
+    const request = client.complete(
+      [{ role: "user", content: "hello" }],
+      "fog",
+      undefined,
+      false,
+      undefined,
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
+    expect(observedSignal).toBe(controller.signal);
   });
 
   it("honors snake_case max_retries from YAML", async () => {

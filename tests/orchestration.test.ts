@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-function agent(executeTask: (task: any) => Promise<TaskResult>) {
+function agent(executeTask: (task: any, onStatus?: ((status: string) => void) | null, signal?: AbortSignal) => Promise<TaskResult>) {
   return { executeTask, chatOneshot: async () => '{"achieved":true,"missing":""}' } as any;
 }
 
@@ -83,6 +83,68 @@ describe('enterprise orchestration execution', () => {
 
     expect(results[0]).toMatchObject({ success: false, agent: 'absent' });
     expect(runs.store.load(runId).tasks[0].status).toBe('failed');
+    runs.cleanup();
+  });
+
+  it('stops before downstream work after a cancellation request and preserves the run', async () => {
+    const runs = runStore();
+    const controller = new AbortController();
+    const rainExecute = vi.fn(async () => new TaskResult(true, 'implementation artifact '.repeat(30)));
+    const frostExecute = vi.fn(async () => new TaskResult(true, 'must not execute'));
+    const snow = agent(async () => new TaskResult(true, 'unused'));
+    let runId = '';
+
+    const [, results, summary] = await orchestrateTask('实现并审查这个功能', new Map([
+      ['snow', snow], ['rain', agent(rainExecute)], ['frost', agent(frostExecute)],
+    ]), snow, {
+      signal: controller.signal,
+      maxTaskRetries: 1,
+      maxReplanRounds: 0,
+      runStore: runs.store,
+      onRun: run => { runId = run.runId; },
+      onTaskDone: async task => { if (task.assignedTo === 'rain') controller.abort(); },
+    });
+
+    expect(rainExecute).toHaveBeenCalledTimes(1);
+    expect(frostExecute).not.toHaveBeenCalled();
+    expect(results.some(result => result.content.includes('[cancelled]'))).toBe(true);
+    expect(summary).toContain('[CANCELLED]');
+    expect(runs.store.load(runId).status).toBe('cancelled');
+    runs.cleanup();
+  });
+
+  it('propagates cancellation into an in-flight agent task', async () => {
+    const runs = runStore();
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const execute = vi.fn(async (_task: any, _status: unknown, signal?: AbortSignal) => {
+      observedSignal = signal;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 10_000);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+      });
+      return new TaskResult(true, 'should not complete');
+    });
+    const snow = agent(async () => new TaskResult(true, 'unused'));
+    setTimeout(() => controller.abort(), 20);
+
+    const startedAt = Date.now();
+    const [, results, summary] = await orchestrateTask('请进行代码审查', new Map([
+      ['snow', snow], ['frost', agent(execute)],
+    ]), snow, {
+      signal: controller.signal,
+      maxTaskRetries: 1,
+      maxReplanRounds: 0,
+      runStore: runs.store,
+    });
+
+    expect(observedSignal).toBe(controller.signal);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(results[0].content).toContain('[cancelled]');
+    expect(summary).toContain('[CANCELLED]');
     runs.cleanup();
   });
 

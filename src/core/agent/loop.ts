@@ -42,6 +42,7 @@ export interface AgentLoopDeps {
 export interface BatchLoopOptions {
   onStatus?: ((status: string) => void) | null;
   ephemeral?: boolean;
+  signal?: AbortSignal;
 }
 
 /** Owns the streaming and batch LLM/tool loops while BaseAgent owns lifecycle. */
@@ -195,7 +196,7 @@ export class AgentLoop {
           const rawArgs = toolCall.function.arguments;
           const toolArgs = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
           const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
-          yield { type: 'tool_status', label, tool_name: toolName, args: toolArgs || {} };
+          yield { type: 'tool_status', label, tool_name: toolName, tool_call_id: toolCall.id, args: toolArgs || {} };
         }
 
         const execResults = await deps.executeToolCalls(toolCallsReceived, {
@@ -214,7 +215,7 @@ export class AgentLoop {
             const summary = (args?.summary as string) || '';
             const displayResult = summary ? `[Task completed: ${summary}]` : '[Task completed]';
             deps.memory.addMessage('tool', displayResult, { name: result.toolName, toolCallId: result.tc.id });
-            yield { type: 'tool_done', label: `task_done: ${summary}` || 'task_done', success: true, tool_name: 'task_done', result: displayResult };
+            yield { type: 'tool_done', label: `task_done: ${summary}` || 'task_done', success: true, tool_name: 'task_done', tool_call_id: result.tc.id, result: displayResult };
             continue;
           }
 
@@ -227,6 +228,7 @@ export class AgentLoop {
             label,
             success: result.success,
             tool_name: result.toolName,
+            tool_call_id: result.tc.id,
             result: (result.result || '').slice(0, 800),
           };
           if (result.toolName === 'delegate_to') {
@@ -301,6 +303,7 @@ export class AgentLoop {
     const deps = this.deps;
     const ephemeral = options.ephemeral ?? false;
     const onStatus = options.onStatus ?? null;
+    const signal = options.signal;
     let response: LLMResponse = {
       content: '',
       toolCalls: [],
@@ -328,6 +331,7 @@ export class AgentLoop {
       let rounds = 0;
       let consecutiveNoProgress = 0;
       while (true) {
+        signal?.throwIfAborted();
         if (rounds >= deps.maxToolRoundsHardCap) break;
         rounds++;
         const messages = await deps.messagesWithRecall();
@@ -340,6 +344,7 @@ export class AgentLoop {
             toolNames.length > 0 ? toolNames : undefined,
             false,
             Object.keys(deps.getSkillConfigOverrides()).length > 0 ? deps.getSkillConfigOverrides() : undefined,
+            signal,
           );
           llmSpan.end('ok', {
             model: response.model,
@@ -367,7 +372,9 @@ export class AgentLoop {
           dedupCacheable: true,
           onStatus: onStatus ?? undefined,
           ephemeral,
+          signal,
         });
+        signal?.throwIfAborted();
         await deps.setState(AgentState.THINKING);
 
         const madeProgress =

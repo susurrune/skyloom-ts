@@ -613,8 +613,10 @@ export class LLMClient {
     agentName?: string,
     tools?: string[],
     stream: boolean = false,
-    overrides?: Record<string, unknown>
+    overrides?: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
+    signal?.throwIfAborted();
     this.checkBudget();
 
     const ov = overrides || {};
@@ -642,9 +644,11 @@ export class LLMClient {
           agentName,
           tools,
           stream,
-          overrides
+          overrides,
+          signal,
         );
       } catch (e) {
+        if (signal?.aborted || (e as { name?: string })?.name === "AbortError") throw e;
         lastError = e instanceof Error ? e : new Error(String(e));
         this.log?.warn("llm_fallback", {
           model: attemptModel,
@@ -675,7 +679,8 @@ export class LLMClient {
     agentName?: string,
     tools?: string[],
     _stream: boolean = false,
-    overrides?: Record<string, unknown>
+    overrides?: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
     const agentConfig = (agentName ? this.config.agents?.[agentName] : null) || {};
     const llmConfig = this.config.llm || {};
@@ -687,17 +692,35 @@ export class LLMClient {
     let lastError: Error | null = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+        signal?.throwIfAborted();
+        if (attempt > 0) {
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => {
+              clearTimeout(timer);
+              if (signal?.reason instanceof Error) reject(signal.reason);
+              else {
+                const error = new Error("Aborted");
+                error.name = "AbortError";
+                reject(error);
+              }
+            };
+            const timer = setTimeout(() => {
+              signal?.removeEventListener("abort", onAbort);
+              resolve();
+            }, 1000 * Math.pow(2, attempt - 1));
+            signal?.addEventListener("abort", onAbort, { once: true });
+          });
+        }
 
         let content: string;
         let toolCalls: ToolCall[] = [];
         let usage: UsageStats = { promptTokens: 0, completionTokens: 0 };
 
         if (isAnthropic) {
-          const r = await this.callAnthropic(model, messages, tools, temperature, maxTokens, agentName);
+          const r = await this.callAnthropic(model, messages, tools, temperature, maxTokens, agentName, signal);
           content = r.content; toolCalls = r.toolCalls; usage = r.usage;
         } else {
-          const r = await this.callOpenAI(model, messages, tools, temperature, maxTokens, agentName);
+          const r = await this.callOpenAI(model, messages, tools, temperature, maxTokens, agentName, signal);
           content = r.content; toolCalls = r.toolCalls; usage = r.usage;
         }
 
@@ -710,6 +733,7 @@ export class LLMClient {
 
         return { content, toolCalls, model, usage, cost, truncated: false };
       } catch (e: any) {
+        if (signal?.aborted || e?.name === "AbortError") throw e;
         lastError = e;
         if (attempt >= maxRetries) throw e;
       }
@@ -718,7 +742,7 @@ export class LLMClient {
   }
 
   private async callOpenAI(
-    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string, signal?: AbortSignal
   ): Promise<{ content: string; toolCalls: ToolCall[]; usage: UsageStats }> {
     const apiKey = this.getApiKey(m, agentName);
     const baseUrl = this.getBaseUrl(m);
@@ -727,7 +751,7 @@ export class LLMClient {
       const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
       if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters || []) } }));
     }
-    const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body) });
+    const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body), signal });
     if (!resp.ok) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
     const data: any = await resp.json();
     const msg = data.choices?.[0]?.message || {};
@@ -735,7 +759,7 @@ export class LLMClient {
   }
 
   private async callAnthropic(
-    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string, signal?: AbortSignal
   ): Promise<{ content: string; toolCalls: ToolCall[]; usage: UsageStats }> {
     const apiKey = this.getApiKey("anthropic", agentName);
     const body: Record<string, unknown> = { model: m, max_tokens: maxTok ?? 4096, messages: messages.filter(msg => msg.role !== "system"), temperature: temp ?? 0.7 };
@@ -744,7 +768,7 @@ export class LLMClient {
       const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
       if (defs.length) body.tools = defs.map(t => ({ name: t.name, description: t.description, input_schema: this.paramsToSchema(t.parameters || []) }));
     }
-    const resp = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" }, body: JSON.stringify(body) });
+    const resp = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" }, body: JSON.stringify(body), signal });
     if (!resp.ok) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
     const data: any = await resp.json(); let content = ""; const toolCalls: ToolCall[] = [];
     for (const b of data.content || []) { if (b.type === "text") content += b.text; if (b.type === "tool_use") toolCalls.push({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }); }
@@ -926,7 +950,7 @@ export class LLMClient {
     // Blocking fallback used for Anthropic (different wire format) and on
     // failures before any content has streamed (preserves fallback chain + retry).
     const blockingFallback = async function* (this: LLMClient): AsyncGenerator<StreamEvent> {
-      const response = await this.complete(messages, agentName, tools, false, overrides);
+      const response = await this.complete(messages, agentName, tools, false, overrides, signal);
       if (response.content) yield { type: "content", text: response.content };
       for (const tc of response.toolCalls || []) yield { type: "tool_call", toolCall: tc };
       yield { type: "done", usage: response.usage, reasoningContent: response.reasoningContent };

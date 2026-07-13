@@ -1040,12 +1040,13 @@ export class BaseAgent {
 
   async executeTask(
     task: Task,
-    onStatus?: ((status: string) => void) | null
+    onStatus?: ((status: string) => void) | null,
+    signal?: AbortSignal,
   ): Promise<TaskResult> {
     return this.sessionController.withTurn(async () => {
       this.tracer.startTrace(`[task] ${task.description}`.replace(/\s+/g, ' ').slice(0, 80), this.name);
       try {
-        return await this.executeTaskImpl(task, onStatus);
+        return await this.executeTaskImpl(task, onStatus, signal);
       } finally {
         this.tracer.endTrace();
       }
@@ -1054,7 +1055,8 @@ export class BaseAgent {
 
   private async executeTaskImpl(
     task: Task,
-    onStatus?: ((status: string) => void) | null
+    onStatus?: ((status: string) => void) | null,
+    signal?: AbortSignal,
   ): Promise<TaskResult> {
     await this.setState(AgentState.THINKING);
     task.transitionTo(TaskState.RUNNING);
@@ -1090,7 +1092,7 @@ export class BaseAgent {
     } catch { /* optional */ }
 
     try {
-      let response = await this.llmLoop({ onStatus, ephemeral: true });
+      let response = await this.llmLoop({ onStatus, ephemeral: true, signal });
 
       // ── 验证闭环: if this task touched the filesystem and verify commands
       // are configured (config.verify or SKY.md "## Verify"), run them and
@@ -1099,6 +1101,7 @@ export class BaseAgent {
         const vc = resolveVerifyConfig(this.config);
         if (vc.commands.length > 0 && this._turnWroteFiles) {
           for (let round = 0; round <= vc.maxFixRounds; round++) {
+            signal?.throwIfAborted();
             if (onStatus) onStatus(`verify: ${vc.commands.length} 条命令`);
             const vr = runVerify(vc);
             if (vr.ok) {
@@ -1113,7 +1116,7 @@ export class BaseAgent {
             log.warn('verify_failed_fixing', { agent: this.name, round: round + 1 });
             this.memory.addMessage('user',
               `[自动验证失败] 以下验证命令未通过。请定位根因并修复，确保它们全部通过：\n\n${vr.report}`);
-            response = await this.llmLoop({ onStatus, ephemeral: true });
+            response = await this.llmLoop({ onStatus, ephemeral: true, signal });
           }
         }
       } catch (e) {
@@ -1130,10 +1133,11 @@ export class BaseAgent {
       return new TaskResult(true, enriched);
     } catch (e) {
       task.transitionTo(TaskState.FAILED);
-      task.result = String(e);
+      const cancelled = signal?.aborted || (e as { name?: string })?.name === 'AbortError';
+      task.result = cancelled ? '[cancelled] task interrupted by user' : String(e);
       this.memory.pruneToolMessages();
-      await this.setState(AgentState.ERROR);
-      return new TaskResult(false, String(e));
+      await this.setState(cancelled ? AgentState.IDLE : AgentState.ERROR);
+      return new TaskResult(false, task.result);
     } finally {
       // Restore chat history
       this.memory.shortTerm = savedShortTerm!;

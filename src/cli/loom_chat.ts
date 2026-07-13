@@ -9,6 +9,7 @@
  */
 
 import chalk from "chalk";
+import * as path from "path";
 import { agentTheme, PALETTE } from "../core/theme";
 import { orchestrateTask } from "../core/factory";
 import { appendQuickMemory, INIT_PROMPT } from "../core/skymd";
@@ -17,7 +18,7 @@ import { executeSlashCommand, type CommandRuntime } from "./command_handlers";
 import { expandFileRefs, isBangCommand, bangCommand, runBang, isHashMemory, hashNote } from "./input_macros";
 import { loadCustomCommands, resolveCustomCommand } from "./commands_md";
 import { getFileCheckpoints } from "../core/file_checkpoint";
-import { LoomUI, OrchTask, circled, cutVisual } from "./loom";
+import { LoomUI, OrchTask, circled, cutVisual, summarizeApprovalArgs } from "./loom";
 import { PROVIDER_META } from "../core/catalog";
 import { globalSkillRegistry } from "../core/skill";
 import { formatMcpHealthLines } from "../core/mcp";
@@ -61,7 +62,7 @@ async function loomStream(ui: LoomUI, agent: any, input: string): Promise<void> 
   let streaming = false;
   let reasonText = "";
   let toolSeq = 0;
-  let lastToolId = "";
+  const pendingTools: Array<{ id: string; callId: string; name: string; label: string; startedAt: number }> = [];
 
   try {
     for await (const ev of agent.chatStream(input, controller.signal)) {
@@ -88,20 +89,36 @@ async function loomStream(ui: LoomUI, agent: any, input: string): Promise<void> 
           ui.endStream();
           streaming = false;
           ui.busyLabel = String(ev.tool_name);
-          lastToolId = `tool-${turn}-${++toolSeq}`;
+          const tool = {
+            id: `tool-${turn}-${++toolSeq}`,
+            callId: String(ev.tool_call_id || ""),
+            name: String(ev.tool_name),
+            label: String(ev.label || ""),
+            startedAt: Date.now(),
+          };
+          pendingTools.push(tool);
           ui.line(
             chalk.hex(t.hex)(`${t.symbol} ${ev.tool_name}`) +
               (ev.label ? chalk.dim(`  ${ev.label}`) : "") + chalk.dim(" …"),
-            lastToolId,
+            tool.id,
           );
           break;
         }
-        case "tool_done":
-          if (lastToolId) {
+        case "tool_done": {
+          const callId = String(ev.tool_call_id || "");
+          const index = callId
+            ? pendingTools.findIndex(tool => tool.callId === callId)
+            : pendingTools.findIndex(tool => tool.name === String(ev.tool_name));
+          const tool = index >= 0 ? pendingTools.splice(index, 1)[0] : null;
+          if (tool) {
+            const elapsed = fmtMs(Date.now() - tool.startedAt);
+            const label = String(ev.label || tool.label || "");
             ui.update(
-              lastToolId,
+              tool.id,
               (ev.success ? chalk.hex(OK_HEX)("✓") : chalk.hex(ERR_HEX)("✗")) +
-                " " + chalk.dim(String(ev.tool_name)),
+                " " + chalk.dim(String(ev.tool_name)) +
+                (label ? chalk.dim(` · ${label}`) : "") +
+                chalk.dim(` · ${elapsed}`),
             );
           }
           // live task checklist: re-render in place whenever the agent updates it
@@ -115,6 +132,7 @@ async function loomStream(ui: LoomUI, agent: any, input: string): Promise<void> 
             } catch { /* checklist rendering is best-effort */ }
           }
           break;
+        }
         case "truncated":
           ui.endStream();
           streaming = false;
@@ -167,7 +185,12 @@ async function runLoomTask(ui: LoomUI, ctx: any, goal: string): Promise<void> {
   const t = agentTheme(ui.agentName);
   ui.busy = true;
   ui.busyLabel = "织谱推演";
-  ui.onInterrupt = () => ui.flash("织造中 · 单梭无法中断 · 再按 Ctrl-C 强制退出");
+  const controller = new AbortController();
+  ui.onInterrupt = () => {
+    if (controller.signal.aborted) return;
+    controller.abort();
+    ui.flash("正在中断当前执行 · 已完成进度将保留");
+  };
 
   ui.blank();
   ui.line(chalk.bold.hex(t.hex)("✦ 織 ") + chalk.bold(cutVisual(goal, 999)));
@@ -187,6 +210,7 @@ async function runLoomTask(ui: LoomUI, ctx: any, goal: string): Promise<void> {
   try {
     const [, results, summary] = await orchestrateTask(goal, ctx.agentMap, null, {
       onRun: run => { runId = run.runId; },
+      signal: controller.signal,
       onPlanned: async (tasks: any[]) => {
         ui.orch.plan(tasks);
         for (const id of ui.orch.order) idxOf.set(id, ui.orch.tasks.get(id)!.index);
@@ -273,7 +297,7 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
   const ui = new LoomUI();
   ui.agentName = agent.name;
 
-  ui.statusRight = () => {
+  const statusMetrics = () => {
     try {
       const cu = agent.contextUsage();
       const pct: number = cu.pct || 0;
@@ -281,8 +305,20 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
       const cells = 5;
       const filled = Math.round((pct / 100) * cells);
       const bar = chalk.hex(t.hex)("▰".repeat(filled)) + chalk.hex(PALETTE.inkFaint)("▱".repeat(cells - filled));
-      return chalk.dim(`${cu.model || "?"} · ${fmtCost(ctx.llm.getTotalCost())} · `) + bar + chalk.dim(` ${pct}%`);
-    } catch { return ""; }
+      return {
+        full: chalk.dim(`${cu.model || "?"} · ${fmtCost(ctx.llm.getTotalCost())} · `) + bar + chalk.dim(` ${pct}%`),
+        compact: chalk.dim(`${fmtCost(ctx.llm.getTotalCost())} · ${pct}%`),
+      };
+    } catch { return { full: "", compact: "" }; }
+  };
+  ui.statusRight = () => statusMetrics().full;
+  ui.statusRightCompact = () => statusMetrics().compact;
+  ui.headerContext = () => path.basename(String(ctx.workspacePath || process.cwd())) || "workspace";
+  ui.statusLeft = () => {
+    const session = agent.memory?.getActiveSession?.();
+    let permission = "interactive";
+    try { permission = require("../core/security").getSecurity().approvalMode; } catch { /* optional */ }
+    return `会话 ${session ? String(session).slice(0, 8) : "临时"} · 权限 ${permission}`;
   };
 
   // ── Interactive modes (Shift+Tab cycles default → plan → auto) ──
@@ -314,7 +350,7 @@ export async function loomChat(ctx: any, startAgent: any, deps: LoomChatDeps): P
         ui.line(chalk.dim(` ✓ 已信任 ${tool}（本会话）`));
         return true;
       }
-      const summary = `${tool} (危险等级 ${level}) ${JSON.stringify(args).slice(0, 48)}`;
+      const summary = `${tool} · 风险 L${level} · ${summarizeApprovalArgs(args, 72)}`;
       const choice = await ui.confirmApproval(summary);
       if (choice === "always") {
         sessionTrust.add(tool);

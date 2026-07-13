@@ -264,8 +264,12 @@ describe("agent · chat loop (mock LLM)", () => {
     );
     const evs = await collect(agent.chatStream("用 echo 工具"));
     expect(received).toEqual({ text: "hi" });                       // tool actually ran with parsed args
-    expect(evs.some((e) => e.type === "tool_status" && e.tool_name === "echo")).toBe(true);
-    expect(evs.some((e) => e.type === "tool_done" && e.tool_name === "echo" && e.success)).toBe(true);
+    const status = evs.find((e) => e.type === "tool_status" && e.tool_name === "echo");
+    const done = evs.find((e) => e.type === "tool_done" && e.tool_name === "echo" && e.success);
+    expect(status).toBeTruthy();
+    expect(done).toBeTruthy();
+    expect(status.tool_call_id).toMatch(/^call_/);
+    expect(done.tool_call_id).toBe(status.tool_call_id);
     expect(evs.filter((e) => e.type === "content").map((e) => e.text).join("")).toContain("工具回显");
     // tool result recorded to memory
     expect(agent.memory.getMessages().some((m) => m.role === "tool" && String(m.content).includes("echo:hi"))).toBe(true);
