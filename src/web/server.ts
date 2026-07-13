@@ -229,12 +229,18 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: System
   res.on("close", () => { if (!res.writableEnded) ac.abort(); });
 
   // Real streaming over SSE — tokens, reasoning, and tool events as they happen.
-  res.writeHead(200, {
+  const responseSessionId = typeof sessionId === "string"
+    ? sessionId
+    : agent.memory.getActiveSession();
+  const streamHeaders: Record<string, string> = {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-  });
+    "Access-Control-Expose-Headers": "X-Skyloom-Session-Id",
+  };
+  if (responseSessionId) streamHeaders["X-Skyloom-Session-Id"] = responseSessionId;
+  res.writeHead(200, streamHeaders);
   const send = (ev: Record<string, unknown>) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
   try {
     const stream = typeof sessionId === "string"

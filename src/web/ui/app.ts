@@ -90,6 +90,10 @@ export function clientMain(): void {
     return Boolean(error && error.code === 'web.session_not_found');
   }
 
+  function isCurrentAgent(agent: any): boolean {
+    return Boolean(agent && cur.name === agent.name);
+  }
+
   /* ── theme (宣纸 / 夜墨) ── */
   function themeNow(): string { return D.documentElement.getAttribute('data-theme') || 'light'; }
   function setTheme(mode: string) {
@@ -140,9 +144,14 @@ export function clientMain(): void {
     const h = loadHist(cur.name); h.push(entry); saveHist(cur.name, h);
   }
   function clearCachedSession(agentName: string) {
-    const h = loadHist(agentName);
     store.removeItem(SKEY(agentName));
-    saveHist(agentName, h);
+    store.removeItem('skyweb.h.' + agentName + '.pending');
+  }
+  function bindResponseSession(response: any, agentName: string): string | null {
+    const sessionId = String(response.headers.get('X-Skyloom-Session-Id') || '').trim();
+    if (!sessionId) return null;
+    store.setItem(SKEY(agentName), sessionId);
+    return sessionId;
   }
   function histSignature(h: any[]): string {
     return JSON.stringify(h.map((entry: any) => [entry.r, entry.t]));
@@ -422,6 +431,7 @@ export function clientMain(): void {
         });
       }
       if (!resp.ok || !resp.body) throw new Error(await readApiError(resp, '连接失败'));
+      bindResponseSession(resp, cur.name);
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
@@ -483,6 +493,7 @@ export function clientMain(): void {
     if (content.trim() || tools.length) {
       pushHist({ r: 'a', t: content, ts: Date.now(), ms, tools });
     }
+    if (staleSessionRetried) await syncHistory(cur);
     streaming = false;
     aborter = null;
     setComposer(false);
@@ -887,13 +898,17 @@ export function clientMain(): void {
     $('#sessions-count').textContent = '0 段';
     $('#sessions-empty-filter').hidden = true;
     sessionsBusy = true;
+    const agent = cur;
     try {
-      const response = await fetch('/api/sessions?agent=' + encodeURIComponent(cur.name));
+      const response = await fetch('/api/sessions?agent=' + encodeURIComponent(agent.name));
       if (!response.ok) throw new Error(await readApiError(response, '无法读取历史会话'));
-      renderSessions(await response.json());
+      const data = await response.json();
+      if (isCurrentAgent(agent) && panel.classList.contains('show')) renderSessions(data);
     } catch (error: any) {
-      $('#sessions-list').innerHTML = '<p class="sessions-empty error">' +
-        escapeHtml(error && error.message ? error.message : '无法读取历史会话') + '</p>';
+      if (isCurrentAgent(agent) && panel.classList.contains('show')) {
+        $('#sessions-list').innerHTML = '<p class="sessions-empty error">' +
+          escapeHtml(error && error.message ? error.message : '无法读取历史会话') + '</p>';
+      }
     } finally {
       sessionsBusy = false;
     }
@@ -901,20 +916,23 @@ export function clientMain(): void {
 
   async function loadWebSession(sessionId: string) {
     if (sessionsBusy || sessionId === panelActiveSessionId) return;
+    const agent = cur;
     setSessionsBusy(true);
     try {
       const response = await fetch('/api/session/load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent: cur.name, sessionId }),
+        body: JSON.stringify({ agent: agent.name, sessionId }),
       });
       if (!response.ok) throw new Error(await readApiError(response, '无法恢复该会话'));
       const data: any = await response.json();
-      if (typeof data.sessionId === 'string') store.setItem(SKEY(cur.name), data.sessionId);
-      saveHist(cur.name, []);
-      closeSessions();
-      await syncHistory(cur);
-      toast('历史会话已恢复');
+      if (typeof data.sessionId === 'string') store.setItem(SKEY(agent.name), data.sessionId);
+      saveHist(agent.name, []);
+      if (isCurrentAgent(agent)) {
+        closeSessions();
+        await syncHistory(agent);
+      }
+      toast('「' + agent.label + '」历史会话已恢复');
     } catch (error: any) {
       toast(error && error.message ? error.message : '无法恢复该会话', 'err');
     } finally {
@@ -925,29 +943,31 @@ export function clientMain(): void {
   async function deleteWebSession(sessionId: string) {
     if (sessionsBusy) return;
     if (!window.confirm('删除这段历史会话？此操作不可撤销。')) return;
+    const agent = cur;
     const deletingActive = sessionId === panelActiveSessionId;
+    let refresh = false;
     setSessionsBusy(true);
     try {
       const response = await fetch('/api/session', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent: cur.name, sessionId }),
+        body: JSON.stringify({ agent: agent.name, sessionId }),
       });
       if (!response.ok) throw new Error(await readApiError(response, '无法删除该会话'));
       const data: any = await response.json();
-      if (typeof data.sessionId === 'string') store.setItem(SKEY(cur.name), data.sessionId);
+      if (typeof data.sessionId === 'string') store.setItem(SKEY(agent.name), data.sessionId);
       if (deletingActive) {
-        saveHist(cur.name, []);
-        await syncHistory(cur);
+        saveHist(agent.name, []);
+        if (isCurrentAgent(agent)) await syncHistory(agent);
       }
-      toast('会话已删除');
-      sessionsBusy = false;
-      await openSessions(true);
+      toast('「' + agent.label + '」会话已删除');
+      refresh = isCurrentAgent(agent) && $('#sessions-panel').classList.contains('show');
     } catch (error: any) {
       toast(error && error.message ? error.message : '无法删除该会话', 'err');
     } finally {
       setSessionsBusy(false);
     }
+    if (refresh) await openSessions(true);
   }
 
   function exportMd() {

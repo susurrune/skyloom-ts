@@ -169,6 +169,10 @@ describe("web · page", () => {
     expect(script).toContain("function isMissingSessionError");
     expect(script).toContain("function chatRequestBody");
     expect(script).toContain("store.removeItem(SKEY(agentName));");
+    expect(script).toContain("function bindResponseSession");
+    expect(script).toContain("X-Skyloom-Session-Id");
+    expect(script).toContain('"skyweb.h." + agentName + ".pending"');
+    expect(script).not.toContain("const h = loadHist(agentName);");
     expect(script).toContain("staleSessionRetried");
     expect(script).toContain("会话已过期，正在重新接续");
     expect(script).toContain("error.action");
@@ -177,6 +181,9 @@ describe("web · page", () => {
     expect(script).toMatch(/fetch\(["']\/api\/sessions\?agent=/);
     expect(script).toMatch(/fetch\(["']\/api\/session\/load["']/);
     expect(script).toMatch(/method:\s*["']DELETE["']/);
+    expect(script).toContain("function isCurrentAgent");
+    expect(script).toContain("body: JSON.stringify({ agent: agent.name, sessionId })");
+    expect(script).toContain("isCurrentAgent(agent)");
     expect(script).not.toContain("当前会话已是空的");
   });
 
@@ -479,6 +486,42 @@ describe("web · server", () => {
           { role: "assistant", content: "检查完成" },
         ],
       });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("identifies the backend session used by a successful chat stream", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: { getActiveSession: () => "session-active" },
+      chatStream: vi.fn(async function* () {
+        yield { type: "content", text: "hello" };
+      }),
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", message: "hello" }),
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("x-skyloom-session-id")).toBe("session-active");
+      expect(await response.text()).toContain('"text":"hello"');
     } finally {
       await closeServer(server);
     }

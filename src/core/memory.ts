@@ -1044,10 +1044,16 @@ export class Memory {
     const preview = name || '';
 
     if (this.db) {
-      this.dbRun(
-        'INSERT INTO sessions (id, agent, name, preview) VALUES (?, ?, ?, ?)',
-        [sessionId, this.agentName, name, preview]
-      );
+      try {
+        this.db.run(
+          'INSERT INTO sessions (id, agent, name, preview) VALUES (?, ?, ?, ?)',
+          [sessionId, this.agentName, name ?? null, preview]
+        );
+        this.scheduleSave();
+      } catch (error) {
+        logger.warn('session_create_failed', { agent: this.agentName, error: String(error) });
+        throw new Error('Failed to create session');
+      }
     }
 
     this.activeSession = sessionId;
@@ -1188,15 +1194,23 @@ export class Memory {
       return false;
     }
 
-    this.dbRun(
-      'DELETE FROM messages WHERE agent = ? AND session_id = ?',
-      [this.agentName, sessionId]
-    );
-
-    this.dbRun(
-      'DELETE FROM sessions WHERE id = ? AND agent = ?',
-      [sessionId, this.agentName]
-    );
+    try {
+      this.db.run('BEGIN');
+      this.db.run(
+        'DELETE FROM messages WHERE agent = ? AND session_id = ?',
+        [this.agentName, sessionId]
+      );
+      this.db.run(
+        'DELETE FROM sessions WHERE id = ? AND agent = ?',
+        [sessionId, this.agentName]
+      );
+      this.db.run('COMMIT');
+      this.scheduleSave();
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch { /* best-effort */ }
+      logger.warn('session_delete_failed', { agent: this.agentName, sessionId, error: String(error) });
+      throw new Error('Failed to delete session');
+    }
 
     if (this.activeSession === sessionId) {
       this.activeSession = null;

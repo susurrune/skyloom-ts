@@ -207,6 +207,52 @@ describe("Memory · long-term (SQLite)", () => {
     }
   });
 
+  it("does not report a session as created when the database write fails", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    const db = (mem as any).db;
+    const originalRun = db.run.bind(db);
+    db.run = (sql: string, params?: unknown[]) => {
+      if (/^INSERT INTO sessions/i.test(sql)) throw new Error("disk write failed");
+      return originalRun(sql, params);
+    };
+
+    try {
+      await expect(mem.createSession("unwritten")).rejects.toThrow("Failed to create session");
+      expect(mem.getActiveSession()).toBeNull();
+      expect(await mem.listSessions()).toEqual([]);
+    } finally {
+      db.run = originalRun;
+      await mem.close();
+    }
+  });
+
+  it("rolls back message deletion when deleting the session fails", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    const sid = await mem.createSession("keep-on-failure");
+    mem.addMessage("user", "must survive rollback");
+    await flush();
+
+    const db = (mem as any).db;
+    const originalRun = db.run.bind(db);
+    db.run = (sql: string, params?: unknown[]) => {
+      if (/^DELETE FROM sessions/i.test(sql)) throw new Error("disk write failed");
+      return originalRun(sql, params);
+    };
+
+    try {
+      await expect(mem.deleteSession(sid)).rejects.toThrow("Failed to delete session");
+      expect(mem.getActiveSession()).toBe(sid);
+    } finally {
+      db.run = originalRun;
+    }
+
+    expect(await mem.sessionExists(sid)).toBe(true);
+    expect(mem.getMessages().some((message) => message.content === "must survive rollback")).toBe(true);
+    await mem.close();
+  });
+
   it("getMemoryStats returns a populated object", async () => {
     const mem = new Memory(tmpConfig(), "fog");
     await mem.initDb();
