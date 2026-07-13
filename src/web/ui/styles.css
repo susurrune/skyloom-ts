@@ -187,6 +187,8 @@ body{
 .msg.user .msg-body::after{content:'';position:absolute;right:-7px;bottom:8px;width:18px;height:18px;
   border:2px solid var(--pigment);opacity:.18;transform:rotate(8deg)}
 .msg.user .msg-meta{text-align:right}
+.msg.user.failed .msg-body{border-color:var(--annotation);box-shadow:4px 5px 0 color-mix(in srgb,var(--annotation) 18%,transparent)}
+.retry-state{color:var(--annotation);font-style:italic}
 
 .msg.assistant{align-self:flex-start;display:flex;gap:12px;max-width:78%}
 .turn-seal{width:32px;height:32px;flex-shrink:0;margin-top:2px;display:flex;align-items:center;justify-content:center;
@@ -214,6 +216,7 @@ body{
 
 .sysline{align-self:center;font-size:.72rem;color:var(--ink-3);font-style:italic;letter-spacing:.05em;
   animation:msg-in .4s ease both}
+.history-sync-warning{padding:5px 10px;border-bottom:1px dashed var(--annotation);color:var(--annotation)}
 
 /* streaming caret */
 .caret{display:inline-block;width:2px;height:1.05em;background:var(--pigment);vertical-align:-.15em;

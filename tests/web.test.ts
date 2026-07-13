@@ -187,6 +187,20 @@ describe("web · page", () => {
     expect(script).not.toContain("当前会话已是空的");
   });
 
+  it("keeps failed turns retryable without duplicating the user message", () => {
+    expect(script).toContain("function markPendingUserFailed");
+    expect(script).toContain("send(last.failed ? last : void 0)");
+    expect(script).toContain("if (failed && !content.trim() && !tools.length) turn.remove();");
+    expect(script).toContain("delete pendingUser.failed");
+  });
+
+  it("makes history synchronization failures explicit", () => {
+    expect(script).toContain("function showHistorySyncWarning");
+    expect(script).toContain("历史同步失败，当前显示本机缓存");
+    expect(script).toContain("clearHistorySyncWarning");
+    expect(script).not.toContain("catch { /* retain the local cache while offline */ }");
+  });
+
   it("includes all six agents with light+dark pigments and suggestions", () => {
     expect(AGENTS_META).toHaveLength(6);
     for (const a of AGENTS_META) {

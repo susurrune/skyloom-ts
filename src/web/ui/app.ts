@@ -143,6 +143,17 @@ export function clientMain(): void {
   function pushHist(entry: any) {
     const h = loadHist(cur.name); h.push(entry); saveHist(cur.name, h);
   }
+  function markPendingUserFailed(agentName: string, text: string, ts: number, failed: boolean) {
+    const history = loadHist(agentName);
+    for (let i = history.length - 1; i >= 0; i--) {
+      const entry = history[i];
+      if (entry.r !== 'u' || entry.t !== text || entry.ts !== ts) continue;
+      if (failed) entry.failed = true;
+      else delete entry.failed;
+      saveHist(agentName, history);
+      return;
+    }
+  }
   function clearCachedSession(agentName: string) {
     store.removeItem(SKEY(agentName));
     store.removeItem('skyweb.h.' + agentName + '.pending');
@@ -156,13 +167,24 @@ export function clientMain(): void {
   function histSignature(h: any[]): string {
     return JSON.stringify(h.map((entry: any) => [entry.r, entry.t]));
   }
+  function clearHistorySyncWarning() {
+    const warning = msgs().querySelector('.history-sync-warning');
+    if (warning) warning.remove();
+  }
+  function showHistorySyncWarning(agent: any) {
+    if (!isCurrentAgent(agent)) return;
+    clearHistorySyncWarning();
+    const warning = el('div', 'sysline history-sync-warning', '历史同步失败，当前显示本机缓存');
+    warning.setAttribute('role', 'status');
+    msgs().appendChild(warning);
+  }
   async function syncHistory(agent: any) {
     const seq = ++syncSeq;
     syncing = true;
     updateRetryButton();
     try {
       const response = await fetch('/api/history?agent=' + encodeURIComponent(agent.name));
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(await readApiError(response, '历史同步失败'));
       const data: any = await response.json();
       const source = Array.isArray(data.messages) ? data.messages : [];
       const now = Date.now();
@@ -178,7 +200,10 @@ export function clientMain(): void {
       const changed = histSignature(loadHist(agent.name)) !== histSignature(remote);
       if (changed) saveHist(agent.name, remote);
       if (changed && seq === syncSeq && cur.name === agent.name) renderHistory();
-    } catch { /* retain the local cache while offline */ }
+      if (seq === syncSeq && isCurrentAgent(agent)) clearHistorySyncWarning();
+    } catch {
+      if (seq === syncSeq) showHistorySyncWarning(agent);
+    }
     finally {
       if (seq === syncSeq) {
         syncing = false;
@@ -250,11 +275,22 @@ export function clientMain(): void {
     pill.classList.add('show');
   }
 
-  function addUserMsg(text: string, ts: number) {
-    const w = el('div', 'msg user');
+  function addUserMsg(text: string, ts: number, failed = false): any {
+    const w = el('div', 'msg user' + (failed ? ' failed' : ''));
+    w.dataset.ts = String(ts);
     w.innerHTML = '<div class="msg-body">' + escapeHtml(text).replace(/\n/g, '<br>') +
-      '</div><span class="msg-meta">' + fmtTime(ts) + '</span>';
+      '</div><span class="msg-meta">' +
+      (failed ? '<span class="retry-state">发送失败，可重试</span>' : '') + fmtTime(ts) + '</span>';
     msgs().appendChild(w);
+    return w;
+  }
+
+  function findUserMsg(ts: number): any {
+    const items = msgs().querySelectorAll('.msg.user');
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].dataset.ts === String(ts)) return items[i];
+    }
+    return null;
   }
 
   function addSysLine(text: string) {
@@ -347,7 +383,7 @@ export function clientMain(): void {
     const h = loadHist(cur.name);
     if (!h.length) { renderWelcome(); updateRetryButton(); return; }
     for (const e of h) {
-      if (e.r === 'u') addUserMsg(e.t, e.ts);
+      if (e.r === 'u') addUserMsg(e.t, e.ts, !!e.failed);
       else if (e.r === 'a') {
         const turn = addTurn();
         turn.querySelector('.caret').remove();
@@ -370,21 +406,25 @@ export function clientMain(): void {
     return JSON.stringify(body);
   }
 
-  async function send() {
+  async function send(retryEntry?: any) {
     const inp = $('#chat-input');
-    const text = inp.value.trim();
+    const text = retryEntry ? String(retryEntry.t || '').trim() : inp.value.trim();
     if (!text || streaming || resetting) return;
     if (syncing) { toast('正在同步会话，请稍候'); return; }
-    inp.value = ''; autosize();
+    if (retryEntry) renderHistory();
+    else { inp.value = ''; autosize(); }
     store.removeItem(DKEY(cur.name));
     const wEl = msgs().querySelector('.welcome'); if (wEl) wEl.remove();
 
     streaming = true;
     setComposer(true);
     const t0 = Date.now();
-    const uts = Date.now();
-    addUserMsg(text, uts);
-    pushHist({ r: 'u', t: text, ts: uts });
+    const uts = retryEntry && Number.isFinite(Number(retryEntry.ts)) ? Number(retryEntry.ts) : Date.now();
+    const pendingUser = retryEntry || { r: 'u', t: text, ts: uts };
+    const userEl = retryEntry
+      ? findUserMsg(uts)
+      : addUserMsg(text, uts);
+    if (!retryEntry) pushHist(pendingUser);
     updateRetryButton();
     scrollBottom(true);
 
@@ -410,6 +450,7 @@ export function clientMain(): void {
 
     aborter = new AbortController();
     let stopped = false;
+    let failed = false;
     let staleSessionRetried = false;
     try {
       let resp = await fetch('/api/chat', {
@@ -462,6 +503,7 @@ export function clientMain(): void {
           }
           else if (ev.type === 'error') {
             const text = apiErrorText(ev.error || { message: ev.text }, ev.text || '出错了');
+            failed = true;
             addSysLine('✗ ' + text);
             toast(text, 'err');
           }
@@ -472,6 +514,7 @@ export function clientMain(): void {
     } catch (e: any) {
       if (e && e.name === 'AbortError') { stopped = true; addSysLine('已停止生成'); }
       else {
+        failed = true;
         const text = e && e.message ? e.message : '连接中断，请重试';
         addSysLine('✗ ' + text);
         toast(text, 'err');
@@ -485,11 +528,34 @@ export function clientMain(): void {
     }
     caret.remove();
     const ms = Date.now() - t0;
-    body.innerHTML = mdToHtml(content) ||
-      '<p class="empty-reply">' + (stopped ? '（已停止）' : '（无回复）') + '</p>';
-    turn.querySelector('.m-time').textContent = fmtTime(Date.now());
-    turn.querySelector('.m-dur').textContent = fmtDur(ms);
-    turn._raw = content;
+    if (failed && !content.trim() && !tools.length) turn.remove();
+    else {
+      body.innerHTML = mdToHtml(content) ||
+        '<p class="empty-reply">' + (stopped ? '（已停止）' : '（无回复）') + '</p>';
+      turn.querySelector('.m-time').textContent = fmtTime(Date.now());
+      turn.querySelector('.m-dur').textContent = fmtDur(ms);
+      turn._raw = content;
+    }
+    const failedTurn = failed && !content.trim() && !tools.length;
+    if (failedTurn) {
+      pendingUser.failed = true;
+      markPendingUserFailed(cur.name, text, uts, true);
+      if (userEl) {
+        userEl.classList.add('failed');
+        const meta = userEl.querySelector('.msg-meta');
+        if (meta && !meta.querySelector('.retry-state')) {
+          meta.insertAdjacentHTML('afterbegin', '<span class="retry-state">发送失败，可重试</span>');
+        }
+      }
+    } else {
+      delete pendingUser.failed;
+      markPendingUserFailed(cur.name, text, uts, false);
+      if (userEl) {
+        userEl.classList.remove('failed');
+        const state = userEl.querySelector('.retry-state');
+        if (state) state.remove();
+      }
+    }
     if (content.trim() || tools.length) {
       pushHist({ r: 'a', t: content, ts: Date.now(), ms, tools });
     }
@@ -536,7 +602,7 @@ export function clientMain(): void {
     const inp = $('#chat-input');
     inp.value = last.t;
     autosize();
-    send();
+    send(last.failed ? last : undefined);
   }
 
   function closeSessions() {
