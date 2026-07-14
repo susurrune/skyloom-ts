@@ -54,8 +54,10 @@ describe("ANSI-aware helpers", () => {
 
 describe("enterprise terminal layout", () => {
   it("adapts decoration and navigation to the available terminal", () => {
-    expect(resolveLoomLayout(120, 32)).toMatchObject({ railW: 18, skyH: 2, compact: false });
-    expect(resolveLoomLayout(76, 18)).toMatchObject({ railW: 12, skyH: 1, compact: false });
+    expect(resolveLoomLayout(120, 32)).toMatchObject({ railW: 18, skyH: 1, compact: false });
+    expect(resolveLoomLayout(96, 28)).toMatchObject({ railW: 14, skyH: 1, compact: false });
+    expect(resolveLoomLayout(84, 24)).toMatchObject({ railW: 0, skyH: 0, compact: true });
+    expect(resolveLoomLayout(76, 18)).toMatchObject({ railW: 0, skyH: 0, compact: true });
     expect(resolveLoomLayout(58, 13)).toMatchObject({ railW: 0, skyH: 0, compact: true });
   });
 
@@ -197,6 +199,14 @@ describe("LoomUI frame composition", () => {
     const text = frame.map(strip).join("\n");
     expect(text).toContain("调研竞品");
     expect(text).toContain("①");
+  });
+
+  it("keeps the wide rail focused on navigation instead of decorative copy", () => {
+    const ui = makeUI(120, 32);
+    const text = ui.paint().map(strip).join("\n");
+    expect(text).toContain("六灵");
+    expect(text).not.toContain("山色有无中");
+    expect(text).not.toContain("烟灰");
   });
 
   it("updates line blocks in place by id", () => {
@@ -442,6 +452,16 @@ describe("mouse wheel scrolling", () => {
     expect(ui.scrollOff).toBeLessThan(up);
   });
 
+  it("shows a stable scrollbar thumb for long transcripts", () => {
+    const ui = fillUI();
+    const tail = ui.paint().map(strip).join("\n");
+    expect(tail).toContain("┃");
+    wheel(ui, 64);
+    const history = ui.paint().map(strip).join("\n");
+    expect(history).toContain("回看");
+    expect(history).toContain("┃");
+  });
+
   it("mouse fragments never leak into the input line", () => {
     const ui = fillUI();
     wheel(ui, 64);
@@ -506,10 +526,30 @@ describe("input cursor — Home/End", () => {
 });
 
 describe("enterprise input handling", () => {
+  it("enables bracketed paste and restores the terminal mode on exit", () => {
+    let writes = "";
+    const out = { columns: 80, rows: 24, isTTY: true, write: (s: string) => { writes += s; return true; } };
+    const ui = new LoomUI({ out, inp: null, headless: false });
+    ui.start();
+    ui.destroy();
+    expect(writes).toContain("\x1b[?2004h");
+    expect(writes).toContain("\x1b[?2004l");
+  });
+
   it("preserves word boundaries in multiline paste", () => {
     const ui = makeUI() as any;
     ui.onKey("alpha\r\nbeta\ngamma", { name: "undefined" });
     expect(ui.inputGlyphs.join("")).toBe("alpha beta gamma");
+  });
+
+  it("reassembles bracketed paste without interpreting embedded keys", () => {
+    const ui = makeUI() as any;
+    ui.onKey("", { sequence: "\x1b[200~" });
+    ui.onKey("/clear\r\n", { name: "undefined" });
+    ui.onKey("second line", { name: "undefined" });
+    ui.onKey("", { sequence: "\x1b[201~" });
+    expect(ui.inputGlyphs.join("")).toBe("/clear second line");
+    expect(ui.paletteIdx).toBe(0);
   });
 
   it("keeps drafted input and explains why submit is blocked while busy", () => {

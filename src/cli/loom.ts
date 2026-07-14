@@ -130,8 +130,8 @@ export interface LoomLayout {
 export function resolveLoomLayout(columns: number, rows: number): LoomLayout {
   const cols = Math.max(20, columns);
   const terminalRows = Math.max(6, rows);
-  const railW = cols >= 108 ? 18 : cols >= 82 ? 15 : cols >= 68 ? 12 : 0;
-  const skyH = terminalRows >= 24 ? 2 : terminalRows >= 17 ? 1 : 0;
+  const railW = cols >= 112 ? 18 : cols >= 96 ? 14 : 0;
+  const skyH = terminalRows >= 28 ? 1 : 0;
   return {
     railW,
     skyH,
@@ -424,6 +424,10 @@ export interface LoomOpts {
    terminals (they bypass app tracking), so copy/paste keeps working. */
 const MOUSE_ON = "\x1b[?1000h\x1b[?1006h";
 const MOUSE_OFF = "\x1b[?1000l\x1b[?1006l";
+const BRACKETED_PASTE_ON = "\x1b[?2004h";
+const BRACKETED_PASTE_OFF = "\x1b[?2004l";
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
 const WHEEL_STEP = 3; // viewport lines per wheel notch
 
 export class LoomUI {
@@ -478,6 +482,8 @@ export class LoomUI {
   wizardStep: ((command: string, prior: string[]) => WizardStep | null) | null = null;
   private keypressHandler: ((str: string, key: any) => void) | null = null;
   private resizeHandler: (() => void) | null = null;
+  private pasteBuf: string | null = null;
+  private paintTimer: NodeJS.Timeout | null = null;
 
   constructor(opts?: LoomOpts) {
     this.out = opts?.out ?? (process.stdout as OutLike);
@@ -490,7 +496,7 @@ export class LoomUI {
 
   start() {
     if (!this.headless) {
-      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON); // alternate screen + mouse wheel
+      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON + BRACKETED_PASTE_ON);
       if (this.inp && this.inp.isTTY) {
         readline.emitKeypressEvents(this.inp);
         this.inp.setRawMode(true);
@@ -509,11 +515,12 @@ export class LoomUI {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.timer) clearInterval(this.timer);
+    if (this.paintTimer) clearTimeout(this.paintTimer);
     if (this.inp && this.keypressHandler) this.inp.removeListener("keypress", this.keypressHandler);
     if (this.resizeHandler) (process.stdout as any).removeListener?.("resize", this.resizeHandler);
     if (!this.headless) {
       if (this.inp && this.inp.isTTY) this.inp.setRawMode(false);
-      this.out.write(MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
+      this.out.write(BRACKETED_PASTE_OFF + MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
     }
   }
 
@@ -522,11 +529,11 @@ export class LoomUI {
     if (this.inp && this.inp.isTTY) this.inp.setRawMode(false);
     if (this.inp && this.keypressHandler) this.inp.removeListener("keypress", this.keypressHandler);
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    this.out.write(MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
+    this.out.write(BRACKETED_PASTE_OFF + MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
     try {
       return await fn();
     } finally {
-      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON);
+      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON + BRACKETED_PASTE_ON);
       if (this.inp && this.inp.isTTY) {
         this.inp.setRawMode(true);
         this.inp.resume();
@@ -552,6 +559,7 @@ export class LoomUI {
     // the tail (scrollOff === 0) the view keeps following new content; when
     // they have scrolled up to read, their position is preserved instead of
     // being yanked to the bottom on every tool event or blank line.
+    this.requestPaint();
     return blk;
   }
 
@@ -565,7 +573,7 @@ export class LoomUI {
 
   update(id: string, text: string) {
     const b = this.byId.get(id);
-    if (b && b.text !== text) { b.text = text; b.version++; }
+    if (b && b.text !== text) { b.text = text; b.version++; this.requestPaint(); }
   }
 
   /** Wrapped plain-text block. With an id, later calls update it in place. */
@@ -582,7 +590,7 @@ export class LoomUI {
   beginStream(agentName: string) {
     const t = agentTheme(agentName);
     this.blank();
-    this.line(chalk.bold.hex(t.hex)(`${t.symbol} ${t.kanji} `) + chalk.hex(t.hex)(t.name));
+    this.line(chalk.bold.hex(t.hex)(`${t.kanji} `) + chalk.hex(t.hex)(`${t.name} · ${t.specialty}`));
     this.blank();
     this.openBlock = this.push({ kind: "text", text: "", open: true });
     this.bleedLen = 0;
@@ -601,6 +609,7 @@ export class LoomUI {
     b.text += s.replace(/\r/g, "");
     b.version++;
     this.bleedLen = Math.min(12, this.bleedLen + [...s].length);
+    this.requestPaint();
   }
 
   endStream() {
@@ -685,6 +694,15 @@ export class LoomUI {
 
   private onKey(str: string, key: any) {
     if (this.destroyed) return;
+
+    const raw = str || key?.sequence || "";
+    if (this.pasteBuf !== null) { this.consumePaste(raw); return; }
+    const pasteAt = raw.indexOf(PASTE_START);
+    if (pasteAt >= 0) {
+      this.pasteBuf = "";
+      this.consumePaste(raw.slice(pasteAt + PASTE_START.length));
+      return;
+    }
 
     // ── mouse sequence reassembly (see mouseBuf) ──
     if (this.mouseBuf !== null) {
@@ -809,20 +827,27 @@ export class LoomUI {
     }
     if (key?.ctrl && name === "l") { this.clearViewport(); return; }
 
-    if (str && !key?.ctrl && !key?.meta) {
-      // A multiline paste enters a single-line editor. Preserve token
-      // boundaries instead of silently joining the end of one line to the
-      // beginning of the next.
-      const normalized = str.replace(/\r\n?/g, "\n").replace(/\n+/g, " ");
-      const glyphs = [...normalized].filter((c) => c >= " " || charWidth(c.codePointAt(0)!) > 0);
-      if (glyphs.length) {
-        this.inputGlyphs.splice(this.cursor, 0, ...glyphs);
-        this.cursor += glyphs.length;
-        this.histIdx = -1;
-        this.paletteIdx = 0; // filter changed — selection restarts at the top
-        this.paint();
-      }
-    }
+    if (str && !key?.ctrl && !key?.meta) this.insertInput(str);
+  }
+
+  private consumePaste(chunk: string) {
+    if (this.pasteBuf === null) return;
+    const end = chunk.indexOf(PASTE_END);
+    if (end < 0) { this.pasteBuf += chunk; return; }
+    const pasted = this.pasteBuf + chunk.slice(0, end);
+    this.pasteBuf = null;
+    this.insertInput(pasted);
+  }
+
+  private insertInput(text: string) {
+    const normalized = text.replace(/\r\n?/g, "\n").replace(/\n+/g, " ");
+    const glyphs = [...normalized].filter((c) => c >= " " || charWidth(c.codePointAt(0)!) > 0);
+    if (!glyphs.length) return;
+    this.inputGlyphs.splice(this.cursor, 0, ...glyphs);
+    this.cursor += glyphs.length;
+    this.histIdx = -1;
+    this.paletteIdx = 0;
+    this.paint();
   }
 
   private handleSigint() {
@@ -958,18 +983,26 @@ export class LoomUI {
 
   private frame() {
     this.tick++;
-    const animate = this.busy || this.orch.active;
+    const animate = this.busy || this.orch.active || this.openBlock !== null;
+    if (!animate) return;
     // advance shuttles
     if (this.orch.active) {
       for (const [a, x] of this.orch.shuttleX) this.orch.shuttleX.set(a, x + 1.3);
     }
     // ink "dries": the bleed tail shrinks even when no new tokens arrive
     if (this.openBlock && this.bleedLen > 0 && this.tick % 2 === 0) this.bleedLen = Math.max(0, this.bleedLen - 2);
-    if (animate || this.tick % 5 === 0) {
-      const t = agentTheme(this.agentName);
-      this.sky.step(t.motion, this.tick);
+    const t = agentTheme(this.agentName);
+    this.sky.step(t.motion, this.tick);
+    this.paint();
+  }
+
+  private requestPaint() {
+    if (this.headless || this.destroyed || this.paintTimer) return;
+    this.paintTimer = setTimeout(() => {
+      this.paintTimer = null;
       this.paint();
-    }
+    }, 16);
+    this.paintTimer.unref?.();
   }
 
   private viewportCache: { lines: string[]; key: string } | null = null;
@@ -1029,7 +1062,7 @@ export class LoomUI {
     const out: string[] = [];
     const W = this.layout().railW;
     if (W === 0) return Array.from({ length: h }, () => "");
-    out.push("");
+    out.push(" " + chalk.bold.hex(PALETTE.inkMid)("六灵"));
     for (const name of AGENT_ORDER) {
       const t = agentTheme(name);
       const active = name === this.agentName;
@@ -1046,10 +1079,7 @@ export class LoomUI {
     }
     out.push(chalk.hex(PALETTE.inkFaint)(" " + "╌".repeat(W - 2)));
     const t = agentTheme(this.agentName);
-    for (const ln of wrapPlain(t.poem, W - 2).slice(0, 2)) {
-      out.push(" " + chalk.hex(PALETTE.inkLight).italic(ln));
-    }
-    out.push(" " + chalk.hex(PALETTE.inkLight).dim(t.pigment));
+    out.push(" " + chalk.hex(t.hex)(t.specialty));
     if (this.orch.active) {
       const p = this.orch.progress();
       out.push("");
@@ -1114,11 +1144,18 @@ export class LoomUI {
     this.clampScroll();
     const start = Math.max(0, view.length - bodyH - this.scrollOff);
     const visible = view.slice(start, start + bodyH);
+    const overflow = view.length > bodyH;
+    const thumbSize = overflow ? Math.max(1, Math.round(bodyH * bodyH / view.length)) : 0;
+    const maxStart = Math.max(1, view.length - bodyH);
+    const thumbStart = overflow ? Math.round(start / maxStart * (bodyH - thumbSize)) : -1;
     for (let i = 0; i < bodyH; i++) {
       const right = padAnsi(visible[i] ?? "", this.viewW());
+      const edge = overflow && i >= thumbStart && i < thumbStart + thumbSize
+        ? chalk.hex(t.hex)("┃")
+        : B("│");
       frame.push(layout.railW > 0
-        ? B("│") + padAnsi(rail[i] ?? "", layout.railW) + B("│") + " " + right + B("│")
-        : B("│") + " " + right + B("│"));
+        ? B("│") + padAnsi(rail[i] ?? "", layout.railW) + B("│") + " " + right + edge
+        : B("│") + " " + right + edge);
     }
 
     // ── status divider ──
@@ -1129,7 +1166,7 @@ export class LoomUI {
         const dots = ["·  ", "·· ", "···", " ··", "  ·", "   "][this.tick % 6];
         leftLabel = ` ${chalk.hex(t.hex)(t.symbol)} ${chalk.dim(this.busyLabel + " " + dots)} `;
       } else if (this.flashHint) leftLabel = " " + chalk.yellow(this.flashHint) + " ";
-      else if (this.scrollOff > 0) leftLabel = " " + chalk.dim(`↑ 回看中 · Esc 回到末尾`) + " ";
+      else if (this.scrollOff > 0) leftLabel = " " + chalk.dim(`回看 · Esc 返回末尾`) + " ";
       else if (this.modeBadge) leftLabel = " " + this.modeBadge + " ";
       else {
         const operational = this.statusLeft();
@@ -1170,7 +1207,7 @@ export class LoomUI {
         content = head + cutVisual(shownTyped, innerW - visualWidth(head) - 2);
         cursorPos = { row: rows - 2, col: Math.min(innerW, visualWidth(content) + 1) };
       } else {
-        const promptStr = chalk.hex(t.hex)(` ${t.symbol} `) + chalk.hex(PALETTE.inkLight)("❯ ");
+        const promptStr = chalk.bold.hex(t.hex)(` ${t.kanji} `) + chalk.hex(PALETTE.inkLight)("› ");
         const promptW = visualWidth(promptStr);
         const avail = innerW - promptW - 1;
         // horizontal scroll window around the cursor
@@ -1206,7 +1243,7 @@ export class LoomUI {
               : " 输入后 Enter 确认 · ⌫ 返回上一步 · Esc 取消 ")
           : paletteUp
             ? " ↑↓ 选命令 · Enter 执行 · Tab 补全 · Esc 收起 "
-            : " / 命令 · 滚轮/PgUp 回看 · Shift+Tab 切模式 · Ctrl-C 退出 ";
+            : " / 命令 · PgUp 回看 · Shift+Tab 模式 · Ctrl-C 退出 ";
       if (visualWidth(hint) > innerW - 1) {
         hint = this.busy ? " Ctrl-C 中断 "
           : this.wizard ? " Enter 确认 · Esc 取消 "
