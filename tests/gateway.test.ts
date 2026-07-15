@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import * as crypto from "crypto";
 import { Readable } from "stream";
-import { resolveSecret, TokenCache } from "../src/gateway/helpers";
+import { boundedMediaBuffer, MAX_INBOUND_MEDIA_BYTES, resolveSecret, TokenCache } from "../src/gateway/helpers";
 import { describeMedia, parseReply } from "../src/gateway/types";
 import { isSendableSrc } from "../src/gateway/helpers";
 import { describeImages } from "../src/gateway/vision";
@@ -38,9 +38,51 @@ describe("gateway · helpers", () => {
     tc.invalidate();
     expect(await tc.get()).toBe("t2");
   });
+
+  it("TokenCache coalesces concurrent refreshes into one platform request", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    const tc = new TokenCache(async () => {
+      calls++;
+      await ready;
+      return { token: "shared-token", expiresInSec: 7200 };
+    });
+
+    const pending = [tc.get(), tc.get(), tc.get()];
+    release();
+
+    await expect(Promise.all(pending)).resolves.toEqual([
+      "shared-token", "shared-token", "shared-token",
+    ]);
+    expect(calls).toBe(1);
+  });
+
+  it("does not reuse a refresh invalidated while it is still in flight", async () => {
+    const releases: Array<(token: string) => void> = [];
+    const tc = new TokenCache(() => new Promise((resolve) => {
+      releases.push((token) => resolve({ token, expiresInSec: 7200 }));
+    }));
+
+    const stale = tc.get();
+    tc.invalidate();
+    const fresh = tc.get();
+    expect(releases).toHaveLength(2);
+
+    releases[0]("stale-token");
+    releases[1]("fresh-token");
+    await expect(stale).resolves.toBe("stale-token");
+    await expect(fresh).resolves.toBe("fresh-token");
+    await expect(tc.get()).resolves.toBe("fresh-token");
+  });
 });
 
 describe("gateway · media", () => {
+  it("rejects oversized inbound media before vision encoding", () => {
+    expect(() => boundedMediaBuffer(Buffer.alloc(1), MAX_INBOUND_MEDIA_BYTES + 1)).toThrow(/exceeds/);
+    expect(() => boundedMediaBuffer(Buffer.alloc(MAX_INBOUND_MEDIA_BYTES + 1))).toThrow(/exceeds/);
+  });
+
   it("describeMedia renders a compact readable line", () => {
     expect(describeMedia(undefined)).toBe("");
     expect(describeMedia([])).toBe("");
@@ -52,9 +94,9 @@ describe("gateway · media", () => {
   });
 
   it("feishu normalizes an image message to a media attachment", async () => {
-    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const payload = {
-      header: { event_id: "img1", event_type: "im.message.receive_v1" },
+      header: { event_id: "img1", event_type: "im.message.receive_v1", token: "good" },
       event: {
         sender: { sender_id: { open_id: "o" } },
         message: { chat_id: "c", message_type: "image", content: JSON.stringify({ image_key: "img_xxx" }) },
@@ -241,6 +283,39 @@ describe("gateway · streaming dispatch", () => {
     expect(send).toHaveBeenCalled();
   });
 
+  it("does not expose internal Agent errors to channel users", async () => {
+    async function* failedReply(): AsyncGenerator<Record<string, unknown>> {
+      throw new Error("provider secret sk-live-sensitive internal-host.local");
+    }
+    const adapter: any = {
+      id: "wecom",
+      name: "WeCom",
+      defaultAgent: "fair",
+      send: vi.fn(async () => undefined),
+    };
+    const ctx: any = {
+      config: { channels: {} },
+      agentMap: new Map([["fair", {
+        init: vi.fn(async () => undefined),
+        chatStreamInNamedSession: vi.fn(() => failedReply()),
+      }]]),
+    };
+    const msg: any = {
+      channel: "wecom",
+      conversationId: "safe-errors",
+      userId: "user-1",
+      text: "hello",
+      replyTo: { channel: "wecom", toUser: "user-1" },
+    };
+
+    await (gatewayCore as any).dispatch(ctx, adapter, msg);
+
+    const reply = String(adapter.send.mock.calls[0][1]);
+    expect(reply).toContain("暂时无法完成");
+    expect(reply).not.toContain("sk-live-sensitive");
+    expect(reply).not.toContain("internal-host.local");
+  });
+
   it("does not deliver local-file or private-network media from agent replies", async () => {
     async function* reply() {
       yield { type: "content", text: `report [[file:${__filename}|source]] ![internal](http://127.0.0.1/secret.png)` };
@@ -305,17 +380,17 @@ describe("gateway · feishu", () => {
   });
 
   it("answers the url_verification challenge", async () => {
-    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
-    const out = await a.handleWebhook(req({ body: JSON.stringify({ type: "url_verification", challenge: "C1" }) }));
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
+    const out = await a.handleWebhook(req({ body: JSON.stringify({ type: "url_verification", token: "good", challenge: "C1" }) }));
     expect(out.response?.status).toBe(200);
     expect(JSON.parse(out.response!.body!).challenge).toBe("C1");
     expect(out.message).toBeUndefined();
   });
 
   it("normalizes an im.message.receive_v1 text event", async () => {
-    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const payload = {
-      header: { event_id: "e1", event_type: "im.message.receive_v1" },
+      header: { event_id: "e1", event_type: "im.message.receive_v1", token: "good" },
       event: {
         sender: { sender_id: { open_id: "ou_123" } },
         message: { chat_id: "oc_chat", message_type: "text", content: JSON.stringify({ text: "@_user_1 你好" }) },
@@ -328,9 +403,9 @@ describe("gateway · feishu", () => {
   });
 
   it("dedupes a redelivered event_id", async () => {
-    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const payload = {
-      header: { event_id: "dup", event_type: "im.message.receive_v1" },
+      header: { event_id: "dup", event_type: "im.message.receive_v1", token: "good" },
       event: { sender: { sender_id: { open_id: "o" } }, message: { chat_id: "c", message_type: "text", content: JSON.stringify({ text: "hi" }) } },
     };
     const first = await a.handleWebhook(req({ body: JSON.stringify(payload) }));
@@ -343,6 +418,18 @@ describe("gateway · feishu", () => {
     const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const out = await a.handleWebhook(req({ body: JSON.stringify({ header: { token: "bad", event_type: "im.message.receive_v1" }, event: {} }) }));
     expect(out.response?.status).toBe(403);
+  });
+
+  it("rejects plaintext events when no verification credential is configured", async () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const out = await a.handleWebhook(req({
+      body: JSON.stringify({
+        header: { event_id: "unsigned", event_type: "im.message.receive_v1" },
+        event: { message: { chat_id: "c", message_type: "text", content: '{"text":"run"}' } },
+      }),
+    }));
+    expect(out.response?.status).toBe(403);
+    expect(out.message).toBeUndefined();
   });
 
   it("requires the configured verification token on challenges and events", async () => {

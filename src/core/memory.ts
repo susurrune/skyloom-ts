@@ -15,6 +15,7 @@ import * as os from 'os';
 import type { MemoryConfig } from './config';
 import { getLogger } from './logger';
 import { getScorer } from './semantic';
+import { atomicWriteFileSync } from './fs_atomic';
 
 const logger = getLogger('memory');
 
@@ -252,7 +253,7 @@ export class Memory {
     if (!this.db) return;
     try {
       const data = this.db.export();
-      fs.writeFileSync(this.dbPath, Buffer.from(data));
+      atomicWriteFileSync(this.dbPath, Buffer.from(data), 0o600);
     } catch (err) {
       logger.warn('persist_db_failed', { path: this.dbPath, error: String(err) });
     }

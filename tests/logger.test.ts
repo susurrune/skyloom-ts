@@ -18,6 +18,27 @@ describe("logger · sink routing", () => {
     expect(entry.a).toBe(1);
   });
 
+  it("redacts credentials recursively and tolerates circular metadata", () => {
+    const lines: string[] = [];
+    setLogSink((line) => lines.push(line));
+    const metadata: Record<string, unknown> = {
+      authorization: "Bearer live-token-value",
+      nested: { apiKey: "sk-live-sensitive", password: "open-sesame" },
+      error: new Error("provider rejected sk-another-sensitive"),
+    };
+    metadata.self = metadata;
+
+    expect(() => getLogger("test-redaction").error("provider_failed", metadata)).not.toThrow();
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain("live-token-value");
+    expect(lines[0]).not.toContain("sk-live-sensitive");
+    expect(lines[0]).not.toContain("open-sesame");
+    expect(lines[0]).not.toContain("sk-another-sensitive");
+    expect(lines[0]).toContain("[REDACTED]");
+    expect(lines[0]).toContain("[Circular]");
+  });
+
   it("silenceLogs discards output (keeps a TUI clean)", () => {
     let count = 0;
     setLogSink(() => { count++; });

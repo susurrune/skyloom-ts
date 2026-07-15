@@ -236,7 +236,21 @@ export class OrchestrationRunStore {
     const file = this.eventsPath(runId);
     if (!fs.existsSync(file)) return [];
     try {
-      return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line) as AuditEvent);
+      const content = fs.readFileSync(file, 'utf8');
+      const hasTerminatedTail = /\r?\n$/.test(content);
+      const lines = content.split(/\r?\n/);
+      const events: AuditEvent[] = [];
+      for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        if (!line) continue;
+        try {
+          events.push(JSON.parse(line) as AuditEvent);
+        } catch (error) {
+          const isCrashTruncatedTail = index === lines.length - 1 && !hasTerminatedTail;
+          if (!isCrashTruncatedTail) throw error;
+        }
+      }
+      return events;
     } catch (error) {
       throw new RunStoreError('run.audit_unreadable', `Unable to read audit chain for run '${runId}': ${String(error)}`);
     }

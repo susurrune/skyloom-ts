@@ -37,6 +37,19 @@ describe("web · remote access policy", () => {
     expect(isAuthorizedWebRequest({ authorization: `Basic ${basic}` }, token)).toBe(true);
     expect(isAuthorizedWebRequest({ authorization: "Bearer wrong" }, token)).toBe(false);
   });
+
+  it("uses bounded HTTP request and keep-alive lifetimes", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const server = await startWebServer(0);
+    try {
+      expect(server.headersTimeout).toBe(15_000);
+      expect(server.requestTimeout).toBe(30_000);
+      expect(server.keepAliveTimeout).toBe(5_000);
+      expect(server.maxRequestsPerSocket).toBe(100);
+    } finally {
+      await closeServer(server);
+    }
+  });
 });
 
 /* ════════ markdown renderer (isomorphic, injected into the page) ════════ */

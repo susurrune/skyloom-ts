@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as yaml from "yaml";
+import { atomicWriteFileSync } from "./fs_atomic";
 import { getLogger } from "./logger";
 
 const log = getLogger("config");
@@ -321,10 +322,7 @@ export function saveUserConfig(config: SkyloomConfig): void {
   const userPath = path.join(userConfigDir, "config.yaml");
   const content = yaml.stringify(config);
 
-  fs.writeFileSync(userPath, content, { encoding: "utf-8", mode: 0o600 });
-  // mode in writeFileSync only applies on creation; enforce on existing files
-  // too, since this config holds plaintext API keys.
-  try { fs.chmodSync(userPath, 0o600); } catch { /* best-effort (e.g. Windows) */ }
+  atomicWriteFileSync(userPath, content, 0o600);
   log.info("Saved user configuration", { path: userPath });
 }
 

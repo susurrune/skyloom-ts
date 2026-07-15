@@ -24,6 +24,7 @@ import type { ChannelAdapter, InboundMessage, RawRequest } from './types';
 import type { LoadedMedia } from './helpers';
 
 const log = getLogger('gateway');
+const PUBLIC_AGENT_ERROR_MESSAGE = '抱歉，服务暂时无法完成这次请求，请稍后重试。';
 const MAX_WEBHOOK_BODY_BYTES = 2 * 1024 * 1024;
 
 /** Collect the full request body. */
@@ -119,7 +120,7 @@ export async function dispatch(
         }
       } catch (e) {
         log.warn('gateway_agent_failed', { channel: adapter.id, error: String(e) });
-        yield `\n[出错了] ${String(e)}`;
+        yield `\n${PUBLIC_AGENT_ERROR_MESSAGE}`;
       }
     }
     await adapter.sendStreaming(msg.replyTo, contentChunks());
@@ -135,7 +136,7 @@ export async function dispatch(
     }
   } catch (e) {
     log.warn('gateway_agent_failed', { channel: adapter.id, error: String(e) });
-    text = `[出错了] ${String(e)}`;
+    text = PUBLIC_AGENT_ERROR_MESSAGE;
   }
   // Non-streaming: split out media so the text message is clean.
   if (adapter.sendMedia) {
@@ -252,6 +253,10 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
       }
     }
   });
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 30_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxRequestsPerSocket = 100;
 
   await new Promise<void>((resolve) => {
     server.listen(port, host, () => {

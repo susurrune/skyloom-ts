@@ -9,6 +9,23 @@ import * as path from 'path';
 import { safeFetch } from '../tools/guards';
 
 const MAX_MEDIA_BYTES = 30 * 1024 * 1024;
+export const MAX_INBOUND_MEDIA_BYTES = 10 * 1024 * 1024;
+
+export function boundedMediaBuffer(
+  data: ArrayBuffer | ArrayBufferView,
+  declaredLength?: number,
+): Buffer {
+  if (Number.isFinite(declaredLength) && Number(declaredLength) > MAX_INBOUND_MEDIA_BYTES) {
+    throw new Error(`inbound media exceeds ${MAX_INBOUND_MEDIA_BYTES} byte limit`);
+  }
+  const buffer = ArrayBuffer.isView(data)
+    ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+    : Buffer.from(data);
+  if (buffer.length > MAX_INBOUND_MEDIA_BYTES) {
+    throw new Error(`inbound media exceeds ${MAX_INBOUND_MEDIA_BYTES} byte limit`);
+  }
+  return buffer;
+}
 
 /**
  * Resolve a secret/config value. Accepts a literal string, or an env-ref object
@@ -143,17 +160,34 @@ export async function postMultipart(
 export class TokenCache {
   private token: string | null = null;
   private expiresAt = 0;
+  private refresh: { generation: number; promise: Promise<string> } | null = null;
+  private generation = 0;
   constructor(private fetcher: () => Promise<{ token: string; expiresInSec: number }>) {}
 
   async get(): Promise<string> {
     const now = Date.now();
     if (this.token && now < this.expiresAt - 60_000) return this.token;
-    const { token, expiresInSec } = await this.fetcher();
-    this.token = token;
-    this.expiresAt = now + Math.max(60, expiresInSec) * 1000;
-    return token;
+    if (this.refresh?.generation === this.generation) return this.refresh.promise;
+
+    const generation = this.generation;
+    const promise = this.fetcher().then(({ token, expiresInSec }) => {
+      if (generation === this.generation) {
+        this.token = token;
+        this.expiresAt = Date.now() + Math.max(60, expiresInSec) * 1000;
+      }
+      return token;
+    }).finally(() => {
+      if (this.refresh?.promise === promise) this.refresh = null;
+    });
+    this.refresh = { generation, promise };
+    return promise;
   }
 
   /** Force the next get() to refetch (e.g. after a 401). */
-  invalidate(): void { this.token = null; this.expiresAt = 0; }
+  invalidate(): void {
+    this.generation++;
+    this.token = null;
+    this.expiresAt = 0;
+    this.refresh = null;
+  }
 }

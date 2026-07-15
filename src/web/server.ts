@@ -186,6 +186,11 @@ export async function startWebServer(
     }
   });
 
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 30_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxRequestsPerSocket = 100;
+
   return new Promise((resolve, reject) => {
     const onError = (error: Error) => reject(error);
     server.once("error", onError);

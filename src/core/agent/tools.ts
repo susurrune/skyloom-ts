@@ -110,7 +110,8 @@ export class ToolCallExecutor {
       return { tc, toolName, toolArgs, tool, parseError, label, denied: false };
     });
 
-    for (const call of parsed.filter((item) => item.tool?.dangerous)) {
+    // The central danger map, rather than the optional tool hint, owns policy.
+    for (const call of parsed.filter((item) => item.tool && !item.parseError)) {
       if (!await this.deps.approve(call.toolName, call.toolArgs || {})) call.denied = true;
     }
 
@@ -148,7 +149,7 @@ export class ToolCallExecutor {
           return { idx, result: this.result(prep, `[cancelled] '${prep.toolName}' skipped — interrupted before execution`, false) };
         }
         if (prep.parseError) return { idx, result: this.result(prep, prep.parseError, false) };
-        if (prep.denied) return { idx, result: this.result(prep, `[denied] dangerous tool '${prep.toolName}' blocked`, false) };
+        if (prep.denied) return { idx, result: this.result(prep, `[denied] tool '${prep.toolName}' blocked by approval policy`, false) };
         if (!prep.tool) {
           suppressed?.add(prep.toolName);
           const suggestions = suggestToolNames(prep.toolName, registry);

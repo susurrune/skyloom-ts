@@ -42,6 +42,28 @@ describe('enterprise orchestration run store', () => {
     expect(() => runs.load('run-2')).toThrow(RunStoreError);
   });
 
+  it('recovers from a crash-truncated final audit record', () => {
+    const runs = store();
+    const run = runs.create('ship', [{ id: '1', description: 'build', assignedTo: 'rain' }], 'run-tail');
+    runs.start(run);
+    const eventsFile = path.join(runs.rootDir, 'run-tail', 'events.jsonl');
+    fs.appendFileSync(eventsFile, '{"schemaVersion":1,"seq":3');
+
+    const recovered = runs.load('run-tail');
+
+    expect(recovered).toMatchObject({ runId: 'run-tail', revision: 2, status: 'running' });
+    expect(runs.events('run-tail')).toHaveLength(2);
+  });
+
+  it('still rejects a malformed complete audit record', () => {
+    const runs = store();
+    runs.create('ship', [{ id: '1', description: 'build', assignedTo: 'rain' }], 'run-bad-tail');
+    const eventsFile = path.join(runs.rootDir, 'run-bad-tail', 'events.jsonl');
+    fs.appendFileSync(eventsFile, '{bad json}\n');
+
+    expect(() => runs.load('run-bad-tail')).toThrowError(/audit chain/);
+  });
+
   it('marks abandoned running tasks interrupted when a run restarts', () => {
     const runs = store();
     const run = runs.create('ship', [{ id: '1', description: 'build', assignedTo: 'rain' }], 'run-3');

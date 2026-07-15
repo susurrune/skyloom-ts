@@ -43,9 +43,9 @@ describe("channel setup · callbackUrl", () => {
 
 describe("channel setup · missingRequired", () => {
   it("reports unfilled required fields, ignores optional", () => {
-    expect(missingRequired("feishu", { appId: "a" })).toEqual(["appSecret"]);
-    expect(missingRequired("feishu", { appId: "a", appSecret: "s" })).toEqual([]);
-    // optional fields (verificationToken/encryptKey) never reported
+    expect(missingRequired("feishu", { appId: "a" })).toEqual(["appSecret", "verificationToken"]);
+    expect(missingRequired("feishu", { appId: "a", appSecret: "s" })).toEqual(["verificationToken"]);
+    // Encrypted payload support remains optional; plaintext events require a token.
     expect(missingRequired("feishu", { appId: "a", appSecret: "s" })).not.toContain("encryptKey");
   });
 });

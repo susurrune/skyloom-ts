@@ -28,6 +28,7 @@ import {
 } from './agent/tools';
 import { Tracer, type Trace } from './trace';
 import { resolveVerifyConfig, runVerify } from './verify';
+import { getSecurity, type SecurityContext } from './security';
 
 const log = getLogger('agent');
 
@@ -1146,8 +1147,7 @@ export class BaseAgent {
     }
   }
 
-  private _security: any = null;
-  get security(): any { if (!this._security) { try { const { getSecurity } = require('./security'); this._security = getSecurity(); } catch { this._security = {}; } } return this._security; }
+  get security(): SecurityContext { return getSecurity(); }
 
   protected getHooks(): import('./hooks').Hooks {
     if (!this._hooks) {
@@ -1169,10 +1169,11 @@ export class BaseAgent {
         if (!approved) log.warn('tool_blocked', { tool: toolName, agent: this.name, reason });
         return approved;
       }
-    } catch { /* fall through */ }
-    const mode = (this.config as any).cli?.approval_mode || (this.config as any).cli?.approvalMode || 'auto';
-    if (mode === 'strict') return false;
-    return true;
+      log.error('approval_check_unavailable', { tool: toolName, agent: this.name });
+    } catch (error) {
+      log.error('approval_check_failed', { tool: toolName, agent: this.name, error });
+    }
+    return false;
   }
 
   async requestHelp(
