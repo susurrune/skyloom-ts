@@ -23,9 +23,32 @@ import { applyWebSettings, buildWebSettings, WebSettingsError } from "./settings
 import { makeApiError, sendApiError, sendJson, sendUnknownError, WebApiError } from "./errors";
 import { isAuthorizedWebRequest, resolveWebAccessPolicy } from "./auth";
 import { OrchestrationRunStore, RunStoreError } from "../core/run_store";
+import { getLogger } from "../core/logger";
+import { PUBLIC_INTERNAL_ERROR_MESSAGE } from "./errors";
 
 const MAX_CHAT_BODY_BYTES = 1024 * 1024;
+const log = getLogger("web");
 type SystemContext = ReturnType<typeof createSystemContext>;
+
+function setSecurityHeaders(res: ServerResponse): void {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Content-Security-Policy", [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "font-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+  ].join("; "));
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+}
 
 function payloadTooLargeError(): WebApiError {
   return makeApiError(413, "web.payload_too_large", "request body too large", {
@@ -94,6 +117,7 @@ export async function startWebServer(
   };
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    setSecurityHeaders(res);
     if (!hostAllowed(req.headers.host)) {
       sendApiError(res, makeApiError(403, "web.forbidden_host", "Forbidden host", {
         retryable: false,
@@ -155,7 +179,10 @@ export async function startWebServer(
       else serveUI(res);
     } catch (e) {
       if (e instanceof WebApiError) sendApiError(res, e);
-      else sendUnknownError(res, e);
+      else {
+        log.error("request_failed", { method: req.method, path: url.pathname, error: e });
+        sendUnknownError(res);
+      }
     }
   });
 
@@ -305,7 +332,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: System
       : agent.chatStream(message, ac.signal);
     for await (const ev of stream) send(ev as Record<string, unknown>);
   } catch (error) {
-    const apiError = makeApiError(500, "web.chat_failed", error instanceof Error ? error.message : String(error), {
+    if (!ac.signal.aborted) log.error("chat_stream_failed", { agent: agentName, error });
+    const apiError = makeApiError(500, "web.chat_failed", PUBLIC_INTERNAL_ERROR_MESSAGE, {
       retryable: true,
       action: "重试当前消息；如果持续失败，请打开健康中心查看模型、凭据与工具状态。",
     });

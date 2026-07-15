@@ -3,12 +3,17 @@ type WebCommandResult = "started" | "already-running";
 async function isSkyloomServer(port: number): Promise<boolean> {
   const host = process.env.SKYLOOM_WEB_HOST || "127.0.0.1";
   const probeHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  const token = process.env.SKYLOOM_WEB_TOKEN;
   try {
     const response = await fetch(`http://${probeHost}:${port}/api/status`, {
+      headers: token ? { "X-Skyloom-Token": token } : undefined,
       signal: AbortSignal.timeout(1000),
     });
     if (!response.ok) return false;
-    const status = await response.json() as Record<string, any>;
+    const status = await response.json() as {
+      version?: unknown;
+      agents?: { summary?: { total?: unknown } };
+    };
     return typeof status.version === "string" && typeof status.agents?.summary?.total === "number";
   } catch {
     return false;

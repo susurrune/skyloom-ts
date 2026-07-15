@@ -115,9 +115,10 @@ describe("gateway · parseReply (outbound media)", () => {
 });
 
 describe("gateway · isSendableSrc", () => {
-  it("accepts http(s) URLs, rejects bare non-existent paths", () => {
+  it("accepts http(s) URLs and rejects local filesystem paths", () => {
     expect(isSendableSrc("https://x.com/a.png")).toBe(true);
     expect(isSendableSrc("http://x.com/a.png")).toBe(true);
+    expect(isSendableSrc(__filename)).toBe(false);
     expect(isSendableSrc("/no/such/file/xyz.png")).toBe(false);
     expect(isSendableSrc("not a path")).toBe(false);
   });
@@ -240,6 +241,39 @@ describe("gateway · streaming dispatch", () => {
     expect(send).toHaveBeenCalled();
   });
 
+  it("does not deliver local-file or private-network media from agent replies", async () => {
+    async function* reply() {
+      yield { type: "content", text: `report [[file:${__filename}|source]] ![internal](http://127.0.0.1/secret.png)` };
+    }
+    const agent = {
+      init: vi.fn(async () => undefined),
+      chatStreamInNamedSession: vi.fn(() => reply()),
+    };
+    const sendMedia = vi.fn(async () => undefined);
+    const adapter: any = {
+      id: "feishu",
+      name: "Feishu",
+      defaultAgent: "fair",
+      send: vi.fn(async () => undefined),
+      sendMedia,
+    };
+    const ctx: any = {
+      config: { channels: {} },
+      agentMap: new Map([["fair", agent]]),
+    };
+    const msg: any = {
+      channel: "feishu",
+      conversationId: "chat-safe",
+      userId: "user-1",
+      text: "send report",
+      replyTo: { chatId: "chat-safe" },
+    };
+
+    await (gatewayCore as any).dispatch(ctx, adapter, msg);
+
+    expect(sendMedia).not.toHaveBeenCalled();
+  });
+
   it("uses a valid default gateway port when the environment is unset or invalid", () => {
     const resolveGatewayPort = (gatewayCore as any).resolveGatewayPort;
     expect(resolveGatewayPort(undefined, {})).toBe(8848);
@@ -309,6 +343,23 @@ describe("gateway · feishu", () => {
     const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const out = await a.handleWebhook(req({ body: JSON.stringify({ header: { token: "bad", event_type: "im.message.receive_v1" }, event: {} }) }));
     expect(out.response?.status).toBe(403);
+  });
+
+  it("requires the configured verification token on challenges and events", async () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
+    const challenge = await a.handleWebhook(req({
+      body: JSON.stringify({ type: "url_verification", challenge: "C1" }),
+    }));
+    const event = await a.handleWebhook(req({
+      body: JSON.stringify({
+        header: { event_id: "missing-token", event_type: "im.message.receive_v1" },
+        event: { message: { chat_id: "c", message_type: "text", content: '{"text":"run"}' } },
+      }),
+    }));
+
+    expect(challenge.response?.status).toBe(403);
+    expect(event.response?.status).toBe(403);
+    expect(event.message).toBeUndefined();
   });
 });
 
@@ -399,6 +450,20 @@ describe("gateway · qq", () => {
       body: JSON.stringify({ op: 0, t: "GROUP_AT_MESSAGE_CREATE", d: { content: "hi" } }),
     }));
     expect(out.response?.status).toBe(403);
+  });
+
+  it("rejects unsigned event pushes", async () => {
+    const a = createQQAdapter({ appId: "123", secret: "supersecretseedvalue" }, {})!;
+    const body = JSON.stringify({ op: 0, t: "GROUP_AT_MESSAGE_CREATE", d: { content: "run agent" } });
+    const missingBoth = await a.handleWebhook(req({ body }));
+    const missingTimestamp = await a.handleWebhook(req({
+      headers: { "x-signature-ed25519": "00" },
+      body,
+    }));
+
+    expect(missingBoth.response?.status).toBe(403);
+    expect(missingTimestamp.response?.status).toBe(403);
+    expect(missingBoth.message).toBeUndefined();
   });
 
   it("normalizes a signed GROUP_AT_MESSAGE_CREATE", async () => {

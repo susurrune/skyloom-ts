@@ -1,6 +1,6 @@
 {
   "name": "skyloom",
-  "version": "1.26.0",
+  "version": "1.27.0",
   "description": "天空织机 Skyloom — 6 weather-themed AI agents: Fog, Rain, Frost, Snow, Dew, Fair",
   "preferGlobal": true,
   "type": "commonjs",
@@ -39,8 +39,7 @@
     "type-check": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",
     "pretest": "npm run type-check",
-    "setup": "node scripts/install.js",
-    "postinstall": "node scripts/link.js"
+    "setup": "node scripts/install.js"
   },
   "keywords": [
     "multi-agent",

@@ -6,7 +6,7 @@
  * limits, and dangerous command detection BEFORE execution.
  */
 
-import { execSync } from "child_process";
+import { exec, spawn, type ChildProcess, type ExecException } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -75,11 +75,28 @@ export interface SandboxResult {
   checkFailed?: string;
 }
 
-export function runInSandbox(command: string, opts?: {
+function stopProcessTree(child: ChildProcess): void {
+  if (!child.pid) return;
+  if (process.platform === "win32") {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true,
+      }).unref();
+    } catch { /* process may already have exited */ }
+    return;
+  }
+  try { process.kill(-child.pid, "SIGTERM"); } catch {
+    try { child.kill("SIGTERM"); } catch { /* process may already have exited */ }
+  }
+}
+
+export async function runInSandbox(command: string, opts?: {
   timeoutMs?: number;
   cwd?: string;
   env?: Record<string, string>;
-}): SandboxResult {
+  signal?: AbortSignal;
+}): Promise<SandboxResult> {
   // Pre-flight
   const check = preflightCheck(command);
   if (check) {
@@ -90,36 +107,56 @@ export function runInSandbox(command: string, opts?: {
   const timeout = Math.min(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS, HARD_TIMEOUT_MS);
   const t0 = Date.now();
 
-  try {
-    // For safe commands, run in-place without sandbox overhead
-    const firstWord = command.trim().split(/\s+/)[0].toLowerCase();
-    if (SAFE_COMMANDS.has(firstWord)) {
-      const result = execSync(command, { encoding: "utf-8", timeout, maxBuffer: MAX_OUTPUT_BYTES, cwd: opts?.cwd || dir, env: { ...process.env, ...(opts?.env || {}) } });
+  const firstWord = command.trim().split(/\s+/)[0].toLowerCase();
+  const safe = SAFE_COMMANDS.has(firstWord);
+  const cwd = safe ? (opts?.cwd || dir) : dir;
+  const env = safe
+    ? { ...process.env, ...(opts?.env || {}) }
+    : { ...process.env, ...(opts?.env || {}), TMPDIR: dir, TEMP: dir };
+
+  return await new Promise<SandboxResult>((resolve) => {
+    let child: ChildProcess;
+    const onAbort = () => stopProcessTree(child);
+    try {
+      child = exec(command, {
+        encoding: "utf8",
+        timeout,
+        maxBuffer: MAX_OUTPUT_BYTES,
+        cwd,
+        env,
+        windowsHide: true,
+        signal: opts?.signal,
+      }, (error: ExecException | null, stdout: string, stderr: string) => {
+        opts?.signal?.removeEventListener("abort", onAbort);
+        const durationMs = Date.now() - t0;
+        const killed = Boolean(opts?.signal?.aborted || error?.killed || error?.signal || durationMs >= timeout);
+        cleanup(dir);
+        resolve({
+          success: !error,
+          stdout: stdout.slice(0, MAX_OUTPUT_BYTES),
+          stderr: (stderr || error?.message || "").slice(0, MAX_OUTPUT_BYTES),
+          exitCode: error ? (typeof error.code === "number" ? error.code : child.exitCode ?? -1) : 0,
+          killed,
+          durationMs,
+          sandboxDir: dir,
+        });
+      });
+      if (opts?.signal?.aborted) onAbort();
+      else opts?.signal?.addEventListener("abort", onAbort, { once: true });
+    } catch (error) {
       cleanup(dir);
-      return { success: true, stdout: result.slice(0, MAX_OUTPUT_BYTES), stderr: "", exitCode: 0, killed: false, durationMs: Date.now() - t0, sandboxDir: dir };
+      const message = error instanceof Error ? error.message : String(error);
+      resolve({
+        success: false,
+        stdout: "",
+        stderr: message.slice(0, MAX_OUTPUT_BYTES),
+        exitCode: -1,
+        killed: Boolean(opts?.signal?.aborted),
+        durationMs: Date.now() - t0,
+        sandboxDir: dir,
+      });
     }
-
-    // Dangerous command — run in sandbox with isolation
-    const result = execSync(command, {
-      encoding: "utf-8",
-      timeout,
-      maxBuffer: MAX_OUTPUT_BYTES,
-      cwd: dir,                    // isolate to temp dir
-      env: { ...process.env, ...(opts?.env || {}), TMPDIR: dir, TEMP: dir },
-      windowsHide: true,
-    });
-
-    cleanup(dir);
-    return { success: true, stdout: result.slice(0, MAX_OUTPUT_BYTES), stderr: "", exitCode: 0, killed: false, durationMs: Date.now() - t0, sandboxDir: dir };
-
-  } catch (e: any) {
-    const durationMs = Date.now() - t0;
-    const killed = e.killed || e.signal !== undefined || durationMs >= timeout;
-    const stdout = (e.stdout || "").slice(0, MAX_OUTPUT_BYTES);
-    const stderr = (e.stderr || e.message || "").slice(0, MAX_OUTPUT_BYTES);
-    cleanup(dir);
-    return { success: false, stdout, stderr, exitCode: e.status || -1, killed, durationMs, sandboxDir: dir };
-  }
+  });
 }
 
 /* ═══════════════════════════════════════

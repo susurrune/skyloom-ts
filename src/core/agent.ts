@@ -719,14 +719,16 @@ export class BaseAgent {
 
   async chat(
     message: string,
-    onStatus?: ((status: string) => void) | null
+    onStatus?: ((status: string) => void) | null,
+    signal?: AbortSignal,
   ): Promise<string> {
-    return this.sessionController.withTurn(() => this.chatImpl(message, onStatus));
+    return this.sessionController.withTurn(() => this.chatImpl(message, onStatus, signal));
   }
 
   protected async chatImpl(
     message: string,
-    onStatus?: ((status: string) => void) | null
+    onStatus?: ((status: string) => void) | null,
+    signal?: AbortSignal,
   ): Promise<string> {
     this.autoActivateSkills(message);
     await this.setState(AgentState.THINKING);
@@ -738,7 +740,7 @@ export class BaseAgent {
 
     try {
       if (onStatus) onStatus('thinking...');
-      const response = await this.llmLoop({ onStatus });
+      const response = await this.llmLoop({ onStatus, signal });
       let content = response?.content || '(no response)';
       // Apply output filter for sensitive info
       try { const { filterOutput } = require('./filter'); const fr = filterOutput(content); if (fr.redacted) content = fr.clean; } catch {}
@@ -1173,8 +1175,13 @@ export class BaseAgent {
     return true;
   }
 
-  async requestHelp(targetAgent: string, description: string, timeout: number = 60): Promise<string> {
-    return this.delegationCoordinator.requestHelp(targetAgent, description, timeout);
+  async requestHelp(
+    targetAgent: string,
+    description: string,
+    timeout: number = 60,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    return this.delegationCoordinator.requestHelp(targetAgent, description, timeout, signal);
   }
 
   private get delegationCoordinator(): DelegationCoordinator {
@@ -1182,7 +1189,7 @@ export class BaseAgent {
       this._delegationCoordinator = new DelegationCoordinator({
         agentName: () => this.name,
         bus: this.bus,
-        executeTask: (task) => this.executeTask(task),
+        executeTask: (task, signal) => this.executeTask(task, undefined, signal),
       });
     }
     return this._delegationCoordinator;

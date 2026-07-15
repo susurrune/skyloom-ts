@@ -605,18 +605,55 @@ export function clientMain(): void {
     send(last.failed ? last : undefined);
   }
 
-  function closeSessions() {
-    const panel = $('#sessions-panel');
-    if (!panel) return;
-    panel.classList.remove('show');
-    $('#sessions-btn').setAttribute('aria-expanded', 'false');
+  let dialogOpener: any = null;
+
+  function rememberDialogOpener(opener?: any) {
+    dialogOpener = opener || D.activeElement;
   }
 
-  function closeHealth() {
+  function restoreDialogFocus() {
+    const opener = dialogOpener;
+    dialogOpener = null;
+    if (opener && typeof opener.focus === 'function' && D.contains(opener)) opener.focus();
+  }
+
+  function isEditableTarget(target: any): boolean {
+    if (!target || target.nodeType !== 1) return false;
+    const tag = String(target.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable;
+  }
+
+  function trapDialogFocus(e: any): boolean {
+    if (e.key !== 'Tab') return false;
+    const panel = D.querySelector('[role="dialog"].show');
+    if (!panel) return false;
+    const focusable = [...panel.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+      .filter((node: any) => !node.hidden && node.getAttribute('aria-hidden') !== 'true');
+    if (!focusable.length) return false;
+    const first: any = focusable[0];
+    const last: any = focusable[focusable.length - 1];
+    if (e.shiftKey && D.activeElement === first) { e.preventDefault(); last.focus(); return true; }
+    if (!e.shiftKey && D.activeElement === last) { e.preventDefault(); first.focus(); return true; }
+    if (!panel.contains(D.activeElement)) { e.preventDefault(); first.focus(); return true; }
+    return false;
+  }
+
+  function closeSessions(restore = true) {
+    const panel = $('#sessions-panel');
+    if (!panel) return;
+    const wasOpen = panel.classList.contains('show');
+    panel.classList.remove('show');
+    $('#sessions-btn').setAttribute('aria-expanded', 'false');
+    if (wasOpen && restore) restoreDialogFocus();
+  }
+
+  function closeHealth(restore = true) {
     const panel = $('#health-panel');
     if (!panel) return;
+    const wasOpen = panel.classList.contains('show');
     panel.classList.remove('show');
     $('#health-btn').setAttribute('aria-expanded', 'false');
+    if (wasOpen && restore) restoreDialogFocus();
   }
 
   function renderHealth(data: any) {
@@ -656,9 +693,11 @@ export function clientMain(): void {
   async function openHealth() {
     const panel = $('#health-panel');
     if (panel.classList.contains('show')) { closeHealth(); return; }
-    closeSessions();
-    closeSettings();
+    const opener = D.activeElement;
+    closeSessions(false);
+    closeSettings(false);
     $('#keys-modal').classList.remove('show');
+    rememberDialogOpener(opener);
     panel.classList.add('show');
     $('#health-btn').setAttribute('aria-expanded', 'true');
     $('#health-loading').hidden = false;
@@ -683,12 +722,14 @@ export function clientMain(): void {
   }
 
   /* ── workshop settings ── */
-  function closeSettings() {
+  function closeSettings(restore = true) {
     const panel = $('#settings-panel');
     if (!panel) return;
+    const wasOpen = panel.classList.contains('show');
     panel.classList.remove('show');
     $('#settings-btn').setAttribute('aria-expanded', 'false');
     clearKeyProvider = null;
+    if (wasOpen && restore) restoreDialogFocus();
   }
 
   function setSelectValue(select: any, value: string, label?: string) {
@@ -794,9 +835,11 @@ export function clientMain(): void {
   async function openSettings() {
     const panel = $('#settings-panel');
     if (panel.classList.contains('show')) { closeSettings(); return; }
-    closeSessions();
-    closeHealth();
+    const opener = D.activeElement;
+    closeSessions(false);
+    closeHealth(false);
     $('#keys-modal').classList.remove('show');
+    rememberDialogOpener(opener);
     $('#settings-sheet').scrollTop = 0;
     panel.classList.add('show');
     $('#settings-btn').setAttribute('aria-expanded', 'true');
@@ -952,12 +995,14 @@ export function clientMain(): void {
   async function openSessions(refresh?: boolean) {
     const panel = $('#sessions-panel');
     if (panel.classList.contains('show') && !refresh) { closeSessions(); return; }
-    closeSettings();
-    closeHealth();
+    const opener = D.activeElement;
+    closeSettings(false);
+    closeHealth(false);
     if (streaming || resetting || syncing || sessionsBusy) {
       toast(streaming ? '生成中，先停止再切换会话' : '正在同步会话，请稍候');
       return;
     }
+    rememberDialogOpener(opener);
     panel.classList.add('show');
     $('#sessions-btn').setAttribute('aria-expanded', 'true');
     $('#sessions-list').innerHTML = '<p class="sessions-empty">正在翻阅会话…</p>';
@@ -1208,6 +1253,7 @@ export function clientMain(): void {
     });
 
     D.addEventListener('keydown', (e: any) => {
+      if (trapDialogFocus(e)) return;
       if (e.key === 'Escape') {
         if (streaming) { stop(); return; }
         closeSessions();
@@ -1216,7 +1262,7 @@ export function clientMain(): void {
         $('#keys-modal').classList.remove('show');
         return;
       }
-      const typing = D.activeElement && D.activeElement.tagName === 'TEXTAREA';
+      const typing = isEditableTarget(D.activeElement);
       // e.code (physical key) instead of e.key: on macOS Option+digit produces
       // special characters (¡™£…), and layouts vary — Digit1..6 does not.
       const digit = e.code && /^Digit[1-6]$/.test(e.code) ? Number(e.code.slice(5)) : 0;

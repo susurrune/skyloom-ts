@@ -1102,7 +1102,11 @@ export class LoomUI {
     const B = (s: string) => faint(s);
 
     if (cols < 52 || rows < 11) {
-      const small = [padAnsi(chalk.yellow(" 窗口太小 · 请放大终端 (≥52×11) "), cols)];
+      const small = [
+        padAnsi(chalk.yellow(" 窗口太小 · 请放大终端 "), cols),
+        padAnsi(chalk.dim(" 建议尺寸 ≥52×11 "), cols),
+        padAnsi(chalk.dim(" Ctrl-C 退出 · 或运行 sky chat --classic "), cols),
+      ].slice(0, Math.max(1, rows));
       this.screen.flush(small, null);
       return small;
     }

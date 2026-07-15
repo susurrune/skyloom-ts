@@ -1,5 +1,5 @@
 import { createServer, type Server } from "http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { startWebCommand } from "../src/cli/web_runtime";
 import { startWebServer } from "../src/web/server";
 
@@ -22,6 +22,7 @@ async function listenPlainServer(): Promise<Server> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
     server.close(() => resolve());
     server.closeIdleConnections?.();
@@ -39,6 +40,18 @@ describe("sky web command", () => {
     expect(result).toBe("already-running");
     expect(output.join("")).toContain("Skyloom 已在运行");
     expect(output.join("")).toContain(String(portOf(existing)));
+  });
+
+  it("reuses an authenticated remotely-bound Skyloom server", async () => {
+    const token = "remote-access-token-with-strong-length";
+    const existing = await startWebServer(0, undefined, { host: "0.0.0.0", token });
+    servers.push(existing);
+    vi.stubEnv("SKYLOOM_WEB_HOST", "0.0.0.0");
+    vi.stubEnv("SKYLOOM_WEB_TOKEN", token);
+
+    const result = await startWebCommand(portOf(existing), () => undefined);
+
+    expect(result).toBe("already-running");
   });
 
   it("reports an actionable error when another program owns the port", async () => {

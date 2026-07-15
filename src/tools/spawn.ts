@@ -62,7 +62,7 @@ export function createSpawnAgentTool(opts: {
     ],
     // Long-running by nature (full nested agent loop); give it generous headroom.
     timeout: 600000,
-    handler: async (params) => {
+    handler: async (params, context) => {
       const agentType = String(params.agent_type || '').trim();
       const task = String(params.task || '').trim();
       if (!agentType) return '[spawn_agent error] agent_type is required.';
@@ -83,6 +83,7 @@ export function createSpawnAgentTool(opts: {
         bus: opts.bus,
         baseToolRegistry: opts.baseToolRegistry,
         baseSkillRegistry: opts.baseSkillRegistry,
+        signal: context?.signal,
       });
 
       const header = `[subagent ${def.name} 完成]`;

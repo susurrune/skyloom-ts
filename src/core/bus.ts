@@ -16,6 +16,7 @@ export enum EventType {
   TASK_FEEDBACK = 'task_feedback',
   AGENT_REQUEST = 'agent_request',
   AGENT_RESPONSE = 'agent_response',
+  AGENT_CANCEL = 'agent_cancel',
   SYSTEM_EVENT = 'system_event',
   STATE_CHANGE = 'state_change', // agent state changes
   LLM_CALL = 'llm_call', // LLM request made

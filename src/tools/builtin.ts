@@ -243,7 +243,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'timeout', type: 'number', description: 'Timeout in milliseconds (default: 30000). Ignored when background=true.', required: false },
       { name: 'background', type: 'boolean', description: 'Run detached in the background and return a job id instead of blocking (default false)', required: false },
     ],
-    handler: async (params) => {
+    handler: async (params, context) => {
       const cmd = params.command as string;
       const background = params.background === true || params.background === 'true';
       if (background) {
@@ -257,7 +257,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       const timeout = (params.timeout as number) || 30000;
       try {
         const { runInSandbox, formatSandboxResult } = require('../core/sandbox');
-        const result = runInSandbox(cmd, { timeoutMs: timeout });
+        const result = await runInSandbox(cmd, { timeoutMs: timeout, signal: context.signal });
         return formatSandboxResult(result);
       } catch (e: any) { return `Error: ${e.message || e}`; }
     },

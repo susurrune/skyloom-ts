@@ -87,6 +87,13 @@ interface JsonRpcMessage {
   };
 }
 
+function cancellationError(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 /**
  * Client for connecting to a single MCP server.
  *
@@ -578,7 +585,8 @@ export class MCPClient {
   private async requestStdio(
     method: string,
     params: Record<string, any>,
-    timeoutMs: number = 10000
+    timeoutMs: number = 10000,
+    signal?: AbortSignal,
   ): Promise<JsonRpcMessage | null> {
     if (!this.process?.stdin) {
       return null;
@@ -587,7 +595,20 @@ export class MCPClient {
     const reqId = this.newId();
 
     return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const pending = this.pending.get(reqId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(reqId);
+        void this.sendJson({
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { requestId: reqId, reason: "caller cancelled" },
+        }).catch(() => undefined);
+        reject(cancellationError(signal?.reason));
+      };
       const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
         this.pending.delete(reqId);
         this.log?.warn("mcp_stdio_timeout", {
           server: this.config.name,
@@ -597,8 +618,12 @@ export class MCPClient {
       }, timeoutMs);
 
       this.pending.set(reqId, {
-        resolve,
+        resolve: (value) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
         reject: (err) => {
+          signal?.removeEventListener("abort", onAbort);
           reject(err);
         },
         timer,
@@ -610,10 +635,13 @@ export class MCPClient {
         params,
         id: reqId,
       }).catch((err) => {
+        signal?.removeEventListener("abort", onAbort);
         clearTimeout(timer);
         this.pending.delete(reqId);
         reject(err);
       });
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -623,12 +651,26 @@ export class MCPClient {
   private async requestSSE(
     method: string,
     params: Record<string, any>,
-    timeoutMs: number = 10000
+    timeoutMs: number = 10000,
+    signal?: AbortSignal,
   ): Promise<JsonRpcMessage | null> {
     const reqId = this.newId();
 
     return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const pending = this.pending.get(reqId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(reqId);
+        void this.postJson({
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { requestId: reqId, reason: "caller cancelled" },
+        }).catch(() => undefined);
+        reject(cancellationError(signal?.reason));
+      };
       const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
         this.pending.delete(reqId);
         this.log?.warn("mcp_sse_timeout", {
           server: this.config.name,
@@ -638,8 +680,12 @@ export class MCPClient {
       }, timeoutMs);
 
       this.pending.set(reqId, {
-        resolve,
+        resolve: (value) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
         reject: (err) => {
+          signal?.removeEventListener("abort", onAbort);
           reject(err);
         },
         timer,
@@ -650,11 +696,14 @@ export class MCPClient {
         method,
         params,
         id: reqId,
-      }).catch((err) => {
+      }, signal).catch((err) => {
+        signal?.removeEventListener("abort", onAbort);
         clearTimeout(timer);
         this.pending.delete(reqId);
         reject(err);
       });
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -685,7 +734,7 @@ export class MCPClient {
    * arrives asynchronously over the event stream (see handleSSEEvent), so
    * this only confirms the message was accepted by the server.
    */
-  private async postJson(data: JsonRpcMessage): Promise<void> {
+  private async postJson(data: JsonRpcMessage, signal?: AbortSignal): Promise<void> {
     if (!this.sseMessageUrl) {
       throw new Error("SSE message URL not set");
     }
@@ -696,6 +745,7 @@ export class MCPClient {
         ...(this.config.env || {}),
       },
       timeout: 10000,
+      signal,
     });
   }
 
@@ -715,7 +765,8 @@ export class MCPClient {
    */
   async callTool(
     name: string,
-    args: Record<string, any>
+    args: Record<string, any>,
+    signal?: AbortSignal,
   ): Promise<string> {
     let response: JsonRpcMessage | null = null;
 
@@ -723,12 +774,12 @@ export class MCPClient {
       response = await this.requestStdio("tools/call", {
         name,
         arguments: args,
-      });
+      }, 10000, signal);
     } else if (this.config.url) {
       response = await this.requestSSE("tools/call", {
         name,
         arguments: args,
-      });
+      }, 10000, signal);
     }
 
     if (response && response.result) {
@@ -989,13 +1040,13 @@ export class MCPManager {
   private makeMCPHandler(
     serverName: string,
     toolName: string
-  ): (kwargs: Record<string, any>) => Promise<string> {
-    return async (kwargs: Record<string, any>) => {
+  ): (kwargs: Record<string, any>, context: { signal: AbortSignal }) => Promise<string> {
+    return async (kwargs: Record<string, any>, context: { signal: AbortSignal }) => {
       const client = this.clients.get(serverName);
       if (!client) {
         return `Error: MCP server '${serverName}' not connected.`;
       }
-      return client.callTool(toolName, kwargs);
+      return client.callTool(toolName, kwargs, context.signal);
     };
   }
 

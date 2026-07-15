@@ -7,6 +7,14 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/**/*.test.ts'],
     setupFiles: ['tests/setup.ts'],
+    coverage: {
+      thresholds: {
+        statements: 60,
+        branches: 70,
+        functions: 75,
+        lines: 60,
+      },
+    },
   },
   resolve: {
     alias: {

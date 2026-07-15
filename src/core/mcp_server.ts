@@ -14,7 +14,11 @@ import * as readline from 'readline';
 import { createSystemContext, orchestrateTask } from './factory';
 
 const MCP_VERSION = '2025-03-26';
-const SERVER_INFO = { name: 'skyloom', version: '1.4.0' };
+const PACKAGE_VERSION = (() => {
+  try { return require('../../package.json').version as string; }
+  catch { return '0.0.0'; }
+})();
+const SERVER_INFO = { name: 'skyloom', version: PACKAGE_VERSION };
 
 const TOOL_DEFS = [
   {

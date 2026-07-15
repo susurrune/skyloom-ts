@@ -7,8 +7,10 @@ import { AddressInfo } from "net";
 import { MCPManager, loadPersistedServers } from "../src/core/mcp";
 import { ToolRegistry } from "../src/core/tool";
 
-function startMockSSEServer(): Promise<{ url: string; close: () => Promise<void> }> {
+function startMockSSEServer(): Promise<{ url: string; cancelled: Promise<number>; close: () => Promise<void> }> {
   let sseRes: http.ServerResponse | null = null;
+  let markCancelled!: (requestId: number) => void;
+  const cancelled = new Promise<number>((resolve) => { markCancelled = resolve; });
   const server = http.createServer((req, res) => {
     if (req.method === "GET") {
       res.writeHead(200, {
@@ -27,7 +29,12 @@ function startMockSSEServer(): Promise<{ url: string; close: () => Promise<void>
       req.on("end", () => {
         res.writeHead(202).end();
         const msg = JSON.parse(body);
+        if (msg.method === "notifications/cancelled") {
+          markCancelled(Number(msg.params?.requestId));
+          return;
+        }
         if (msg.id === undefined || msg.id === null) return;
+        if (msg.method === "tools/call") return;
         const result = msg.method === "initialize"
           ? { protocolVersion: "2025-03-26", capabilities: {} }
           : msg.method === "tools/list"
@@ -46,6 +53,7 @@ function startMockSSEServer(): Promise<{ url: string; close: () => Promise<void>
       const port = (server.address() as AddressInfo).port;
       resolve({
         url: `http://127.0.0.1:${port}/sse`,
+        cancelled,
         close: async () => {
           sseRes?.end();
           await new Promise<void>((done) => server.close(() => done()));
@@ -121,6 +129,25 @@ describe("MCP runtime persistence", () => {
       expect(added).toContain("已接入 MCP server 'mock'");
       expect(manager.getHealthSnapshot().filter((server) => server.name === "mock")).toHaveLength(1);
       expect(loadPersistedServers()).toEqual([{ name: "mock", url: mock.url, enabled: true }]);
+    } finally {
+      await manager.closeAll();
+      await mock.close();
+    }
+  });
+
+  it("cancels an in-flight MCP request when the caller stops", async () => {
+    const mock = await startMockSSEServer();
+    const registry = new ToolRegistry();
+    const manager = new MCPManager(registry);
+    const controller = new AbortController();
+
+    try {
+      await manager.addServer({ name: "mock", url: mock.url, enabled: true });
+      const pending = registry.execute("mcp_mock_echo", { text: "wait" }, { signal: controller.signal });
+      controller.abort();
+
+      await expect(pending).resolves.toMatchObject({ success: false, error: expect.stringContaining("cancelled") });
+      await expect(mock.cancelled).resolves.toEqual(expect.any(Number));
     } finally {
       await manager.closeAll();
       await mock.close();

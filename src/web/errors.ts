@@ -16,6 +16,8 @@ export interface ApiErrorPayload {
   action: string;
 }
 
+export const PUBLIC_INTERNAL_ERROR_MESSAGE = "请求处理失败，内部详情已记录。";
+
 export class WebApiError extends Error {
   readonly status: number;
   readonly payload: ApiErrorPayload;
@@ -55,9 +57,8 @@ export function sendApiError(res: ServerResponse, error: WebApiError): void {
   sendJson(res, error.status, { error: error.payload });
 }
 
-export function sendUnknownError(res: ServerResponse, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
-  sendApiError(res, makeApiError(500, "web.internal_error", message, {
+export function sendUnknownError(res: ServerResponse): void {
+  sendApiError(res, makeApiError(500, "web.internal_error", PUBLIC_INTERNAL_ERROR_MESSAGE, {
     category: "internal",
     retryable: true,
     action: "稍后重试；如果持续失败，请打开健康中心或运行 sky doctor。",

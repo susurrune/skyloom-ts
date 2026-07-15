@@ -105,4 +105,16 @@ describe('enterprise orchestration run store', () => {
     const releaseAgain = runs.acquireLease('run-lock');
     releaseAgain();
   });
+
+  it('recovers a lease left behind by a crashed process', () => {
+    const runs = store();
+    runs.create('ship', [{ id: '1', description: 'a', assignedTo: 'rain' }], 'run-stale-lock');
+    const lease = path.join(runs.rootDir, 'run-stale-lock', 'lease');
+    fs.writeFileSync(lease, JSON.stringify({ pid: 2_147_483_647, acquiredAt: new Date(0).toISOString() }));
+
+    const release = runs.acquireLease('run-stale-lock');
+
+    expect(JSON.parse(fs.readFileSync(lease, 'utf8')).pid).toBe(process.pid);
+    release();
+  });
 });

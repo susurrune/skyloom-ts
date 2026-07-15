@@ -227,8 +227,9 @@ describe("LoomUI frame composition", () => {
   it("never paints beyond the physical width of a tiny terminal", () => {
     const ui = makeUI(30, 8);
     const frame = ui.paint();
-    expect(frame).toHaveLength(1);
-    expect(visualWidth(frame[0])).toBe(30);
+    expect(frame).toHaveLength(3);
+    expect(frame.every((line) => visualWidth(line) === 30)).toBe(true);
+    expect(strip(frame.join('\n'))).toContain('Ctrl-C');
   });
 
   it("shows operational context without overflowing a compact frame", () => {

@@ -123,7 +123,7 @@ describe("web · page", () => {
 
   it("ships the enterprise interaction surface", () => {
     // stop-generation, theme toggle, retry/export/new session, shortcuts, scroll pill, toasts
-    for (const marker of ["send-btn", "theme-btn", "settings-btn", "health-btn", "health-panel", "health-checks", "settings-panel", "setting-unified-model", "setting-workspace", "setting-provider-endpoint", "setting-clear-key", "setting-dark-mode", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
+    for (const marker of ["send-btn", "theme-btn", "settings-btn", "health-btn", "health-panel", "health-checks", "settings-panel", "setting-unified-model", "setting-workspace", "setting-provider-endpoint", "setting-clear-key", "setting-dark-mode", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage", "isEditableTarget", "trapDialogFocus"]) {
       expect(shipped, `missing: ${marker}`).toContain(marker);
     }
     // tool timeline + reasoning + markdown body classes exist in CSS
@@ -326,6 +326,10 @@ describe("web · server", () => {
 
     const status = await fetch(`http://127.0.0.1:${port}/api/status`);
     expect(status.status).toBe(200);
+    expect(status.headers.get("cache-control")).toBe("no-store");
+    expect(status.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(status.headers.get("x-frame-options")).toBe("DENY");
+    expect(status.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     const sj: any = await status.json();
     expect(sj).toMatchObject({
       version: expect.any(String),
@@ -476,6 +480,34 @@ describe("web · server", () => {
     }
   });
 
+  it("does not expose unexpected server error details to API clients", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const secret = "C:\\private\\workspace\\provider-key.txt";
+    const fakeContext = { workspacePath: process.cwd() } as Record<string, unknown>;
+    Object.defineProperty(fakeContext, "agentMap", {
+      get() { throw new Error(secret); },
+    });
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/status`);
+      const body = await response.text();
+      expect(response.status).toBe(500);
+      expect(body).not.toContain(secret);
+      expect(JSON.parse(body)).toMatchObject({
+        error: {
+          code: "web.internal_error",
+          category: "internal",
+          retryable: true,
+          action: expect.any(String),
+        },
+      });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("exposes durable run summaries, details and audit events", async () => {
     const { startWebServer } = await import("../src/web/server");
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "skyloom-web-runs-"));
@@ -616,6 +648,44 @@ describe("web · server", () => {
       expect(response.status).toBe(200);
       expect(response.headers.get("x-skyloom-session-id")).toBe("session-active");
       expect(await response.text()).toContain('"text":"hello"');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("does not expose provider error details in a failed chat stream", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const secret = "provider rejected sk-secret-value at C:\\private\\model.json";
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: { getActiveSession: () => "session-active" },
+      chatStream: vi.fn(async function* () {
+        throw new Error(secret);
+      }),
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", message: "hello" }),
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toContain('"code":"web.chat_failed"');
+      expect(body).not.toContain(secret);
     } finally {
       await closeServer(server);
     }

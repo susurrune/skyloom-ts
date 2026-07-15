@@ -115,7 +115,7 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
 
       // URL verification handshake.
       if (payload.type === 'url_verification') {
-        if (verificationToken && payload.token && payload.token !== verificationToken) {
+        if (verificationToken && payload.token !== verificationToken) {
           return { response: { status: 403, body: 'bad token' } };
         }
         return { response: { status: 200, contentType: 'application/json', body: JSON.stringify({ challenge: payload.challenge }) } };
@@ -123,7 +123,7 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
 
       // Verification token check (v2 puts it in header.token).
       const token = payload.header?.token ?? payload.token;
-      if (verificationToken && token && token !== verificationToken) {
+      if (verificationToken && token !== verificationToken) {
         return { response: { status: 403, body: 'bad token' } };
       }
 

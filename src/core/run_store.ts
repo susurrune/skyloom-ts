@@ -246,12 +246,20 @@ export class OrchestrationRunStore {
     const dir = this.runDir(runId);
     fs.mkdirSync(dir, { recursive: true });
     const lease = path.join(dir, 'lease');
-    let fd: number;
-    try {
-      fd = fs.openSync(lease, 'wx', 0o600);
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, acquiredAt: this.now().toISOString() }), 'utf8');
-    } catch (error) {
-      throw new RunStoreError('run.locked', `Run '${runId}' is already active: ${String(error)}`);
+    let fd!: number;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        fd = fs.openSync(lease, 'wx', 0o600);
+        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, acquiredAt: this.now().toISOString() }), 'utf8');
+        break;
+      } catch (error) {
+        const occupied = (error as NodeJS.ErrnoException).code === 'EEXIST';
+        if (attempt === 0 && occupied && this.isStaleLease(lease)) {
+          try { fs.unlinkSync(lease); } catch { /* another process won recovery */ }
+          continue;
+        }
+        throw new RunStoreError('run.locked', `Run '${runId}' is already active: ${String(error)}`);
+      }
     }
     let released = false;
     return () => {
@@ -260,6 +268,22 @@ export class OrchestrationRunStore {
       try { fs.closeSync(fd); } catch { /* already closed */ }
       try { fs.unlinkSync(lease); } catch { /* best effort */ }
     };
+  }
+
+  private isStaleLease(lease: string): boolean {
+    try {
+      const payload = JSON.parse(fs.readFileSync(lease, 'utf8')) as { pid?: unknown };
+      const pid = Number(payload.pid);
+      if (!Number.isInteger(pid) || pid <= 0) return true;
+      try {
+        process.kill(pid, 0);
+        return false;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ESRCH';
+      }
+    } catch {
+      return true;
+    }
   }
 
   private commit(run: OrchestrationRun, type: string, taskId: string | null = null, payload: Record<string, unknown> = {}): void {

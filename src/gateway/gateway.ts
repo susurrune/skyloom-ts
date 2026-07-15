@@ -18,6 +18,7 @@ import { createSystemContext } from '../core/factory';
 import { buildAdapters } from './registry';
 import { describeMedia, parseReply } from './types';
 import { isSendableSrc } from './helpers';
+import { assertFetchAllowed } from '../tools/guards';
 import { describeImages } from './vision';
 import type { ChannelAdapter, InboundMessage, RawRequest } from './types';
 import type { LoadedMedia } from './helpers';
@@ -54,7 +55,7 @@ function buildPrompt(msg: InboundMessage, canSendMedia: boolean, visionText?: st
   if (mediaDesc) parts.push(`(用户发送了媒体: ${mediaDesc})`);
   if (visionText) parts.push(`(图片内容识别: ${visionText})`);
   if (canSendMedia) {
-    parts.push('(若需回发图片或文件,在回复中用 Markdown 图片 ![说明](路径或URL) 或 [[file:路径或URL]] 表示,路径可为本地文件或 http(s) 链接。)');
+    parts.push('(若需回发图片或文件,在回复中用 Markdown 图片 ![说明](公网URL) 或 [[file:公网URL]] 表示；仅支持公开 http(s) 资源。)');
   }
   return parts.join('\n\n') || msg.text;
 }
@@ -161,6 +162,7 @@ async function deliverMedia(
       continue;
     }
     try {
+      await assertFetchAllowed(item.src);
       await adapter.sendMedia(msg.replyTo, item);
     } catch (e) {
       log.warn('gateway_send_media_failed', { channel: adapter.id, src: item.src, error: String(e) });

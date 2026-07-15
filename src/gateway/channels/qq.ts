@@ -86,7 +86,7 @@ export function createQQAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAdapte
       // Verify the event push signature.
       const sig = (req.headers['x-signature-ed25519'] as string) || '';
       const ts = (req.headers['x-signature-timestamp'] as string) || '';
-      if (sig && ts && !qqVerify(secret, ts, req.body, sig)) {
+      if (!sig || !ts || !qqVerify(secret, ts, req.body, sig)) {
         return { response: { status: 403, body: 'bad signature' } };
       }
 

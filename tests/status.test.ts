@@ -39,7 +39,7 @@ describe('runtime status snapshot', () => {
 
     const status = buildRuntimeStatus(context);
 
-    expect(status.version).toBe('1.26.0');
+    expect(status.version).toBe(require('../package.json').version);
     expect(status.workspace).toBe('D:\\workspace');
     expect(status.runtime.uptimeSeconds).toBeGreaterThanOrEqual(0);
     expect(status.agents.summary).toEqual({ total: 2, busy: 1, idle: 1 });

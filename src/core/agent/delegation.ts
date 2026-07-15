@@ -1,6 +1,13 @@
 import { Event, EventType, type MessageBus } from '../bus';
 import { Task, type TaskResult } from './task';
 
+function cancellationError(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  const error = new Error('Aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 interface PendingRequest {
   resolve: (value: string) => void;
   reject: (error: Error) => void;
@@ -9,17 +16,23 @@ interface PendingRequest {
 export interface DelegationCoordinatorDeps {
   agentName: () => string;
   bus: MessageBus;
-  executeTask: (task: Task) => Promise<TaskResult>;
+  executeTask: (task: Task, signal?: AbortSignal) => Promise<TaskResult>;
 }
 
 /** Owns cross-agent request correlation, timeout cleanup, and inbound task lifetime. */
 export class DelegationCoordinator {
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly backgroundTasks = new Set<Promise<void>>();
+  private readonly inboundControllers = new Map<string, AbortController>();
 
   constructor(private readonly deps: DelegationCoordinatorDeps) {}
 
-  async requestHelp(targetAgent: string, description: string, timeoutSeconds = 60): Promise<string> {
+  async requestHelp(
+    targetAgent: string,
+    description: string,
+    timeoutSeconds = 60,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const correlationId = Math.random().toString(36).slice(2, 14);
     const response = new Promise<string>((resolve, reject) => {
       this.pendingRequests.set(correlationId, { resolve, reject });
@@ -29,6 +42,20 @@ export class DelegationCoordinator {
       this.pendingRequests.delete(correlationId);
       pending?.reject(new Error(`Timeout after ${timeoutSeconds}s`));
     }, timeoutSeconds * 1000);
+    const onAbort = () => {
+      const pending = this.pendingRequests.get(correlationId);
+      if (!pending) return;
+      this.pendingRequests.delete(correlationId);
+      pending.reject(cancellationError(signal?.reason));
+      void this.deps.bus.publish(new Event(
+        EventType.AGENT_CANCEL,
+        this.deps.agentName(),
+        targetAgent,
+        { correlation_id: correlationId },
+      ));
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
       await this.deps.bus.publish(new Event(
@@ -42,6 +69,7 @@ export class DelegationCoordinator {
       return `[${targetAgent} did not respond within ${timeoutSeconds}s]`;
     } finally {
       clearTimeout(timeoutHandle);
+      signal?.removeEventListener('abort', onAbort);
       this.pendingRequests.delete(correlationId);
     }
   }
@@ -54,6 +82,11 @@ export class DelegationCoordinator {
     }
     if (event.type === EventType.AGENT_RESPONSE && event.target === agentName) {
       this.handleResponse(event);
+      return true;
+    }
+    if (event.type === EventType.AGENT_CANCEL && event.target === agentName) {
+      const correlationId = String(event.data?.correlation_id || '');
+      this.inboundControllers.get(correlationId)?.abort();
       return true;
     }
     return false;
@@ -81,12 +114,18 @@ export class DelegationCoordinator {
       description,
       assignedTo: this.deps.agentName(),
     });
+    const controller = new AbortController();
+    this.inboundControllers.set(correlationId, controller);
 
     try {
-      const result = await this.deps.executeTask(task);
+      const result = await this.deps.executeTask(task, controller.signal);
+      if (controller.signal.aborted) return;
       await this.publishResponse(source, correlationId, result.content, result.success);
     } catch (error) {
+      if (controller.signal.aborted) return;
       await this.publishResponse(source, correlationId, `[error] ${error}`, false);
+    } finally {
+      this.inboundControllers.delete(correlationId);
     }
   }
 
