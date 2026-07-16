@@ -13,6 +13,7 @@ export function clientMain(): void {
   const BOOT = window.__SKYLOOM__;
   const AGENTS: any[] = BOOT.agents;
   const store = window.localStorage;
+  const tabStore = window.sessionStorage;
   const D = document;
 
   /* ── state ── */
@@ -111,11 +112,11 @@ export function clientMain(): void {
     D.documentElement.style.setProperty('--pigment-faint', c + '14');
   }
 
-  /* ── history (per-agent and per-session, localStorage) ── */
+  /* ── history (persistent content, tab-scoped active session) ── */
   const DKEY = (a: string) => 'skyweb.draft.' + a;
   const SKEY = (a: string) => 'skyweb.session.' + a;
   const LEGACY_HKEY = (a: string) => 'skyweb.h.' + a;
-  const HKEY = (a: string) => 'skyweb.h.' + a + '.' + (store.getItem(SKEY(a)) || 'pending');
+  const HKEY = (a: string) => 'skyweb.h.' + a + '.' + (tabStore.getItem(SKEY(a)) || 'pending');
   function loadHist(a: string): any[] {
     try {
       const scoped = store.getItem(HKEY(a));
@@ -127,7 +128,7 @@ export function clientMain(): void {
       if (legacy === null) return [];
       const parsed = JSON.parse(legacy);
       if (!Array.isArray(parsed)) return [];
-      if (store.getItem(SKEY(a))) {
+      if (tabStore.getItem(SKEY(a))) {
         store.setItem(HKEY(a), legacy);
         store.removeItem(LEGACY_HKEY(a));
       }
@@ -137,7 +138,7 @@ export function clientMain(): void {
   function saveHist(a: string, h: any[]) {
     try {
       store.setItem(HKEY(a), JSON.stringify(h.slice(-120)));
-      if (store.getItem(SKEY(a))) store.removeItem(LEGACY_HKEY(a));
+      if (tabStore.getItem(SKEY(a))) store.removeItem(LEGACY_HKEY(a));
     } catch { /* quota */ }
   }
   function pushHist(entry: any) {
@@ -155,13 +156,13 @@ export function clientMain(): void {
     }
   }
   function clearCachedSession(agentName: string) {
-    store.removeItem(SKEY(agentName));
+    tabStore.removeItem(SKEY(agentName));
     store.removeItem('skyweb.h.' + agentName + '.pending');
   }
   function bindResponseSession(response: any, agentName: string): string | null {
     const sessionId = String(response.headers.get('X-Skyloom-Session-Id') || '').trim();
     if (!sessionId) return null;
-    store.setItem(SKEY(agentName), sessionId);
+    tabStore.setItem(SKEY(agentName), sessionId);
     return sessionId;
   }
   function histSignature(h: any[]): string {
@@ -183,7 +184,10 @@ export function clientMain(): void {
     syncing = true;
     updateRetryButton();
     try {
-      const response = await fetch('/api/history?agent=' + encodeURIComponent(agent.name));
+      const sessionId = tabStore.getItem(SKEY(agent.name));
+      const historyUrl = '/api/history?agent=' + encodeURIComponent(agent.name) +
+        (sessionId ? '&sessionId=' + encodeURIComponent(sessionId) : '');
+      const response = await fetch(historyUrl);
       if (!response.ok) throw new Error(await readApiError(response, '历史同步失败'));
       const data: any = await response.json();
       const source = Array.isArray(data.messages) ? data.messages : [];
@@ -196,7 +200,7 @@ export function clientMain(): void {
           t: message.content,
           ts: now - (source.length - index) * 1000,
         }));
-      if (typeof data.sessionId === 'string') store.setItem(SKEY(agent.name), data.sessionId);
+      if (typeof data.sessionId === 'string') tabStore.setItem(SKEY(agent.name), data.sessionId);
       const changed = histSignature(loadHist(agent.name)) !== histSignature(remote);
       if (changed) saveHist(agent.name, remote);
       if (changed && seq === syncSeq && cur.name === agent.name) renderHistory();
@@ -233,7 +237,7 @@ export function clientMain(): void {
   function applyAgent(a: any, opts?: any) {
     closeSessions();
     cur = a;
-    store.setItem('skyweb.agent', a.name);
+    tabStore.setItem('skyweb.agent', a.name);
     D.documentElement.setAttribute('data-agent', a.name);
     paintPigment();
     buildParticles(a.particles);
@@ -401,7 +405,7 @@ export function clientMain(): void {
   /* ── streaming chat ── */
   function chatRequestBody(text: string, useCachedSession = true): string {
     const body: any = { message: text, agent: cur.name };
-    const sessionId = useCachedSession ? store.getItem(SKEY(cur.name)) : null;
+    const sessionId = useCachedSession ? tabStore.getItem(SKEY(cur.name)) : null;
     if (sessionId) body.sessionId = sessionId;
     return JSON.stringify(body);
   }
@@ -950,7 +954,8 @@ export function clientMain(): void {
   function renderSessions(data: any) {
     const list = $('#sessions-list');
     list.innerHTML = '';
-    panelActiveSessionId = typeof data.activeSessionId === 'string' ? data.activeSessionId : null;
+    panelActiveSessionId = tabStore.getItem(SKEY(cur.name)) ||
+      (typeof data.activeSessionId === 'string' ? data.activeSessionId : null);
     const sessions = Array.isArray(data.sessions) ? data.sessions : [];
     if (!sessions.length) {
       list.appendChild(el('p', 'sessions-empty', '尚无历史会话'));
@@ -1030,14 +1035,7 @@ export function clientMain(): void {
     const agent = cur;
     setSessionsBusy(true);
     try {
-      const response = await fetch('/api/session/load', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent: agent.name, sessionId }),
-      });
-      if (!response.ok) throw new Error(await readApiError(response, '无法恢复该会话'));
-      const data: any = await response.json();
-      if (typeof data.sessionId === 'string') store.setItem(SKEY(agent.name), data.sessionId);
+      tabStore.setItem(SKEY(agent.name), sessionId);
       saveHist(agent.name, []);
       if (isCurrentAgent(agent)) {
         closeSessions();
@@ -1062,12 +1060,13 @@ export function clientMain(): void {
       const response = await fetch('/api/session', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent: agent.name, sessionId }),
+        body: JSON.stringify({ agent: agent.name, sessionId, replacement: deletingActive }),
       });
       if (!response.ok) throw new Error(await readApiError(response, '无法删除该会话'));
       const data: any = await response.json();
-      if (typeof data.sessionId === 'string') store.setItem(SKEY(agent.name), data.sessionId);
       if (deletingActive) {
+        if (typeof data.sessionId === 'string') tabStore.setItem(SKEY(agent.name), data.sessionId);
+        else tabStore.removeItem(SKEY(agent.name));
         saveHist(agent.name, []);
         if (isCurrentAgent(agent)) await syncHistory(agent);
       }
@@ -1113,7 +1112,7 @@ export function clientMain(): void {
       });
       if (!response.ok) throw new Error(await readApiError(response, '无法开始新会话'));
       const data: any = await response.json();
-      if (typeof data.sessionId === 'string') store.setItem(SKEY(cur.name), data.sessionId);
+      if (typeof data.sessionId === 'string') tabStore.setItem(SKEY(cur.name), data.sessionId);
       saveHist(cur.name, []);
       store.removeItem(DKEY(cur.name));
       $('#chat-input').value = '';
@@ -1288,7 +1287,7 @@ export function clientMain(): void {
   const savedTheme = store.getItem('skyweb.theme') ||
     (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   setTheme(savedTheme);
-  const savedAgent = AGENTS.find((a: any) => a.name === store.getItem('skyweb.agent')) || AGENTS[0];
+  const savedAgent = AGENTS.find((a: any) => a.name === tabStore.getItem('skyweb.agent')) || AGENTS[0];
   applyAgent(savedAgent);
   pollStatus();
   setInterval(pollStatus, 25000);

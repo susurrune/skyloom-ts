@@ -13,6 +13,7 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http';
+import type { Server } from 'http';
 import { getLogger } from '../core/logger';
 import { createSystemContext } from '../core/factory';
 import { buildAdapters } from './registry';
@@ -20,11 +21,13 @@ import { describeMedia, parseReply } from './types';
 import { isSendableSrc } from './helpers';
 import { assertFetchAllowed } from '../tools/guards';
 import { describeImages } from './vision';
+import { GatewayDispatchQueue } from './dispatch_queue';
 import type { ChannelAdapter, InboundMessage, RawRequest } from './types';
 import type { LoadedMedia } from './helpers';
 
 const log = getLogger('gateway');
 const PUBLIC_AGENT_ERROR_MESSAGE = '抱歉，服务暂时无法完成这次请求，请稍后重试。';
+const PUBLIC_BUSY_MESSAGE = '当前消息较多，请稍后再试。';
 const MAX_WEBHOOK_BODY_BYTES = 2 * 1024 * 1024;
 
 /** Collect the full request body. */
@@ -174,6 +177,19 @@ async function deliverMedia(
 export interface GatewayOptions {
   port?: number;
   host?: string;
+  maxActiveDispatches?: number;
+  maxPendingDispatches?: number;
+  maxPendingPerConversation?: number;
+}
+
+export interface GatewayRuntime {
+  server: Server;
+  close: () => Promise<void>;
+}
+
+function positiveInt(explicit: number | undefined, raw: string | undefined, fallback: number): number {
+  const value = explicit ?? Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 export function resolveGatewayPort(
@@ -184,9 +200,13 @@ export function resolveGatewayPort(
   return Number.isInteger(candidate) && candidate > 0 && candidate <= 65535 ? candidate : 8848;
 }
 
-export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
-  const ctx = createSystemContext();
-  const adapters = buildAdapters((ctx.config as any).channels || {}, process.env);
+export async function startGateway(
+  opts: GatewayOptions = {},
+  contextOverride?: ReturnType<typeof createSystemContext>,
+  adaptersOverride?: Map<string, ChannelAdapter>,
+): Promise<GatewayRuntime | undefined> {
+  const ctx = contextOverride ?? createSystemContext();
+  const adapters = adaptersOverride ?? buildAdapters((ctx.config as any).channels || {}, process.env);
 
   if (adapters.size === 0) {
     log.warn('gateway_no_channels', {});
@@ -203,6 +223,18 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
     }
   }
 
+  const dispatchQueue = new GatewayDispatchQueue({
+    maxActive: positiveInt(opts.maxActiveDispatches, process.env.SKYLOOM_GATEWAY_MAX_ACTIVE, 4),
+    maxPending: positiveInt(opts.maxPendingDispatches, process.env.SKYLOOM_GATEWAY_MAX_PENDING, 100),
+    maxPendingPerKey: positiveInt(
+      opts.maxPendingPerConversation,
+      process.env.SKYLOOM_GATEWAY_MAX_PENDING_PER_CONVERSATION,
+      20,
+    ),
+    onError: (error, key) => log.warn('gateway_dispatch_failed', { conversation: key, error: String(error) }),
+  });
+  let overflowNotices = 0;
+
   const port = resolveGatewayPort(opts.port);
   // Gateways receive inbound webhooks from the platform's servers, so unlike the
   // local web UI they must bind to a reachable interface by default.
@@ -213,7 +245,7 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
     try {
       if (url.pathname === '/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' })
-          .end(JSON.stringify({ ok: true, channels: [...adapters.keys()] }));
+          .end(JSON.stringify({ ok: true, channels: [...adapters.keys()], dispatch: dispatchQueue.stats() }));
         return;
       }
       const m = url.pathname.match(/^\/webhook\/([a-z0-9_-]+)$/i);
@@ -242,8 +274,16 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
       // Route to an agent and deliver the reply asynchronously (after the ack).
       if (outcome.message) {
         const msg = outcome.message;
-        void dispatch(ctx, adapter, msg).catch((e) =>
-          log.warn('gateway_dispatch_failed', { channel: adapter.id, error: String(e) }));
+        const key = `${adapter.id}:${msg.conversationId}`;
+        if (!dispatchQueue.enqueue(key, () => dispatch(ctx, adapter, msg))) {
+          log.warn('gateway_dispatch_overflow', { channel: adapter.id, conversationId: msg.conversationId });
+          if (overflowNotices < 4) {
+            overflowNotices++;
+            void adapter.send(msg.replyTo, PUBLIC_BUSY_MESSAGE)
+              .catch((error) => log.warn('gateway_overflow_notice_failed', { channel: adapter.id, error: String(error) }))
+              .finally(() => { overflowNotices--; });
+          }
+        }
       }
     } catch (e) {
       log.warn('gateway_request_error', { error: String(e) });
@@ -270,11 +310,25 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
     });
   });
 
-  const shutdown = async () => {
-    for (const a of adapters.values()) { try { await a.stop?.(); } catch { /* ignore */ } }
-    try { await ctx.closeAll(); } catch { /* ignore */ }
-    server.close();
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      process.off('SIGINT', onSigint);
+      process.off('SIGTERM', onSigterm);
+      dispatchQueue.stopAccepting();
+      const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeIdleConnections?.();
+      await dispatchQueue.drain();
+      for (const a of adapters.values()) { try { await a.stop?.(); } catch { /* ignore */ } }
+      try { await ctx.closeAll(); } catch { /* ignore */ }
+      await serverClosed;
+    })();
+    return shutdownPromise;
   };
-  process.on('SIGINT', () => { void shutdown().then(() => process.exit(0)); });
-  process.on('SIGTERM', () => { void shutdown().then(() => process.exit(0)); });
+  const onSigint = () => { void shutdown().then(() => process.exit(0)); };
+  const onSigterm = () => { void shutdown().then(() => process.exit(0)); };
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
+  return { server, close: shutdown };
 }

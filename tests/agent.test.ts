@@ -466,6 +466,28 @@ describe("agent · progress-based stopping", () => {
 });
 
 describe("agent · interrupt (Ctrl-C)", () => {
+  it("does not mutate state or call the model when the turn is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const llm = new MockLLM([{ content: "must not run" }]);
+    const config = { agents: { fog: {} }, llm: {}, memory: { shortTermLimit: 200, dbPath: "/tmp/sky-test" } };
+    const agent = new FogAgent(
+      config as any,
+      llm as any,
+      new MessageBus(),
+      new ToolRegistry(),
+      new SkillRegistry(),
+    );
+
+    const before = agent.state;
+    const events = await collect(agent.chatStream("cancelled", controller.signal));
+
+    expect(events).toEqual([{ type: "interrupted" }, { type: "done" }]);
+    expect(agent.state).toBe(before);
+    expect(agent.memory.getMessages().some((message) => message.content === "cancelled")).toBe(false);
+    expect(llm.calls).toBe(0);
+  });
+
   it("stops between rounds on abort and preserves partial output", async () => {
     const controller = new AbortController();
     // Round 1 streams some content + a tool call; the tool aborts the signal.

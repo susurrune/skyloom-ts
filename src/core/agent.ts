@@ -766,6 +766,8 @@ export class BaseAgent {
     yield* this.sessionController.runStream(
       message,
       (activated) => this.chatStreamImpl(message, activated, signal),
+      undefined,
+      signal,
     );
   }
 
@@ -780,6 +782,7 @@ export class BaseAgent {
       async () => {
         if (!await this.memory.loadSession(sessionId)) throw new Error('session not found');
       },
+      signal,
     );
   }
 
@@ -792,6 +795,7 @@ export class BaseAgent {
       message,
       (activated) => this.chatStreamImpl(message, activated, signal),
       async () => { await this.memory.loadOrCreateNamedSession(sessionName); },
+      signal,
     );
   }
 

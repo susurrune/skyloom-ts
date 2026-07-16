@@ -172,7 +172,8 @@ describe("web · page", () => {
     expect(script).toContain("skyweb.draft.");
     expect(script).toContain("skyweb.session.");
     expect(script).toContain("function syncHistory");
-    expect(script).toMatch(/fetch\(["']\/api\/history\?agent=/);
+    expect(script).toContain("const historyUrl =");
+    expect(script).toContain("fetch(historyUrl)");
     expect(script).toContain("FIELD NOTE / 01");
     expect(script).toContain("store.setItem(DKEY(cur.name), inp.value);");
     expect(script).toContain("function retryLast");
@@ -188,7 +189,7 @@ describe("web · page", () => {
     expect(css).toContain(".session-row.hide");
     expect(script).toContain("LEGACY_HKEY");
     expect(script).toMatch(/["']skyweb\.h\.["'] \+ a \+ ["']\.["']/);
-    expect(script).toContain("store.getItem(SKEY(a))");
+    expect(script).toContain("tabStore.getItem(SKEY(a))");
     expect(script).toContain("if (sessionId) body.sessionId = sessionId");
     expect(script).toMatch(/Array\.isArray\(parsed\)/);
     expect(script).toContain("cancelAnimationFrame");
@@ -204,7 +205,7 @@ describe("web · page", () => {
     expect(script).toContain("function apiErrorPayload");
     expect(script).toContain("function isMissingSessionError");
     expect(script).toContain("function chatRequestBody");
-    expect(script).toContain("store.removeItem(SKEY(agentName));");
+    expect(script).toContain("tabStore.removeItem(SKEY(agentName));");
     expect(script).toContain("function bindResponseSession");
     expect(script).toContain("X-Skyloom-Session-Id");
     expect(script).toContain('"skyweb.h." + agentName + ".pending"');
@@ -215,10 +216,11 @@ describe("web · page", () => {
     expect(script).toContain("response.clone().json()");
     expect(script).toContain("apiErrorText(ev.error");
     expect(script).toMatch(/fetch\(["']\/api\/sessions\?agent=/);
-    expect(script).toMatch(/fetch\(["']\/api\/session\/load["']/);
+    expect(script).toContain("const tabStore = window.sessionStorage");
+    expect(script).toContain("&sessionId=");
     expect(script).toMatch(/method:\s*["']DELETE["']/);
     expect(script).toContain("function isCurrentAgent");
-    expect(script).toContain("body: JSON.stringify({ agent: agent.name, sessionId })");
+    expect(script).toContain("body: JSON.stringify({ agent: agent.name, sessionId, replacement: deletingActive })");
     expect(script).toContain("isCurrentAgent(agent)");
     expect(script).not.toContain("当前会话已是空的");
   });
@@ -630,6 +632,50 @@ describe("web · server", () => {
     }
   });
 
+  it("serves a requested session history without changing the active session", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const getSessionMessages = vi.fn((sessionId: string) => sessionId === "session-a"
+      ? [{ role: "user", content: "A" }, { role: "assistant", content: "answer A" }]
+      : null);
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        getActiveSession: () => "session-b",
+        getMessages: vi.fn(() => [{ role: "user", content: "B" }]),
+        getSessionMessages,
+      },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/history?agent=fog&sessionId=session-a`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        sessionId: "session-a",
+        messages: [
+          { role: "user", content: "A" },
+          { role: "assistant", content: "answer A" },
+        ],
+      });
+      expect(getSessionMessages).toHaveBeenCalledWith("session-a");
+      expect(fakeAgent.memory.getMessages).not.toHaveBeenCalled();
+      expect(fakeAgent.memory.getActiveSession()).toBe("session-b");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("identifies the backend session used by a successful chat stream", async () => {
     const { startWebServer } = await import("../src/web/server");
     const port = safeWebPort();
@@ -792,6 +838,62 @@ describe("web · server", () => {
       });
       expect(chatStream).not.toHaveBeenCalled();
     } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("admits only one concurrent web chat per agent", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => { releaseStream = resolve; });
+    const chatStreamInSession = vi.fn(async function* () {
+      yield { type: "content", text: "started" };
+      await streamGate;
+      yield { type: "done" };
+    });
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        sessionExists: vi.fn(async () => true),
+        getActiveSession: () => "session-a",
+      },
+      chatStreamInSession,
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+    const request = () => fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: "fog", message: "hello", sessionId: "session-a" }),
+    });
+
+    try {
+      const first = await request();
+      expect(first.status).toBe(200);
+
+      const second = await request();
+      expect(second.status).toBe(409);
+      await expect(second.json()).resolves.toMatchObject({ error: { code: "web.agent_busy" } });
+      expect(chatStreamInSession).toHaveBeenCalledTimes(1);
+
+      releaseStream();
+      await first.text();
+      const third = await request();
+      expect(third.status).toBe(200);
+      await third.text();
+      expect(chatStreamInSession).toHaveBeenCalledTimes(2);
+    } finally {
+      releaseStream();
       await closeServer(server);
     }
   });

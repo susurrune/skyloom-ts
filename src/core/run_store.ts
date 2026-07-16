@@ -302,6 +302,7 @@ export class OrchestrationRunStore {
 
   private commit(run: OrchestrationRun, type: string, taskId: string | null = null, payload: Record<string, unknown> = {}): void {
     fs.mkdirSync(this.runDir(run.runId), { recursive: true });
+    this.repairCrashTruncatedTail(run.runId);
     run.revision++;
     run.updatedAt = this.now().toISOString();
     const previous = this.events(run.runId).at(-1);
@@ -333,6 +334,28 @@ export class OrchestrationRunStore {
       fs.chmodSync(this.eventsPath(run.runId), 0o600);
       fs.chmodSync(target, 0o600);
     } catch { /* Windows and restricted filesystems may not expose POSIX modes */ }
+  }
+
+  private repairCrashTruncatedTail(runId: string): void {
+    const file = this.eventsPath(runId);
+    if (!fs.existsSync(file)) return;
+    const content = fs.readFileSync(file);
+    if (content.length === 0 || content[content.length - 1] === 0x0a) return;
+
+    const lastNewline = content.lastIndexOf(0x0a);
+    const tail = content.subarray(lastNewline + 1).toString('utf8');
+    const fd = fs.openSync(file, 'r+');
+    try {
+      try {
+        JSON.parse(tail);
+        fs.writeSync(fd, Buffer.from('\n'), 0, 1, content.length);
+      } catch {
+        fs.ftruncateSync(fd, lastNewline + 1);
+      }
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 
   private verifyEvents(runId: string, events = this.events(runId)): void {

@@ -53,6 +53,33 @@ describe('enterprise orchestration run store', () => {
 
     expect(recovered).toMatchObject({ runId: 'run-tail', revision: 2, status: 'running' });
     expect(runs.events('run-tail')).toHaveLength(2);
+
+    runs.start(recovered);
+
+    expect(runs.load('run-tail')).toMatchObject({ revision: 3, status: 'running' });
+    expect(runs.events('run-tail').map(event => event.type)).toEqual([
+      'run.created', 'run.started', 'run.started',
+    ]);
+    const repaired = fs.readFileSync(eventsFile, 'utf8');
+    expect(repaired.endsWith('\n')).toBe(true);
+    expect(repaired).not.toContain('{"schemaVersion":1,"seq":3{"schemaVersion"');
+    const events = runs.events('run-tail');
+    expect(events[2].previousHash).toBe(events[1].hash);
+  });
+
+  it('preserves a complete audit event that only lost its final newline', () => {
+    const runs = store();
+    const run = runs.create('ship', [{ id: '1', description: 'build', assignedTo: 'rain' }], 'run-newline');
+    runs.start(run);
+    const eventsFile = path.join(runs.rootDir, 'run-newline', 'events.jsonl');
+    const content = fs.readFileSync(eventsFile);
+    fs.writeFileSync(eventsFile, content.subarray(0, content.length - 1));
+
+    const recovered = runs.load('run-newline');
+    runs.start(recovered);
+
+    expect(runs.events('run-newline')).toHaveLength(3);
+    expect(fs.readFileSync(eventsFile, 'utf8').endsWith('\n')).toBe(true);
   });
 
   it('still rejects a malformed complete audit record', () => {

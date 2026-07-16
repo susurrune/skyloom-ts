@@ -31,12 +31,23 @@ export class AgentSessionController {
     message: string,
     stream: StreamFactory,
     selectSession?: () => Promise<void>,
+    signal?: AbortSignal,
   ): AsyncGenerator<StreamEvent> {
     const release = await this.acquire();
     let turnStarted = false;
 
     try {
+      if (signal?.aborted) {
+        yield { type: 'interrupted' };
+        yield { type: 'done' };
+        return;
+      }
       if (selectSession) await selectSession();
+      if (signal?.aborted) {
+        yield { type: 'interrupted' };
+        yield { type: 'done' };
+        return;
+      }
       const activated = this.deps.autoActivateSkills(message);
       this.deps.tracer.startTrace(message.replace(/\s+/g, ' ').slice(0, 80), this.deps.agentName());
       turnStarted = true;

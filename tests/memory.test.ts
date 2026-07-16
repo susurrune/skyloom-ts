@@ -253,6 +253,29 @@ describe("Memory · long-term (SQLite)", () => {
     await mem.close();
   });
 
+  it("reads another session without changing the active conversation", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    try {
+      const first = await mem.createSession("first");
+      mem.addMessage("user", "first question");
+      mem.addMessage("assistant", "first answer");
+      await flush();
+      const second = await mem.createSession("second");
+      mem.addMessage("user", "second question");
+      await flush();
+
+      expect(mem.getSessionMessages(first)).toEqual([
+        { role: "user", content: "first question" },
+        { role: "assistant", content: "first answer" },
+      ]);
+      expect(mem.getActiveSession()).toBe(second);
+      expect(mem.getMessages().some((message) => message.content === "second question")).toBe(true);
+    } finally {
+      await mem.close();
+    }
+  });
+
   it("getMemoryStats returns a populated object", async () => {
     const mem = new Memory(tmpConfig(), "fog");
     await mem.initDb();

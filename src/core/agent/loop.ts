@@ -55,6 +55,11 @@ export class AgentLoop {
     signal?: AbortSignal,
   ): AsyncGenerator<Record<string, unknown>> {
     const deps = this.deps;
+    if (signal?.aborted) {
+      yield { type: 'interrupted' };
+      yield { type: 'done' };
+      return;
+    }
     await deps.setState(AgentState.THINKING);
     const userMessage = deps.getPlanMode()
       ? `[计划模式] 只读调研，不要执行任何修改。请输出一份编号的执行计划（涉及哪些文件、每步做什么、风险点），等待用户批准后再实施。\n\n${message}`

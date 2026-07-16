@@ -440,6 +440,8 @@ channels:
 
 把平台后台的事件回调 URL 指向 `http(s)://<你的域名>:8848/webhook/feishu`(企业微信 `/webhook/wecom`、QQ `/webhook/qq`)。`secretInput` 支持字面量或 `{ source: env, id: 环境变量名 }`,与 OpenClaw 同构。`/health` 可查已启用渠道。
 
+网关对 Agent、读图与出站投递实行按会话有序的有界调度，默认最多同时处理 4 个会话、等待 100 条消息、单会话等待 20 条。可用 `SKYLOOM_GATEWAY_MAX_ACTIVE`、`SKYLOOM_GATEWAY_MAX_PENDING`、`SKYLOOM_GATEWAY_MAX_PENDING_PER_CONVERSATION` 调整；`/health` 的 `dispatch` 字段会返回当前 active、pending 与会话数。容量耗尽时 webhook 仍会快速 ACK，并向用户发送稍后重试提示。
+
 | 渠道 | 入站(收) | 鉴权/加密 |
 |------|----------|-----------|
 | 飞书 Feishu | 文本 + 媒体(图片/语音/视频/文件/表情/富文本 post) | verification token + 可选 AES-256-CBC 解密 + URL challenge |

@@ -87,6 +87,7 @@ export async function startWebServer(
   const { host, loopbackOnly } = access;
   const ctx = contextOverride ?? createSystemContext();
   const runStore = options.runStore ?? new OrchestrationRunStore();
+  const activeChats = new Set<string>();
 
   // Reject cross-origin / rebound Host headers when bound to loopback. Without
   // this, a malicious web page could POST to http://localhost:<port>/api/chat
@@ -153,7 +154,7 @@ export async function startWebServer(
       else if (url.pathname === "/ui/styles.css" && req.method === "GET") serveCSS(req, res);
       else if (url.pathname === "/ui/app.js" && req.method === "GET") serveAppJS(req, res);
       else if (url.pathname.startsWith("/ui/assets/") && req.method === "GET") serveUiAsset(req, url.pathname, res);
-      else if (url.pathname === "/api/chat" && req.method === "POST") await handleChat(req, res, ctx);
+      else if (url.pathname === "/api/chat" && req.method === "POST") await handleChat(req, res, ctx, activeChats);
       else if (url.pathname === "/api/session" && req.method === "POST") await handleNewSession(req, res, ctx);
       else if (url.pathname === "/api/session" && req.method === "DELETE") await handleDeleteSession(req, res, ctx);
       else if (url.pathname === "/api/session/load" && req.method === "POST") await handleLoadSession(req, res, ctx);
@@ -284,7 +285,12 @@ async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<
   }
 }
 
-async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: SystemContext) {
+async function handleChat(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: SystemContext,
+  activeChats: Set<string>,
+) {
   const payload = await readJsonBody(req, res);
   if (!payload) return;
   const { message, agent: agentName = "fog", sessionId } = payload;
@@ -296,56 +302,65 @@ async function handleChat(req: IncomingMessage, res: ServerResponse, ctx: System
   }
   const agent = ctx.agentMap.get(agentName);
   if (!agent) { sendApiError(res, agentNotFoundError(agentName)); return; }
-  await agent.init();
-  if (agent.state !== AgentState.IDLE && agent.state !== AgentState.ERROR) {
+  if (activeChats.has(agentName)) {
     sendApiError(res, makeApiError(409, "web.agent_busy", "agent is busy", { retryable: true }));
     return;
   }
-  if (typeof sessionId === "string") {
-    const sessionExists = (agent.memory as unknown as { sessionExists?: (id: string) => Promise<boolean> }).sessionExists;
-    if (sessionExists && !await sessionExists.call(agent.memory, sessionId)) {
-      sendApiError(res, makeApiError(404, "web.session_not_found", "session not found", {
-        retryable: false,
-        action: "请在历史会话中重新选择，或点击新会话开始一段新的对话。",
-      }));
+  activeChats.add(agentName);
+  try {
+    await agent.init();
+    if (agent.state !== AgentState.IDLE && agent.state !== AgentState.ERROR) {
+      sendApiError(res, makeApiError(409, "web.agent_busy", "agent is busy", { retryable: true }));
       return;
     }
-  }
+    if (typeof sessionId === "string") {
+      const sessionExists = (agent.memory as unknown as { sessionExists?: (id: string) => Promise<boolean> }).sessionExists;
+      if (sessionExists && !await sessionExists.call(agent.memory, sessionId)) {
+        sendApiError(res, makeApiError(404, "web.session_not_found", "session not found", {
+          retryable: false,
+          action: "请在历史会话中重新选择，或点击新会话开始一段新的对话。",
+        }));
+        return;
+      }
+    }
 
-  // Cancel agent work when the client disconnects (stop button / closed tab).
-  // Without this the agent kept running tool rounds into a dead socket.
-  const ac = new AbortController();
-  res.on("close", () => { if (!res.writableEnded) ac.abort(); });
+    // Cancel agent work when the client disconnects (stop button / closed tab).
+    // Without this the agent kept running tool rounds into a dead socket.
+    const ac = new AbortController();
+    res.on("close", () => { if (!res.writableEnded) ac.abort(); });
 
-  // Real streaming over SSE — tokens, reasoning, and tool events as they happen.
-  const responseSessionId = typeof sessionId === "string"
-    ? sessionId
-    : agent.memory.getActiveSession();
-  const streamHeaders: Record<string, string> = {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-    "Access-Control-Expose-Headers": "X-Skyloom-Session-Id",
-  };
-  if (responseSessionId) streamHeaders["X-Skyloom-Session-Id"] = responseSessionId;
-  res.writeHead(200, streamHeaders);
-  const send = (ev: Record<string, unknown>) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
-  try {
-    const stream = typeof sessionId === "string"
-      ? agent.chatStreamInSession(sessionId, message, ac.signal)
-      : agent.chatStream(message, ac.signal);
-    for await (const ev of stream) send(ev as Record<string, unknown>);
-  } catch (error) {
-    if (!ac.signal.aborted) log.error("chat_stream_failed", { agent: agentName, error });
-    const apiError = makeApiError(500, "web.chat_failed", PUBLIC_INTERNAL_ERROR_MESSAGE, {
-      retryable: true,
-      action: "重试当前消息；如果持续失败，请打开健康中心查看模型、凭据与工具状态。",
-    });
-    send({ type: "error", text: apiError.payload.message, error: apiError.payload });
+    // Real streaming over SSE — tokens, reasoning, and tool events as they happen.
+    const responseSessionId = typeof sessionId === "string"
+      ? sessionId
+      : agent.memory.getActiveSession();
+    const streamHeaders: Record<string, string> = {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Access-Control-Expose-Headers": "X-Skyloom-Session-Id",
+    };
+    if (responseSessionId) streamHeaders["X-Skyloom-Session-Id"] = responseSessionId;
+    res.writeHead(200, streamHeaders);
+    const send = (ev: Record<string, unknown>) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+    try {
+      const stream = typeof sessionId === "string"
+        ? agent.chatStreamInSession(sessionId, message, ac.signal)
+        : agent.chatStream(message, ac.signal);
+      for await (const ev of stream) send(ev as Record<string, unknown>);
+    } catch (error) {
+      if (!ac.signal.aborted) log.error("chat_stream_failed", { agent: agentName, error });
+      const apiError = makeApiError(500, "web.chat_failed", PUBLIC_INTERNAL_ERROR_MESSAGE, {
+        retryable: true,
+        action: "重试当前消息；如果持续失败，请打开健康中心查看模型、凭据与工具状态。",
+      });
+      send({ type: "error", text: apiError.payload.message, error: apiError.payload });
+    }
+    send({ type: "end" });
+    res.end();
+  } finally {
+    activeChats.delete(agentName);
   }
-  send({ type: "end" });
-  res.end();
 }
 
 async function handleNewSession(req: IncomingMessage, res: ServerResponse, ctx: SystemContext): Promise<void> {
@@ -428,7 +443,7 @@ async function handleDeleteSession(req: IncomingMessage, res: ServerResponse, ct
     sendApiError(res, makeApiError(404, "web.session_not_found", "session not found", { retryable: false }));
     return;
   }
-  const activeSessionId = wasActive
+  const activeSessionId = wasActive || payload.replacement === true
     ? await agent.memory.createSession()
     : agent.memory.getActiveSession();
   sendJson(res, 200, {
@@ -439,6 +454,11 @@ async function handleDeleteSession(req: IncomingMessage, res: ServerResponse, ct
 
 async function handleHistory(url: URL, res: ServerResponse, ctx: SystemContext): Promise<void> {
   const agentName = url.searchParams.get("agent") || "fog";
+  const requestedSessionId = url.searchParams.get("sessionId");
+  if (requestedSessionId !== null && !requestedSessionId.trim()) {
+    sendApiError(res, makeApiError(400, "web.bad_request", "sessionId must be a non-empty string", { retryable: false }));
+    return;
+  }
   const agent = ctx.agentMap.get(agentName);
   if (!agent) {
     sendApiError(res, agentNotFoundError(agentName));
@@ -449,15 +469,23 @@ async function handleHistory(url: URL, res: ServerResponse, ctx: SystemContext):
     sendApiError(res, makeApiError(409, "web.agent_busy", "agent is busy", { retryable: true }));
     return;
   }
-  const messages = agent.memory.getMessages()
+  const source = requestedSessionId === null
+    ? agent.memory.getMessages()
+    : agent.memory.getSessionMessages(requestedSessionId);
+  if (source === null) {
+    sendApiError(res, makeApiError(404, "web.session_not_found", "session not found", { retryable: false }));
+    return;
+  }
+  const messages = source
     .filter((message: Record<string, unknown>) => {
       if (message.role === "user") return typeof message.content === "string";
       if (message.role !== "assistant" || typeof message.content !== "string") return false;
-      return !Array.isArray(message.toolCalls) || message.toolCalls.length === 0;
+      const toolCalls = message.toolCalls ?? message.tool_calls;
+      return !Array.isArray(toolCalls) || toolCalls.length === 0;
     })
     .map((message: Record<string, unknown>) => ({ role: message.role, content: message.content }));
   sendJson(res, 200, {
-    sessionId: agent.memory.getActiveSession(),
+    sessionId: requestedSessionId ?? agent.memory.getActiveSession(),
     messages,
   });
 }

@@ -1112,6 +1112,35 @@ export class Memory {
     return Boolean(row);
   }
 
+  /** Read a persisted session without changing the active in-memory session. */
+  getSessionMessages(sessionId: string): Record<string, any>[] | null {
+    if (!this.db) return null;
+    const session = this.dbGet(
+      'SELECT id FROM sessions WHERE id = ? AND agent = ?',
+      [sessionId, this.agentName]
+    );
+    if (!session) return null;
+
+    const rows = this.dbAll(
+      `SELECT role, content, name, tool_call_id, tool_calls, reasoning_content
+       FROM messages
+       WHERE agent = ? AND session_id = ?
+       ORDER BY id DESC LIMIT ?`,
+      [this.agentName, sessionId, this.config.shortTermLimit]
+    ).reverse();
+
+    return rows.map((row: any) => {
+      const message: Record<string, any> = { role: row.role, content: row.content };
+      if (row.name) message.name = row.name;
+      if (row.tool_call_id) message.tool_call_id = row.tool_call_id;
+      if (row.tool_calls) {
+        try { message.tool_calls = JSON.parse(row.tool_calls); } catch { /* malformed historical metadata */ }
+      }
+      if (row.reasoning_content) message.reasoning_content = row.reasoning_content;
+      return message;
+    });
+  }
+
   /**
    * Resume the latest session.
    */
