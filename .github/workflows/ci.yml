@@ -8,11 +8,24 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
 
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [18, 20, 22]
+        include:
+          - os: ubuntu-latest
+            node-version: 18
+          - os: ubuntu-latest
+            node-version: 20
+          - os: ubuntu-latest
+            node-version: 22
+          - os: windows-latest
+            node-version: 18
+          - os: windows-latest
+            node-version: 20
+          - os: windows-latest
+            node-version: 22
 
     steps:
     - uses: actions/checkout@v5
@@ -37,3 +50,50 @@ jobs:
 
     - name: Build
       run: npm run build
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 22
+        cache: 'npm'
+
+    - run: npm ci
+    - name: Run coverage
+      run: npm run test:coverage -- --run
+    - uses: actions/upload-artifact@v7
+      with:
+        name: coverage-report
+        path: coverage/
+
+  agent-evals:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 22
+        cache: 'npm'
+    - run: npm ci
+    - name: Run deterministic Agent evaluation baseline
+      run: npm run eval
+
+  release-smoke:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 22
+        cache: 'npm'
+
+    - run: npm ci
+    - name: Audit production dependencies
+      run: npm audit --omit=dev --audit-level=high
+    - run: npm run build
+    - name: Install and verify npm tarball
+      run: npm run test:package

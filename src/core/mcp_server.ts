@@ -14,7 +14,11 @@ import * as readline from 'readline';
 import { createSystemContext, orchestrateTask } from './factory';
 
 const MCP_VERSION = '2025-03-26';
-const SERVER_INFO = { name: 'skyloom', version: '1.4.0' };
+const PACKAGE_VERSION = (() => {
+  try { return require('../../package.json').version as string; }
+  catch { return '0.0.0'; }
+})();
+const SERVER_INFO = { name: 'skyloom', version: PACKAGE_VERSION };
 
 const TOOL_DEFS = [
   {
@@ -155,10 +159,13 @@ export class MCPServer {
 
     await this.ensureCtx();
     try {
-      const [_tasks, results, summary] = await orchestrateTask(goal, this.agents);
+      let runId = '';
+      const [_tasks, results, summary] = await orchestrateTask(goal, this.agents, null, {
+        onRun: run => { runId = run.runId; },
+      });
       const ok = results.filter(r => r.success).length;
       const total = results.length;
-      const contentLines = [`[${ok}/${total} tasks completed]`];
+      const contentLines = [`[run ${runId}]`, `[${ok}/${total} tasks completed]`];
       for (const r of results) {
         contentLines.push(`## ${r.agent}: ${r.description}\n${r.content || '(no content)'}`);
       }

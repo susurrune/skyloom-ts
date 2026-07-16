@@ -6,6 +6,9 @@ triggers:
   - "summarize"
   - "extract"
   - "compare"
+  - "文档分析"
+  - "总结文档"
+  - "提取内容"
 ---
 
 ## Document intelligence

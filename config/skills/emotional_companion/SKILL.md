@@ -8,6 +8,9 @@ triggers:
   - "chat"
   - "listen"
   - "vent"
+  - "陪我聊聊"
+  - "倾诉"
+  - "心情"
 ---
 
 ## Emotional companion

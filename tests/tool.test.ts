@@ -183,6 +183,107 @@ describe('ToolRegistry · input validation + coercion', () => {
     expect(res.error).toContain('required');
     expect(handler).not.toHaveBeenCalled();
   });
+
+  it('applies declared defaults before invoking the handler', async () => {
+    const got = recordTool('defaults', [
+      { name: 'limit', type: 'number', description: 'limit', default: 25 },
+    ]);
+    const res = await registry.execute('defaults', {});
+    expect(res.success).toBe(true);
+    expect(got()).toEqual({ limit: 25 });
+  });
+
+  it('rejects non-finite numeric values', async () => {
+    const handler = vi.fn().mockResolvedValue('ok');
+    registry.register(makeTool({
+      name: 'finite', parameters: [{ name: 'n', type: 'number', description: 'n', required: true }], handler,
+    }));
+    for (const n of [Number.NaN, Number.POSITIVE_INFINITY, 'Infinity']) {
+      const res = await registry.execute('finite', { n });
+      expect(res.success).toBe(false);
+    }
+    expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('ToolRegistry · cache isolation', () => {
+  it('does not leak cached results between registries with the same tool name', async () => {
+    const first = new ToolRegistry();
+    const second = new ToolRegistry();
+    first.register(makeTool({ name: 'identity', cacheable: true, handler: async () => 'agent-a' }));
+    second.register(makeTool({ name: 'identity', cacheable: true, handler: async () => 'agent-b' }));
+
+    expect((await first.execute('identity', {})).result).toBe('agent-a');
+    expect((await second.execute('identity', {})).result).toBe('agent-b');
+  });
+
+  it('caches an empty-string result', async () => {
+    const registry = new ToolRegistry();
+    const handler = vi.fn().mockResolvedValue('');
+    registry.register(makeTool({ name: 'empty', cacheable: true, handler }));
+    await registry.execute('empty', {});
+    await registry.execute('empty', {});
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates cached output when a tool is re-registered', async () => {
+    const registry = new ToolRegistry();
+    registry.register(makeTool({ name: 'replaceable', cacheable: true, handler: async () => 'old' }));
+    expect((await registry.execute('replaceable', {})).result).toBe('old');
+    registry.register(makeTool({ name: 'replaceable', cacheable: true, handler: async () => 'new' }));
+    expect((await registry.execute('replaceable', {})).result).toBe('new');
+  });
+
+  it('executes without caching when parameters cannot be serialized', async () => {
+    const registry = new ToolRegistry();
+    const handler = vi.fn().mockResolvedValue('ok');
+    registry.register(makeTool({ name: 'circular', cacheable: true, handler }));
+    const value: Record<string, unknown> = {};
+    value.self = value;
+
+    await expect(registry.execute('circular', { value })).resolves.toMatchObject({
+      success: true,
+      result: 'ok',
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ToolRegistry · retry safety', () => {
+  it('does not retry a side-effecting tool unless retries are explicitly configured', async () => {
+    const registry = new ToolRegistry();
+    const handler = vi.fn().mockRejectedValue(new Error('write failed'));
+    registry.register(makeTool({ name: 'write_once', handler }));
+    const result = await registry.execute('write_once', {});
+    expect(result.success).toBe(false);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps automatic retries for idempotent tools', async () => {
+    const registry = new ToolRegistry();
+    const handler = vi.fn()
+      .mockRejectedValueOnce(new Error('temporary'))
+      .mockResolvedValueOnce('ok');
+    registry.register(makeTool({ name: 'read_retry', idempotent: true, retryDelay: 0, handler }));
+    const result = await registry.execute('read_retry', {});
+    expect(result.success).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([Number.NaN, -1, Number.NEGATIVE_INFINITY])(
+    'falls back safely when maxRetries is invalid (%s)',
+    async (maxRetries) => {
+      const registry = new ToolRegistry();
+      const handler = vi.fn().mockRejectedValue(new Error('failed once'));
+      registry.register(makeTool({ name: `invalid_${String(maxRetries)}`, maxRetries, handler }));
+
+      const result = await registry.execute(`invalid_${String(maxRetries)}`, {});
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('failed once');
+      expect(handler).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe('ToolRegistry · output validation', () => {
@@ -226,6 +327,15 @@ describe('ToolRegistry · output validation', () => {
     expect(res.success).toBe(true);
     expect(res.result).toBe('v2');
   });
+
+  it('reports explicit error results as failures without retrying', async () => {
+    const handler = vi.fn().mockResolvedValue('Error: file not found');
+    registry.register(makeTool({ name: 'missing_file', idempotent: true, handler }));
+    const res = await registry.execute('missing_file', {});
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('file not found');
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('stableStringify', () => {
@@ -264,5 +374,82 @@ describe('execute · timeout timer is always cleared (no leak)', () => {
     const res = await registry.execute('slow', {});
     expect(res.success).toBe(false);
     expect(res.error).toContain('timeout');
+  });
+
+  it('aborts a cooperative handler when its timeout expires', async () => {
+    const registry = new ToolRegistry();
+    let observedAbort = false;
+    registry.register(makeTool({
+      name: 'abort_on_timeout',
+      timeout: 20,
+      maxRetries: 0,
+      handler: ((_: Record<string, unknown>, context?: { signal: AbortSignal }) => new Promise<string>((resolve) => {
+        if (!context) {
+          setTimeout(() => resolve('completed without context'), 60);
+          return;
+        }
+        context.signal.addEventListener('abort', () => {
+          observedAbort = context.signal.aborted;
+          resolve('handler stopped');
+        }, { once: true });
+      })) as any,
+    }));
+
+    const res = await registry.execute('abort_on_timeout', {});
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('timeout');
+    expect(observedAbort).toBe(true);
+  });
+
+  it('cancels an in-flight handler when the caller aborts', async () => {
+    const registry = new ToolRegistry();
+    const controller = new AbortController();
+    let observedAbort = false;
+    registry.register(makeTool({
+      name: 'abort_from_caller',
+      timeout: 500,
+      maxRetries: 0,
+      handler: ((_: Record<string, unknown>, context?: { signal: AbortSignal }) => new Promise<string>((resolve) => {
+        if (!context) {
+          setTimeout(() => resolve('completed without context'), 60);
+          return;
+        }
+        context.signal.addEventListener('abort', () => {
+          observedAbort = context.signal.aborted;
+          resolve('handler stopped');
+        }, { once: true });
+      })) as any,
+    }));
+
+    const pending = (registry.execute as any)('abort_from_caller', {}, { signal: controller.signal });
+    controller.abort();
+    const res = await pending;
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('cancelled');
+    expect(observedAbort).toBe(true);
+  });
+
+  it('does not count caller cancellation as a tool failure', async () => {
+    const registry = new ToolRegistry();
+    registry.register(makeTool({
+      name: 'cancel_without_breaking',
+      maxRetries: 0,
+      handler: async (params, context) => {
+        if (params.finish) return 'ok';
+        return new Promise<string>((resolve) => {
+          context.signal.addEventListener('abort', () => resolve('stopped'), { once: true });
+        });
+      },
+    }));
+
+    for (let i = 0; i < 5; i++) {
+      const controller = new AbortController();
+      const pending = registry.execute('cancel_without_breaking', {}, { signal: controller.signal });
+      controller.abort();
+      expect((await pending).error).toContain('cancelled');
+    }
+
+    expect(await registry.execute('cancel_without_breaking', { finish: true })).toMatchObject({ success: true, result: 'ok' });
+    expect(registry.getStats()[0]).toMatchObject({ failures: 0, breaker: 'closed' });
   });
 });

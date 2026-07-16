@@ -55,6 +55,14 @@ describe("security · isEditTool", () => {
 });
 
 describe("security · checkApproval integration", () => {
+  it("classifies unknown tools as approval-required instead of safe", async () => {
+    const sec = new SecurityContext({ mode: "auto" });
+    expect(sec.getDangerLevel("future_side_effect_tool")).toBe(DangerLevel.MEDIUM);
+    const [ok, reason] = await sec.checkApproval("future_side_effect_tool", {}, "fog");
+    expect(ok).toBe(false);
+    expect(reason).toContain("unavailable");
+  });
+
   it("blocks red-line shell commands regardless of mode", async () => {
     const sec = new SecurityContext({ mode: "bypass" });
     const [ok, reason] = await sec.checkApproval("run_bash", { command: "rm -rf /" }, "fog");
@@ -76,6 +84,13 @@ describe("security · checkApproval integration", () => {
     const [ok] = await sec.checkApproval("write_file", { path: "a", content: "b" }, "rain");
     expect(asked).toBe(true);
     expect(ok).toBe(false);
+  });
+
+  it("fails closed when a policy requires approval but no callback exists", async () => {
+    const sec = new SecurityContext({ mode: "auto" });
+    const [ok, reason] = await sec.checkApproval("mcp_add_server", { name: "remote" }, "fog");
+    expect(ok).toBe(false);
+    expect(reason).toContain("unavailable");
   });
 
   it("setMode switches behavior at runtime", () => {

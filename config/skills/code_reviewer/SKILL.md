@@ -6,6 +6,9 @@ triggers:
   - "code review"
   - "audit"
   - "refactor"
+  - "代码审查"
+  - "排查 bug"
+  - "重构"
 ---
 
 ## Code review

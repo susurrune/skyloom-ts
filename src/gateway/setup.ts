@@ -52,7 +52,7 @@ export const CHANNEL_SETUP: Record<string, ChannelSetupSpec> = {
     fields: [
       { key: 'appId', label: 'App ID', required: true, env: 'FEISHU_APP_ID', hint: '开发者后台 → 凭证与基础信息 → App ID' },
       { key: 'appSecret', label: 'App Secret', required: true, secret: true, env: 'FEISHU_APP_SECRET', hint: '同页 App Secret' },
-      { key: 'verificationToken', label: 'Verification Token', required: false, secret: true, env: 'FEISHU_VERIFICATION_TOKEN', hint: '事件订阅 → Verification Token(可选)' },
+      { key: 'verificationToken', label: 'Verification Token', required: true, secret: true, env: 'FEISHU_VERIFICATION_TOKEN', hint: '事件订阅 → Verification Token（用于验证回调）' },
       { key: 'encryptKey', label: 'Encrypt Key', required: false, secret: true, env: 'FEISHU_ENCRYPT_KEY', hint: '事件订阅 → Encrypt Key(开启加密时填)' },
     ],
     steps: [

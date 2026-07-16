@@ -1,15 +1,31 @@
 {
   "name": "skyloom",
-  "version": "1.26.0",
+  "version": "1.27.2",
   "description": "天空织机 Skyloom — 6 weather-themed AI agents: Fog, Rain, Frost, Snow, Dew, Fair",
   "preferGlobal": true,
   "type": "commonjs",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "config/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "bin": {
     "sky": "dist/cli/main.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-web-assets.js",
     "dev": "tsc --watch",
     "start": "node ./dist/cli/main.js",
     "chat": "node ./dist/cli/main.js chat",
@@ -17,12 +33,13 @@
     "web": "node ./dist/cli/main.js web",
     "test": "vitest",
     "test:coverage": "vitest --coverage",
+    "test:package": "node scripts/package-smoke.js",
+    "eval": "npm run build --silent && node dist/evals/cli.js",
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",
     "pretest": "npm run type-check",
-    "setup": "node scripts/install.js",
-    "postinstall": "node scripts/link.js"
+    "setup": "node scripts/install.js"
   },
   "keywords": [
     "multi-agent",
@@ -55,13 +72,14 @@
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
-    "@vitest/coverage-v8": "^2.0.0",
-    "@vitest/ui": "^2.0.0",
+    "@vitest/coverage-v8": "^3.2.6",
+    "@vitest/ui": "^3.2.6",
     "eslint": "^9.0.0",
     "prettier": "^3.2.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
-    "vitest": "^2.0.0"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -6,57 +6,33 @@
  */
 
 import { Event, EventType, MessageBus } from './bus';
-import { TASK_DONE_SENTINEL } from './constants';
-import { LLMClient, type LLMResponse, type ToolCall } from './llm';
+import { LLMClient, type ToolCall } from './llm';
 import { getLogger } from './logger';
 import { Memory, Message } from './memory';
 import { Skill, SkillRegistry } from './skill';
 import { type ToolDefinition, ToolRegistry } from './tool';
 import {
-  parseToolArgs,
   extractFilePathsFromMessages,
   enrichResponseWithArtifacts,
-  formatArgsParseError,
-  suggestToolNames,
-  toolStatusLabel,
-  synthesizeDelegationSummary,
   parseExtractedFacts,
 } from './agent_helpers';
-import { selectRelevantTools } from './tool_router';
 import { getModelInfo } from './catalog';
 import { estimateTokens } from './estimate';
-import { LoopGuard } from './agent/guard';
+import { DelegationCoordinator } from './agent/delegation';
+import { AgentLoop, type BatchLoopOptions } from './agent/loop';
+import { AgentSessionController } from './agent/session';
+import {
+  ToolCallExecutor,
+  type ToolCallExecutorOptions,
+  type ToolExecutionResult,
+} from './agent/tools';
 import { Tracer, type Trace } from './trace';
-import { mapBounded, resolveConcurrency } from './concurrency';
+import { resolveVerifyConfig, runVerify } from './verify';
+import { getSecurity, type SecurityContext } from './security';
 
 const log = getLogger('agent');
 
-/** Tools whose success means the filesystem changed (triggers the verify loop). */
-const WRITE_TOOL_RE = /^(write_|edit_|delete_|create_)|^run_bash$|^git_commit$|^apply_patch$/;
-
-/** Tools with side effects, hidden from the model while in plan mode. */
-const SIDE_EFFECT_TOOL_RE = /^(write_|edit_|delete_|create_|kill_|launch_|service_|browser_)|^run_bash$|^git_commit$|^open_path$|^delegate_to$|^apply_patch$/;
-
-/** Default context budget per recorded tool result (chars; ~3k tokens). */
-const TOOL_RESULT_LIMIT = 12000;
-
-/**
- * Clamp an oversized tool result before it enters the context window:
- * keep head + tail, tell the model what was cut and how to fetch precisely.
- */
-/** A short, single-line preview of tool arguments for trace spans. */
-function argsPreview(args: Record<string, any> | null | undefined): string {
-  if (!args) return '';
-  try { return JSON.stringify(args).replace(/\s+/g, ' ').slice(0, 80); } catch { return ''; }
-}
-
-export function clampToolResult(s: string, limit: number = TOOL_RESULT_LIMIT): string {
-  if (s.length <= limit) return s;
-  const head = s.slice(0, Math.floor(limit * 0.72));
-  const tail = s.slice(-Math.floor(limit * 0.18));
-  const cut = s.length - head.length - tail.length;
-  return `${head}\n…[工具结果过长，中间省略 ${cut} 字符 — 需要该部分时用更精确的参数重新调用（read_file 的 offset/limit、grep 定位、缩小查询范围）]\n${tail}`;
-}
+export { clampToolResult } from './agent/tools';
 
 // Domain model lives in ./agent/task — re-exported here so importers of
 // '../core/agent' are unaffected by the Phase 3 split.
@@ -87,6 +63,8 @@ export class BaseAgent {
   protected _tools: ToolDefinition[] = [];
   protected _skills: Skill[] = [];
   protected _activeSkills: Set<string> = new Set();
+  /** Skills selected from the previous user message; replaced on the next turn. */
+  protected _autoActiveSkills: Set<string> = new Set();
   protected _skillTools: Map<string, string[]> = new Map();
   protected _skillConfigOverrides: Map<string, Record<string, any>> = new Map();
   protected _baseSystemPrompt: string = '';
@@ -98,17 +76,15 @@ export class BaseAgent {
   protected _maxNoProgressRounds: number = 6;
   protected _userTurnsSinceExtract: number = 0;
   protected _pendingExtracts: Set<Promise<any>> = new Set();
-  protected _pendingRequests: Map<string, { resolve: (value: string) => void; reject: (err: Error) => void }> = new Map();
-  protected _bgTasks: Set<Promise<void>> = new Set();
+  private _delegationCoordinator: DelegationCoordinator | null = null;
   approvalCallback: ((toolName: string, args: Record<string, any>) => Promise<boolean>) | null = null;
   /** Plan mode: read-only tool set + plan-first instructions on each turn. */
   planMode: boolean = false;
   /** Set when this turn executed a tool that mutates the filesystem (verify trigger). */
   protected _turnWroteFiles: boolean = false;
   private _hooks: import('./hooks').Hooks | null = null;
-  protected _turnLock: Promise<void> = Promise.resolve();
-  private _turnLockCounter: number = 0;
-  private _turnLockResolve: (() => void) | null = null;
+  private _sessionController: AgentSessionController | null = null;
+  private _initPromise: Promise<void> | null = null;
 
   // Time-tag cache (shared across all instances, 30s TTL)
   private static _timeTag: string | null = null;
@@ -119,7 +95,8 @@ export class BaseAgent {
     llm: LLMClient,
     bus: MessageBus,
     toolRegistry: ToolRegistry,
-    skillRegistry?: SkillRegistry | null
+    skillRegistry?: SkillRegistry | null,
+    runtimeName?: string,
   ) {
     this.config = config;
     this.llm = llm;
@@ -130,11 +107,16 @@ export class BaseAgent {
     // while Memory expects camelCase. Tolerate both so a preserved config block
     // doesn't break construction.
     const mc: any = (config as any).memory || {};
+    // Derived class fields are initialized only after super() returns, so
+    // `this.name` is still empty here. Resolve the identity before Memory is
+    // constructed or every agent silently shares the legacy `.db` file.
+    const memoryAgentName = runtimeName || this.constructor.name.replace(/Agent$/, '').toLowerCase();
+    this.name = memoryAgentName;
     this.memory = new Memory({
       dbPath: mc.dbPath || mc.db_path || '~/.skyloom',
       shortTermLimit: mc.shortTermLimit || mc.short_term_limit || 100,
       maxPersistedMessages: mc.maxPersistedMessages || mc.max_persisted_messages,
-    }, this.name);
+    }, memoryAgentName);
 
     // Stopping is PROGRESS-based, not round-count based (OpenClaw-style): a task
     // runs as long as it keeps making progress. The agent stops when it makes no
@@ -283,6 +265,16 @@ export class BaseAgent {
   }
 
   async init(): Promise<void> {
+    if (!this._initPromise) {
+      this._initPromise = this.initialize().catch((error) => {
+        this._initPromise = null;
+        throw error;
+      });
+    }
+    return this._initPromise;
+  }
+
+  private async initialize(): Promise<void> {
     await this.memory.initDb();
 
     // Always try to resume the last session (persistent memory across sky restarts)
@@ -399,7 +391,7 @@ export class BaseAgent {
     });
   }
 
-  activateSkill(name: string): boolean {
+  activateSkill(name: string, source: 'manual' | 'auto' = 'manual'): boolean {
     let skill = this._skills.find(s => s.name === name);
     if (!skill) {
       const globalSkill = this.skillRegistry.get(name);
@@ -410,7 +402,13 @@ export class BaseAgent {
     }
     if (!skill) return false;
 
+    if (this._activeSkills.has(name)) {
+      if (source === 'manual') this._autoActiveSkills.delete(name);
+      return true;
+    }
+
     this._activeSkills.add(name);
+    if (source === 'auto') this._autoActiveSkills.add(name);
     if (skill.handler) {
       const handlerTools = skill.handler(this, this.toolRegistry);
       if (handlerTools) {
@@ -433,6 +431,7 @@ export class BaseAgent {
   deactivateSkill(name: string): boolean {
     if (!this._activeSkills.has(name)) return false;
     this._activeSkills.delete(name);
+    this._autoActiveSkills.delete(name);
 
     const toolNames = this._skillTools.get(name);
     if (toolNames) {
@@ -453,7 +452,10 @@ export class BaseAgent {
   }
 
   protected autoActivateSkills(message: string): string[] {
+    for (const name of [...this._autoActiveSkills]) this.deactivateSkill(name);
+    this._autoActiveSkills.clear();
     if (!message) return [];
+
     const lowered = message.toLowerCase();
     const candidates = [...this._skills];
     for (const s of this.skillRegistry.getSkills()) {
@@ -462,20 +464,37 @@ export class BaseAgent {
       }
     }
 
-    const activated: string[] = [];
-    for (const skill of candidates) {
+    const preferred = new Map(this.skillNames.map((name, index) => [name, index]));
+    const matches: Array<{ skill: Skill; score: number; order: number }> = [];
+    for (let order = 0; order < candidates.length; order++) {
+      const skill = candidates[order];
       if (this._activeSkills.has(skill.name)) continue;
       if (!skill.triggers || !skill.triggers.length) continue;
       for (const trig of skill.triggers) {
-        if (trig && lowered.includes(trig.toLowerCase())) {
-          if (this.activateSkill(skill.name)) {
-            activated.push(skill.name);
-          }
+        if (this.skillTriggerMatches(lowered, trig)) {
+          const preferredIndex = preferred.get(skill.name);
+          const score = (preferredIndex === undefined ? 0 : 1000 - preferredIndex) + trig.length;
+          matches.push({ skill, score, order });
           break;
         }
       }
     }
+
+    matches.sort((a, b) => b.score - a.score || a.order - b.order);
+    const activated: string[] = [];
+    for (const { skill } of matches.slice(0, 2)) {
+      if (this.activateSkill(skill.name, 'auto')) activated.push(skill.name);
+    }
     return activated;
+  }
+
+  private skillTriggerMatches(message: string, rawTrigger: string): boolean {
+    const trigger = rawTrigger.trim().toLowerCase();
+    if (!trigger) return false;
+    if (!/^[a-z0-9][a-z0-9 ._+\/-]*$/i.test(trigger)) return message.includes(trigger);
+
+    const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'i').test(message);
   }
 
   protected runtimeIdentityBlock(): string {
@@ -565,11 +584,22 @@ export class BaseAgent {
     return merged;
   }
 
-  getAvailableSkills(): Array<{ name: string; description: string; active: boolean }> {
-    return this._skills.map(s => ({
+  getAvailableSkills(): Array<{ name: string; description: string; active: boolean; recommended: boolean }> {
+    const preferred = new Map(this.skillNames.map((name, index) => [name, index]));
+    return [...this._skills]
+      .sort((a, b) => {
+        const ai = preferred.get(a.name);
+        const bi = preferred.get(b.name);
+        if (ai !== undefined && bi !== undefined) return ai - bi;
+        if (ai !== undefined) return -1;
+        if (bi !== undefined) return 1;
+        return 0;
+      })
+      .map(s => ({
       name: s.name,
       description: s.description,
       active: this._activeSkills.has(s.name),
+      recommended: preferred.has(s.name),
     }));
   }
 
@@ -585,197 +615,55 @@ export class BaseAgent {
    */
   protected async executeToolCalls(
     toolCalls: ToolCall[],
-    options?: {
-      dedupCacheable?: boolean;         // Enable dedup for cacheable tools
-      onStatus?: (label: string) => void;
-      suppressedTools?: Set<string>;     // Tools to mark as suppressed on error
-      ephemeral?: boolean;               // Don't persist tool messages
-      signal?: AbortSignal;              // Cooperative cancel: skip queued tools on Ctrl-C
-    }
-  ): Promise<Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>> {
-    const suppressed = options?.suppressedTools;
-    const ephemeral = options?.ephemeral ?? false;
-    const onStatus = options?.onStatus;
-    const signal = options?.signal;
+    options?: ToolCallExecutorOptions,
+  ): Promise<ToolExecutionResult[]> {
+    return new ToolCallExecutor({
+      agentName: this.name,
+      config: this.config,
+      bus: this.bus,
+      registry: this.toolRegistry,
+      tracer: this.tracer,
+      approve: (toolName, args) => this.checkToolApproval(toolName, args),
+      setActing: () => this.setState(AgentState.ACTING),
+      getHooks: () => this.getHooks(),
+      markFilesWritten: () => { this._turnWroteFiles = true; },
+      addToolMessage: (content, metadata) => this.memory.addMessage('tool', content, metadata),
+    }).execute(toolCalls, options);
+  }
 
-    // Phase A: Parse all tool calls and resolve tools
-    const parsed = toolCalls.map((tc) => {
-      const toolName = tc.function.name;
-      const rawArgs = tc.function.arguments;
-      let toolArgs: Record<string, any> | null = null;
-      let parseError: string | null = null;
-
-      if (typeof rawArgs === 'string') {
-        toolArgs = parseToolArgs(rawArgs);
-        if (toolArgs === null) parseError = formatArgsParseError(toolName, rawArgs);
-      } else {
-        toolArgs = rawArgs;
-      }
-
-      this.bus.addEvent(new Event(EventType.TOOL_CALL, this.name, null, {
-        tool: toolName, args: toolArgs || {},
-      }));
-
-      const tool = this.toolRegistry.get(toolName);
-      const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
-
-      return { tc, toolName, toolArgs, tool, parseError, label, denied: false };
+  private createAgentLoop(): AgentLoop {
+    return new AgentLoop({
+      name: this.name,
+      llm: this.llm,
+      bus: this.bus,
+      memory: this.memory,
+      toolRegistry: this.toolRegistry,
+      tracer: this.tracer,
+      getActiveSkills: () => this._activeSkills,
+      getSkills: () => this._skills,
+      activeToolNames: () => this.activeToolNames(),
+      getSkillConfigOverrides: () => this.getSkillConfigOverrides(),
+      executeToolCalls: (calls, options) => this.executeToolCalls(calls, options),
+      setState: (state) => this.setState(state),
+      maybeExtractFacts: () => this.maybeExtractFacts(),
+      messagesWithRecall: () => this.messagesWithRecall(),
+      popLastUserMessage: () => this.popLastUserMessage(),
+      shouldAutoCompact: () => this.shouldAutoCompact(),
+      compact: () => this.compact(),
+      resolveModelId: () => this.resolveModelId(),
+      getPlanMode: () => this.planMode,
+      maxToolRoundsHardCap: this._maxToolRoundsHardCap,
+      maxNoProgressRounds: this._maxNoProgressRounds,
     });
-
-    // Phase B: Approve dangerous tools (serial — may prompt user)
-    const dangerousCalls = parsed.filter(p => p.tool && (p.tool as ToolDefinition).dangerous);
-    if (dangerousCalls.length > 0) {
-      for (const p of dangerousCalls) {
-        if (!await this.checkToolApproval(p.toolName, p.toolArgs || {})) {
-          p.denied = true;
-        }
-      }
-    }
-
-    // Build execution plan with optional dedup
-    const execPlan: Array<{ idx: number; prep: typeof parsed[0]; isDuplicate: boolean }> = [];
-    const seenDedupKeys = new Map<string, number>();
-
-    for (let i = 0; i < parsed.length; i++) {
-      const p = parsed[i];
-      // Dedup identical calls within this round for read-only tools (idempotent
-      // or cacheable, never dangerous): the model often emits the same
-      // read_file / web_search twice in one parallel batch — run it once and
-      // share the result. Safe because one round observes one world state.
-      const td = p.tool as ToolDefinition | undefined;
-      if (options?.dedupCacheable && p.toolArgs && td && (td.idempotent || td.cacheable) && !td.dangerous) {
-        const key = `${p.toolName}:${JSON.stringify(p.toolArgs, Object.keys(p.toolArgs).sort())}`;
-        if (seenDedupKeys.has(key)) {
-          execPlan.push({ idx: i, prep: p, isDuplicate: true });
-          continue;
-        }
-        seenDedupKeys.set(key, i);
-      }
-      execPlan.push({ idx: i, prep: p, isDuplicate: false });
-    }
-
-    // Phase C: Execute all unique tool calls with bounded concurrency.
-    // Unbounded Promise.all let one LLM round saturate sockets/FDs/CPU; the cap
-    // bounds in-flight work. `signal` enables cooperative cancel: once the user
-    // interrupts, queued (not-yet-started) tools short-circuit to [cancelled]
-    // instead of running — in-flight tools are left to settle.
-    const results = new Array<{ tc: ToolCall; result: string; success: boolean; toolName: string } | null>(parsed.length).fill(null);
-    const uniquePlan = execPlan.filter(e => !e.isDuplicate);
-    const concurrency = resolveConcurrency((this.config as any)?.llm?.tool_concurrency);
-    // Enter ACTING once for the whole batch rather than per-tool (each parallel
-    // worker re-setting the same state was a redundant async no-op).
-    if (uniquePlan.some(e => e.prep.tool && !e.prep.parseError && !e.prep.denied)) {
-      await this.setState(AgentState.ACTING);
-    }
-    const completed = await mapBounded(
-      uniquePlan,
-      async ({ idx, prep }, _i, aborted) => {
-        const p = prep;
-
-        if (aborted) {
-          return { idx, result: { tc: p.tc, result: `[cancelled] '${p.toolName}' skipped — interrupted before execution`, success: false, toolName: p.toolName } };
-        }
-        if (p.parseError) {
-          return { idx, result: { tc: p.tc, result: p.parseError, success: false, toolName: p.toolName } };
-        }
-        if (p.denied) {
-          return { idx, result: { tc: p.tc, result: `[denied] dangerous tool '${p.toolName}' blocked`, success: false, toolName: p.toolName } };
-        }
-        if (!p.tool) {
-          if (suppressed) suppressed.add(p.toolName);
-          const suggestions = suggestToolNames(p.toolName, this.toolRegistry);
-          const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
-          return { idx, result: { tc: p.tc, result: `Error: Tool '${p.toolName}' does not exist.${hint}`, success: false, toolName: p.toolName } };
-        }
-
-        if (onStatus) onStatus(p.label);
-
-        // File checkpoint: snapshot the target before any mutating file tool
-        // runs, so /rewind can restore the pre-turn state.
-        try {
-          const { getFileCheckpoints } = require('./file_checkpoint');
-          const cp = getFileCheckpoints();
-          const snapPath = cp.pathToSnapshot(p.toolName, p.toolArgs || {});
-          if (snapPath) cp.snapshot(snapPath);
-        } catch { /* checkpointing must never block execution */ }
-
-        // pre_tool hooks are enforced policy: a non-zero exit blocks the call.
-        const hooks = this.getHooks();
-        if (hooks.preTool.length > 0) {
-          try {
-            const { runPreToolHooks } = require('./hooks');
-            const pre = runPreToolHooks(hooks, p.toolName, p.toolArgs || {}, this.name);
-            if (!pre.allowed) {
-              return { idx, result: { tc: p.tc, result: `[blocked by pre_tool hook] ${pre.reason}`, success: false, toolName: p.toolName } };
-            }
-          } catch { /* hook machinery must never break tool execution */ }
-        }
-
-        // Leaf span: tools run concurrently, so they must not nest under each other.
-        const span = this.tracer.startSpan(p.toolName, 'tool', { args: argsPreview(p.toolArgs) }, { leaf: true });
-        try {
-          const toolResult = await this.toolRegistry.execute(p.toolName, p.toolArgs || {});
-          const resultStr = toolResult.result || toolResult.error || '(no output)';
-          if (toolResult.success && WRITE_TOOL_RE.test(p.toolName)) this._turnWroteFiles = true;
-          if (hooks.postTool.length > 0) {
-            try {
-              const { runPostToolHooks } = require('./hooks');
-              runPostToolHooks(hooks, p.toolName, p.toolArgs || {}, this.name);
-            } catch { /* best-effort */ }
-          }
-          span.end(toolResult.success ? 'ok' : 'error', toolResult.success ? undefined : { error: (toolResult.error || resultStr).slice(0, 120) });
-          return { idx, result: { tc: p.tc, result: resultStr, success: toolResult.success, toolName: p.toolName } };
-        } catch (e) {
-          span.end('error', { error: String(e).slice(0, 120) });
-          return { idx, result: { tc: p.tc, result: `Tool '${p.toolName}' execution failed: ${e}`, success: false, toolName: p.toolName } };
-        }
-      },
-      { concurrency, signal },
-    );
-    for (const { idx, result } of completed) {
-      results[idx] = result;
-    }
-
-    // Fill in dedup results from originals
-    for (const e of execPlan) {
-      if (e.isDuplicate && e.prep.toolArgs) {
-        const dedupKey = `${e.prep.toolName}:${JSON.stringify(e.prep.toolArgs, Object.keys(e.prep.toolArgs).sort())}`;
-        const originalIdx = seenDedupKeys.get(dedupKey);
-        if (originalIdx !== undefined && results[originalIdx]) {
-          results[e.idx] = { ...results[originalIdx]!, tc: e.prep.tc };
-        }
-      }
-    }
-
-    // Phase D: Record results to memory (clamped — one runaway read_file or
-    // http_get must not flood the context window)
-    const resultLimit = Number((this.config as any)?.llm?.tool_result_limit) || undefined;
-    for (const r of results) {
-      if (!r) continue;
-
-      if (typeof r.result === 'string' && r.result.includes('[CircuitBreakerOpen]')) {
-        if (suppressed) suppressed.add(r.toolName);
-      }
-
-      this.memory.addMessage('tool', clampToolResult(r.result, resultLimit), {
-        name: r.toolName,
-        toolCallId: r.tc.id,
-        ephemeral,
-      });
-    }
-
-    return results.filter(Boolean) as Array<{ tc: ToolCall; result: string; success: boolean; toolName: string }>;
   }
 
   async close(): Promise<void> {
-    // Drain ALL in-flight background work BEFORE closing memory — both fact
-    // extraction and background request handlers (delegate_to / agent requests).
-    // Missing _bgTasks meant a request handler could still be writing to memory
-    // as the DB closed, losing work or erroring on a closed database.
-    const pending = [...this._pendingExtracts, ...this._bgTasks];
+    // Drain all in-flight work before closing memory so background writes land.
+    const pending = [...this._pendingExtracts];
     if (pending.length > 0) {
       await Promise.allSettled(pending);
     }
+    await this._delegationCoordinator?.drain();
     await this.memory.close();
     this.bus.unsubscribe(this.name);
   }
@@ -805,12 +693,8 @@ export class BaseAgent {
         event.source,
         { task_id: task.id, success: result.success, content: result.content }
       ));
-    } else if (event.type === EventType.AGENT_REQUEST && event.target === this.name) {
-      const p = this.handleRequest(event);
-      this._bgTasks.add(p);
-      p.then(() => this._bgTasks.delete(p)).catch(() => this._bgTasks.delete(p));
-    } else if (event.type === EventType.AGENT_RESPONSE && event.target === this.name) {
-      this.handleResponse(event);
+    } else {
+      this.delegationCoordinator.handleEvent(event);
     }
   }
 
@@ -836,15 +720,18 @@ export class BaseAgent {
 
   async chat(
     message: string,
-    onStatus?: ((status: string) => void) | null
+    onStatus?: ((status: string) => void) | null,
+    signal?: AbortSignal,
   ): Promise<string> {
-    return this.withTurnLock(() => this.chatImpl(message, onStatus));
+    return this.sessionController.withTurn(() => this.chatImpl(message, onStatus, signal));
   }
 
   protected async chatImpl(
     message: string,
-    onStatus?: ((status: string) => void) | null
+    onStatus?: ((status: string) => void) | null,
+    signal?: AbortSignal,
   ): Promise<string> {
+    this.autoActivateSkills(message);
     await this.setState(AgentState.THINKING);
     this.memory.addMessage('user', message);
 
@@ -854,7 +741,7 @@ export class BaseAgent {
 
     try {
       if (onStatus) onStatus('thinking...');
-      const response = await this.llmLoop({ onStatus });
+      const response = await this.llmLoop({ onStatus, signal });
       let content = response?.content || '(no response)';
       // Apply output filter for sensitive info
       try { const { filterOutput } = require('./filter'); const fr = filterOutput(content); if (fr.redacted) content = fr.clean; } catch {}
@@ -876,23 +763,40 @@ export class BaseAgent {
   }
 
   async *chatStream(message: string, signal?: AbortSignal): AsyncGenerator<Record<string, any>> {
-    const activatedNow = this.autoActivateSkills(message);
-    const self = this;
+    yield* this.sessionController.runStream(
+      message,
+      (activated) => this.chatStreamImpl(message, activated, signal),
+      undefined,
+      signal,
+    );
+  }
 
-    this.tracer.startTrace(message.replace(/\s+/g, ' ').slice(0, 80), this.name);
-    try {
-      for await (const ev of self.chatStreamImpl(message, activatedNow.length > 0 ? activatedNow : undefined, signal)) {
-        yield ev;
-      }
-    } catch (err) {
-      const st = this.memory.shortTerm;
-      if (st.length > 0 && st[st.length - 1].role === 'user') {
-        this.popLastUserMessage();
-      }
-      throw err;
-    } finally {
-      this.tracer.endTrace();
-    }
+  async *chatStreamInSession(
+    sessionId: string,
+    message: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<Record<string, any>> {
+    yield* this.sessionController.runStream(
+      message,
+      (activated) => this.chatStreamImpl(message, activated, signal),
+      async () => {
+        if (!await this.memory.loadSession(sessionId)) throw new Error('session not found');
+      },
+      signal,
+    );
+  }
+
+  async *chatStreamInNamedSession(
+    sessionName: string,
+    message: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<Record<string, any>> {
+    yield* this.sessionController.runStream(
+      message,
+      (activated) => this.chatStreamImpl(message, activated, signal),
+      async () => { await this.memory.loadOrCreateNamedSession(sessionName); },
+      signal,
+    );
   }
 
   /** The most recently completed (or in-progress) run trace. */
@@ -903,269 +807,7 @@ export class BaseAgent {
     autoActivated?: string[],
     signal?: AbortSignal
   ): AsyncGenerator<Record<string, any>> {
-    await this.setState(AgentState.THINKING);
-    // Plan mode: the tag travels with the message so the model plans instead
-    // of acting, and the read-only tool filter below removes the temptation.
-    const userMessage = this.planMode
-      ? `[计划模式] 只读调研，不要执行任何修改。请输出一份编号的执行计划（涉及哪些文件、每步做什么、风险点），等待用户批准后再实施。\n\n${message}`
-      : message;
-    this.memory.addMessage('user', userMessage);
-    try {
-      require('./file_checkpoint').getFileCheckpoints().beginTurn(message);
-    } catch { /* optional */ }
-    let assistantStored = false;
-
-    if (this.shouldAutoCompact()) {
-      try { await this.compact(); } catch (e) { log.warn('auto_compact_failed', { error: String(e) }); }
-    }
-
-    const delegations: Array<[string, boolean]> = [];
-    const suppressedTools = new Set<string>();
-
-    if (autoActivated && autoActivated.length > 0) {
-      suppressedTools.add('list_skills');
-      this.memory.addMessage('system',
-        '[Auto-activated skills: ' + autoActivated.join(', ') +
-        '] These were chosen from your message\'s keywords. Do NOT call list_skills.'
-      );
-    }
-
-    const guard = new LoopGuard();
-
-    let toolNamesCache: string[] | null = null;
-    let cacheKey: string | null = null;
-
-    const resolveToolNames = (): string[] => {
-      const key = JSON.stringify([[...suppressedTools].sort(), [...this._activeSkills].sort(), this.planMode]);
-      if (toolNamesCache !== null && cacheKey === key) return toolNamesCache;
-      let candidates = this.activeToolNames().filter(t => !suppressedTools.has(t));
-      if (this.planMode) {
-        candidates = candidates.filter(n => {
-          if (SIDE_EFFECT_TOOL_RE.test(n)) return false;
-          const t = this.toolRegistry.get(n);
-          return !(t as any)?.dangerous;
-        });
-      }
-      const must = new Set<string>();
-      for (const s of this._skills) {
-        if (this._activeSkills.has(s.name)) {
-          for (const t of s.requiredTools) must.add(t);
-        }
-      }
-      toolNamesCache = selectRelevantTools(this.toolRegistry, candidates, message, { mustInclude: must });
-      cacheKey = key;
-      return toolNamesCache;
-    };
-
-    try {
-      let fullContent = '';
-      let roundCount = 0;
-      // Progress-based stopping (OpenClaw-style): we don't cap by round count —
-      // a long task that keeps making progress runs as long as it needs. We
-      // stop when the agent makes no progress for several rounds in a row (pure
-      // spinning), or when the LoopGuard detects a genuine loop. The hard round
-      // cap is only a last-resort backstop against pathological runaway.
-      let consecutiveNoProgress = 0;
-
-      while (true) {
-        // User interrupt between rounds (Ctrl-C): stop before another LLM call.
-        if (signal?.aborted) {
-          if (!assistantStored && fullContent.trim()) {
-            this.memory.addMessage('assistant', fullContent);
-            assistantStored = true;
-          } else if (!assistantStored) {
-            this.popLastUserMessage();
-          }
-          await this.setState(AgentState.IDLE);
-          yield { type: 'interrupted' };
-          yield { type: 'done' };
-          return;
-        }
-        // Last-resort backstop: only trips in pathological cases the progress
-        // detector and LoopGuard both miss. Normal long tasks never reach it.
-        if (roundCount >= this._maxToolRoundsHardCap) break;
-        roundCount++;
-
-        const messages = await this.messagesWithRecall();
-        const toolNames = resolveToolNames();
-        const toolCallsReceived: ToolCall[] = [];
-        let streamingReasoning: string | undefined;
-        let streamUsage: any = null;
-        let roundContent = '';
-
-        const llmSpan = this.tracer.startSpan('chat', 'llm', { model: this.resolveModelId(), round: roundCount });
-        for await (const event of this.llm.streamWithTools(
-          messages,
-          this.name,
-          toolNames.length > 0 ? toolNames : undefined,
-          toolNames.length > 0 ? this.toolRegistry : undefined,
-          Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined,
-          signal
-        )) {
-          if (event.type === 'content') {
-            fullContent += event.text;
-            roundContent += event.text;
-            yield { type: 'content', text: event.text };
-          } else if (event.type === 'tool_call' && event.toolCall) {
-            toolCallsReceived.push(event.toolCall);
-          } else if (event.type === 'error') {
-            llmSpan.end('error', { error: String(event.text).slice(0, 120) });
-            yield { type: 'content', text: `\n[Error: ${event.text}]` };
-            if (!assistantStored) this.popLastUserMessage();
-            await this.setState(AgentState.IDLE);
-            return;
-          } else if (event.type === 'reasoning' && event.text) {
-            yield { type: 'reasoning', text: event.text };
-          } else if (event.type === 'done') {
-            streamUsage = event.usage;
-            streamingReasoning = event.reasoningContent;
-          }
-        }
-        llmSpan.end('ok', streamUsage ? {
-          promptTokens: streamUsage.promptTokens ?? streamUsage.prompt_tokens,
-          completionTokens: streamUsage.completionTokens ?? streamUsage.completion_tokens,
-          cost: streamUsage.cost,
-          toolCalls: toolCallsReceived.length,
-        } : { toolCalls: toolCallsReceived.length });
-
-        if (toolCallsReceived.length === 0) {
-          let finalContent = roundContent;
-          if (!fullContent.trim() && delegations.length > 0) {
-            finalContent = synthesizeDelegationSummary(delegations);
-          }
-          this.memory.addMessage('assistant', finalContent, { reasoningContent: streamingReasoning });
-          assistantStored = true;
-          await this.setState(AgentState.IDLE);
-          this.maybeExtractFacts();
-          if (finalContent !== roundContent) yield { type: 'content', text: finalContent };
-          yield { type: 'done' };
-          return;
-        }
-
-        // Record assistant message with tool calls
-        this.memory.addMessage('assistant', roundContent, {
-          toolCalls: toolCallsReceived,
-          reasoningContent: streamingReasoning,
-        });
-        assistantStored = true;
-
-        if (streamUsage) {
-          this.bus.addEvent(new Event(EventType.LLM_CALL, this.name, null, {
-            model: '', usage: streamUsage,
-          }));
-        }
-
-        // ── Execute all tools via shared pipeline ──
-        // Emit tool_status events before execution
-        for (const tc of toolCallsReceived) {
-          const toolName = tc.function.name;
-          const rawArgs = tc.function.arguments;
-          const toolArgs = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
-          const label = toolArgs ? toolStatusLabel(toolName, toolArgs) : `${toolName} (unparseable args)`;
-          yield { type: 'tool_status', label, tool_name: toolName, args: toolArgs || {} };
-        }
-
-        const execResults = await this.executeToolCalls(toolCallsReceived, {
-          dedupCacheable: true,
-          suppressedTools,
-          signal,
-        });
-
-        // ── Record results with streaming ──
-        let taskCompleted = false;
-        for (const r of execResults) {
-          if (r.toolName === 'task_done' && r.result === TASK_DONE_SENTINEL) {
-            taskCompleted = true;
-            const tc = toolCallsReceived.find(t => t.id === r.tc.id);
-            const rawArgs = tc?.function?.arguments;
-            const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
-            const summary = (args?.summary as string) || '';
-            const displayResult = summary ? `[Task completed: ${summary}]` : '[Task completed]';
-            this.memory.addMessage('tool', displayResult, { name: r.toolName, toolCallId: r.tc.id });
-            yield { type: 'tool_done', label: `task_done: ${summary}` || 'task_done', success: true, tool_name: 'task_done', result: displayResult };
-            continue;
-          }
-
-          const tc = toolCallsReceived.find(t => t.id === r.tc.id);
-          const rawArgs = tc?.function?.arguments;
-          const args = typeof rawArgs === 'string' ? parseToolArgs(rawArgs) : rawArgs;
-          const label = args ? toolStatusLabel(r.toolName, args) : r.toolName;
-          const truncated = (r.result || '').slice(0, 800);
-          yield { type: 'tool_done', label, success: r.success, tool_name: r.toolName, result: truncated };
-          if (r.toolName === 'delegate_to') {
-            const target = (args?.agent as string) || '?';
-            delegations.push([target, r.success]);
-          }
-        }
-
-        if (taskCompleted) {
-          if (!assistantStored) this.popLastUserMessage();
-          await this.setState(AgentState.IDLE);
-          yield { type: 'done' };
-          return;
-        }
-
-        // ── Anti-loop guard (narration / tool-signature / stuck / search-storm) ──
-        const decision = guard.observe(roundContent, toolCallsReceived, execResults);
-        for (const hint of decision.hints) this.memory.addMessage('system', hint);
-        if (decision.stop) {
-          this.memory.addMessage('assistant', decision.stop.note);
-          yield { type: 'content', text: decision.stop.contentLine };
-          await this.setState(AgentState.IDLE);
-          yield { type: 'done' };
-          return;
-        }
-
-        // ── Progress-based stopping ──
-        // A round made progress if at least one tool call SUCCEEDED (state
-        // advanced) or the model produced new text this round. Pure spinning —
-        // no successful tool, no text — increments the no-progress counter; any
-        // progress resets it. Stop only after several no-progress rounds in a
-        // row, so a long, productive task is never cut off by a round count.
-        const madeProgress =
-          execResults.some(r => r.success && r.toolName !== 'task_done') ||
-          roundContent.trim().length > 0;
-        if (madeProgress) {
-          consecutiveNoProgress = 0;
-        } else {
-          consecutiveNoProgress++;
-          if (consecutiveNoProgress === this._maxNoProgressRounds - 1) {
-            this.memory.addMessage('system',
-              '[No progress] Your recent rounds produced no successful tool result and no text. Either take a concrete next action, output the final answer, or call task_done. One more empty round will end the turn.');
-          }
-          if (consecutiveNoProgress >= this._maxNoProgressRounds) {
-            if (!assistantStored && fullContent.trim()) {
-              this.memory.addMessage('assistant', fullContent);
-              assistantStored = true;
-            }
-            await this.setState(AgentState.IDLE);
-            yield { type: 'content', text: `\n\n[stalled] ${consecutiveNoProgress} rounds without progress — stopping.` };
-            yield { type: 'done' };
-            return;
-          }
-        }
-      }
-
-      // Hard-cap backstop reached (pathological runaway only).
-      if (!assistantStored) this.popLastUserMessage();
-      await this.setState(AgentState.IDLE);
-      if (!fullContent.trim() && delegations.length > 0) {
-        const synth = synthesizeDelegationSummary(delegations);
-        this.memory.addMessage('assistant', synth);
-        yield { type: 'content', text: synth };
-      }
-      yield {
-        type: 'truncated',
-        reason: `safety ceiling of ${this._maxToolRoundsHardCap} tool rounds reached — the task may be unfinished. Send "continue" to resume, or raise llm.max_tool_rounds_hard_cap in config.`,
-      };
-      yield { type: 'done' };
-    } catch (e: any) {
-      if (!assistantStored) this.popLastUserMessage();
-      await this.setState(AgentState.ERROR);
-      yield { type: 'content', text: `\n[Error: ${e.message || e}]` };
-    } finally {
-      this.memory.pruneToolMessages();
-    }
+    yield* this.createAgentLoop().runStream(message, autoActivated, signal);
   }
 
   protected popLastUserMessage(): void {
@@ -1399,107 +1041,42 @@ export class BaseAgent {
     return messages;
   }
 
-  protected async llmLoop(options?: {
-    onStatus?: ((status: string) => void) | null;
-    ephemeral?: boolean;
-  }): Promise<LLMResponse> {
-    const ephemeral = options?.ephemeral ?? false;
-    const onStatus = options?.onStatus ?? null;
-
-    let response: LLMResponse = { content: '', toolCalls: [], model: '', usage: { promptTokens: 0, completionTokens: 0 }, cost: 0, truncated: false };
-    const fullToolNames = this.activeToolNames();
-
-    const lastUser = [...this.memory.shortTerm].reverse().find(m => m.role === 'user');
-    const must = new Set<string>();
-    for (const s of this._skills) {
-      if (this._activeSkills.has(s.name)) {
-        for (const t of s.requiredTools) must.add(t);
-      }
-    }
-    const toolNames = selectRelevantTools(
-      this.toolRegistry, fullToolNames, lastUser?.content || '', { mustInclude: must }
-    );
-
-    try {
-      // Progress-based stopping (mirrors chatStreamImpl): no round-count limit —
-      // run while making progress, stop after _maxNoProgressRounds empty rounds.
-      // The hard cap is only a last-resort backstop against runaway.
-      let rounds = 0;
-      let consecutiveNoProgress = 0;
-      while (true) {
-        if (rounds >= this._maxToolRoundsHardCap) break;
-        rounds++;
-
-        const messages = await this.messagesWithRecall();
-        if (onStatus) onStatus('thinking...');
-        response = await this.llm.complete(
-          messages, this.name,
-          toolNames.length > 0 ? toolNames : undefined, false,
-          Object.keys(this.getSkillConfigOverrides()).length > 0 ? this.getSkillConfigOverrides() : undefined
-        );
-
-        if (!response.toolCalls || response.toolCalls.length === 0) {
-          return response;
-        }
-
-        this.bus.addEvent(new Event(EventType.LLM_CALL, this.name, null, {
-          model: response.model, usage: response.usage,
-        }));
-
-        // Record assistant message
-        this.memory.addMessage('assistant', response.content || '', {
-          toolCalls: response.toolCalls,
-          reasoningContent: response.reasoningContent,
-          ephemeral,
-        });
-
-        // ── Execute all tools via shared pipeline ──
-        const execResults = await this.executeToolCalls(response.toolCalls, { dedupCacheable: true, onStatus: onStatus ?? undefined, ephemeral });
-        await this.setState(AgentState.THINKING);
-
-        // Progress check: any successful tool or produced text resets the
-        // counter; otherwise count an empty round and stop after the threshold.
-        const madeProgress =
-          execResults.some(r => r.success && r.toolName !== 'task_done') ||
-          (response.content || '').trim().length > 0;
-        consecutiveNoProgress = madeProgress ? 0 : consecutiveNoProgress + 1;
-        if (consecutiveNoProgress >= this._maxNoProgressRounds) break;
-      }
-
-      response.truncated = true;
-      if (!response.content) {
-        response.content = `[stopped] no progress for ${this._maxNoProgressRounds} rounds (or backstop reached).`;
-      }
-      return response;
-    } catch (e) {
-      this.memory.pruneToolMessages();
-      throw e;
-    }
+  protected async llmLoop(options?: BatchLoopOptions) {
+    return this.createAgentLoop().runBatch(options);
   }
 
   async executeTask(
     task: Task,
-    onStatus?: ((status: string) => void) | null
+    onStatus?: ((status: string) => void) | null,
+    signal?: AbortSignal,
   ): Promise<TaskResult> {
-    return this.withTurnLock(() => this.executeTaskImpl(task, onStatus));
+    return this.sessionController.withTurn(async () => {
+      this.tracer.startTrace(`[task] ${task.description}`.replace(/\s+/g, ' ').slice(0, 80), this.name);
+      try {
+        return await this.executeTaskImpl(task, onStatus, signal);
+      } finally {
+        this.tracer.endTrace();
+      }
+    });
   }
 
   private async executeTaskImpl(
     task: Task,
-    onStatus?: ((status: string) => void) | null
+    onStatus?: ((status: string) => void) | null,
+    signal?: AbortSignal,
   ): Promise<TaskResult> {
     await this.setState(AgentState.THINKING);
     task.transitionTo(TaskState.RUNNING);
     this.memory.setWorking('current_task', task);
 
-    const prompt = `Complete this task NOW using your available tools. Then write the actual deliverable content in your final reply.\n\nTask: ${task.description}`;
+    let prompt = `Complete this task NOW using your available tools. Then write the actual deliverable content in your final reply.\n\nTask: ${task.description}`;
     if (task.metadata) {
       const ctxData: Record<string, any> = {};
       for (const [k, v] of Object.entries(task.metadata)) {
         if (k !== 'goal') ctxData[k] = v;
       }
       if (Object.keys(ctxData).length > 0) {
-        prompt + `\nContext: ${JSON.stringify(ctxData)}`;
+        prompt += `\nContext: ${JSON.stringify(ctxData)}`;
       }
     }
 
@@ -1522,16 +1099,16 @@ export class BaseAgent {
     } catch { /* optional */ }
 
     try {
-      let response = await this.llmLoop({ onStatus, ephemeral: true });
+      let response = await this.llmLoop({ onStatus, ephemeral: true, signal });
 
       // ── 验证闭环: if this task touched the filesystem and verify commands
       // are configured (config.verify or SKY.md "## Verify"), run them and
       // feed failures back for a bounded number of fix rounds. ──
       try {
-        const { resolveVerifyConfig, runVerify } = require('./verify');
         const vc = resolveVerifyConfig(this.config);
         if (vc.commands.length > 0 && this._turnWroteFiles) {
           for (let round = 0; round <= vc.maxFixRounds; round++) {
+            signal?.throwIfAborted();
             if (onStatus) onStatus(`verify: ${vc.commands.length} 条命令`);
             const vr = runVerify(vc);
             if (vr.ok) {
@@ -1546,7 +1123,7 @@ export class BaseAgent {
             log.warn('verify_failed_fixing', { agent: this.name, round: round + 1 });
             this.memory.addMessage('user',
               `[自动验证失败] 以下验证命令未通过。请定位根因并修复，确保它们全部通过：\n\n${vr.report}`);
-            response = await this.llmLoop({ onStatus, ephemeral: true });
+            response = await this.llmLoop({ onStatus, ephemeral: true, signal });
           }
         }
       } catch (e) {
@@ -1563,18 +1140,18 @@ export class BaseAgent {
       return new TaskResult(true, enriched);
     } catch (e) {
       task.transitionTo(TaskState.FAILED);
-      task.result = String(e);
+      const cancelled = signal?.aborted || (e as { name?: string })?.name === 'AbortError';
+      task.result = cancelled ? '[cancelled] task interrupted by user' : String(e);
       this.memory.pruneToolMessages();
-      await this.setState(AgentState.ERROR);
-      return new TaskResult(false, String(e));
+      await this.setState(cancelled ? AgentState.IDLE : AgentState.ERROR);
+      return new TaskResult(false, task.result);
     } finally {
       // Restore chat history
       this.memory.shortTerm = savedShortTerm!;
     }
   }
 
-  private _security: any = null;
-  get security(): any { if (!this._security) { try { const { getSecurity } = require('./security'); this._security = getSecurity(); } catch { this._security = {}; } } return this._security; }
+  get security(): SecurityContext { return getSecurity(); }
 
   protected getHooks(): import('./hooks').Hooks {
     if (!this._hooks) {
@@ -1596,72 +1173,44 @@ export class BaseAgent {
         if (!approved) log.warn('tool_blocked', { tool: toolName, agent: this.name, reason });
         return approved;
       }
-    } catch { /* fall through */ }
-    const mode = (this.config as any).cli?.approvalMode || 'auto';
-    if (mode === 'strict') return false;
-    return true;
+      log.error('approval_check_unavailable', { tool: toolName, agent: this.name });
+    } catch (error) {
+      log.error('approval_check_failed', { tool: toolName, agent: this.name, error });
+    }
+    return false;
   }
 
-  async requestHelp(targetAgent: string, description: string, timeout: number = 60): Promise<string> {
-    const correlationId = Math.random().toString(36).slice(2, 14);
-
-    const promise = new Promise<string>((resolve, reject) => {
-      this._pendingRequests.set(correlationId, { resolve, reject });
-    });
-
-    await this.bus.publish(new Event(
-      EventType.AGENT_REQUEST, this.name, targetAgent,
-      { correlation_id: correlationId, description, source: this.name }
-    ));
-
-    try {
-      const result = await Promise.race([
-        promise,
-        new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout after ${timeout}s`)), timeout * 1000)
-        ),
-      ]);
-      return result;
-    } catch {
-      this._pendingRequests.delete(correlationId);
-      return `[${targetAgent} did not respond within ${timeout}s]`;
-    }
+  async requestHelp(
+    targetAgent: string,
+    description: string,
+    timeout: number = 60,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    return this.delegationCoordinator.requestHelp(targetAgent, description, timeout, signal);
   }
 
-  protected async handleRequest(event: Event): Promise<void> {
-    const description = event.data?.description || '';
-    const correlationId = event.data?.correlation_id || '';
-    const source = event.data?.source || '';
-    if (!correlationId) return;
-
-    const task = new Task({
-      id: `req-${correlationId.slice(0, 8)}`,
-      description,
-      assignedTo: this.name,
-    });
-
-    try {
-      const result = await this.executeTask(task);
-      await this.bus.publish(new Event(
-        EventType.AGENT_RESPONSE, this.name, source,
-        { correlation_id: correlationId, content: result.content, success: result.success }
-      ));
-    } catch (e) {
-      await this.bus.publish(new Event(
-        EventType.AGENT_RESPONSE, this.name, source,
-        { correlation_id: correlationId, content: `[error] ${e}`, success: false }
-      ));
+  private get delegationCoordinator(): DelegationCoordinator {
+    if (!this._delegationCoordinator) {
+      this._delegationCoordinator = new DelegationCoordinator({
+        agentName: () => this.name,
+        bus: this.bus,
+        executeTask: (task, signal) => this.executeTask(task, undefined, signal),
+      });
     }
+    return this._delegationCoordinator;
   }
 
-  protected handleResponse(event: Event): void {
-    const correlationId = event.data?.correlation_id || '';
-    if (!correlationId) return;
-    const pending = this._pendingRequests.get(correlationId);
-    if (pending) {
-      this._pendingRequests.delete(correlationId);
-      pending.resolve(event.data?.content || '');
+  private get sessionController(): AgentSessionController {
+    if (!this._sessionController) {
+      this._sessionController = new AgentSessionController({
+        agentName: () => this.name,
+        tracer: this.tracer,
+        getShortTerm: () => this.memory.shortTerm,
+        autoActivateSkills: (message) => this.autoActivateSkills(message),
+        popLastUserMessage: () => this.popLastUserMessage(),
+      });
     }
+    return this._sessionController;
   }
 
   getStatus(): Record<string, any> {
@@ -1675,25 +1224,7 @@ export class BaseAgent {
     };
   }
 
-  // ── Turn lock ──
-
-  private async withTurnLock<T>(fn: () => Promise<T>): Promise<T> {
-    while (this._turnLockCounter > 0) {
-      await new Promise<void>(resolve => {
-        const oldResolve = this._turnLockResolve;
-        this._turnLockResolve = () => { oldResolve?.(); resolve(); };
-      });
-    }
-    this._turnLockCounter++;
-    try {
-      return await fn();
-    } finally {
-      this._turnLockCounter--;
-      if (this._turnLockResolve) {
-        const r = this._turnLockResolve;
-        this._turnLockResolve = null;
-        r();
-      }
-    }
+  getToolStats() {
+    return this.toolRegistry.getStats();
   }
 }

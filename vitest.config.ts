@@ -5,8 +5,17 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    testTimeout: 10_000,
     include: ['tests/**/*.test.ts'],
     setupFiles: ['tests/setup.ts'],
+    coverage: {
+      thresholds: {
+        statements: 60,
+        branches: 70,
+        functions: 75,
+        lines: 60,
+      },
+    },
   },
   resolve: {
     alias: {

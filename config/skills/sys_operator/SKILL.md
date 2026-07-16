@@ -8,6 +8,9 @@ triggers:
   - "process"
   - "disk"
   - "ops"
+  - "系统运维"
+  - "服务管理"
+  - "进程管理"
 ---
 
 ## System operations

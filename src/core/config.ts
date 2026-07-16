@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as yaml from "yaml";
+import { atomicWriteFileSync } from "./fs_atomic";
 import { getLogger } from "./logger";
 
 const log = getLogger("config");
@@ -14,20 +15,19 @@ const log = getLogger("config");
  * Configuration directory paths
  */
 const LEGACY_CONFIG_DIR = path.join(os.homedir(), ".weather-agents");
+const SKYLOOM_CONFIG_DIR = path.join(os.homedir(), ".skyloom");
 
 /**
  * Resolve the user configuration directory
  * Migrates from legacy ~/.weather-agents to ~/.skyloom if needed
  */
 function resolveUserConfigDir(): string {
-  const newDir = path.join(os.homedir(), ".skyloom");
-
-  if (!fs.existsSync(newDir) && fs.existsSync(LEGACY_CONFIG_DIR)) {
+  if (!fs.existsSync(SKYLOOM_CONFIG_DIR) && fs.existsSync(LEGACY_CONFIG_DIR)) {
     try {
-      fs.renameSync(LEGACY_CONFIG_DIR, newDir);
+      fs.renameSync(LEGACY_CONFIG_DIR, SKYLOOM_CONFIG_DIR);
       log.info("Migrated config directory", {
         from: LEGACY_CONFIG_DIR,
-        to: newDir,
+        to: SKYLOOM_CONFIG_DIR,
       });
     } catch (error) {
       log.warn("Failed to migrate config directory", {
@@ -37,10 +37,12 @@ function resolveUserConfigDir(): string {
     }
   }
 
-  return newDir;
+  return SKYLOOM_CONFIG_DIR;
 }
 
-export const USER_CONFIG_DIR = resolveUserConfigDir();
+// Path discovery is deliberately side-effect free. Migration happens only
+// when a command explicitly reads or writes user configuration.
+export const USER_CONFIG_DIR = SKYLOOM_CONFIG_DIR;
 
 /**
  * Find the config directory (bundled or user-provided)
@@ -190,7 +192,7 @@ export function loadProviderCatalog(): Record<string, ProviderEntry> {
   }
 
   // Load user overrides
-  const userPath = path.join(USER_CONFIG_DIR, "providers.yaml");
+  const userPath = path.join(resolveUserConfigDir(), "providers.yaml");
   const userData = loadYaml(userPath);
 
   if (userData) {
@@ -256,7 +258,7 @@ export function loadDefaultConfig(): SkyloomConfig {
  * Load user configuration (from ~/.skyloom/config.yaml)
  */
 export function loadUserConfig(): SkyloomConfig | null {
-  const userPath = path.join(USER_CONFIG_DIR, "config.yaml");
+  const userPath = path.join(resolveUserConfigDir(), "config.yaml");
   const data = loadYaml(userPath);
 
   if (!data) {
@@ -311,18 +313,16 @@ export function loadConfig(): SkyloomConfig {
  * Save user configuration
  */
 export function saveUserConfig(config: SkyloomConfig): void {
+  const userConfigDir = resolveUserConfigDir();
   // Ensure user config directory exists
-  if (!fs.existsSync(USER_CONFIG_DIR)) {
-    fs.mkdirSync(USER_CONFIG_DIR, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(userConfigDir)) {
+    fs.mkdirSync(userConfigDir, { recursive: true, mode: 0o700 });
   }
 
-  const userPath = path.join(USER_CONFIG_DIR, "config.yaml");
+  const userPath = path.join(userConfigDir, "config.yaml");
   const content = yaml.stringify(config);
 
-  fs.writeFileSync(userPath, content, { encoding: "utf-8", mode: 0o600 });
-  // mode in writeFileSync only applies on creation; enforce on existing files
-  // too, since this config holds plaintext API keys.
-  try { fs.chmodSync(userPath, 0o600); } catch { /* best-effort (e.g. Windows) */ }
+  atomicWriteFileSync(userPath, content, 0o600);
   log.info("Saved user configuration", { path: userPath });
 }
 

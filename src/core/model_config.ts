@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
 import { USER_CONFIG_DIR } from './config';
+import { atomicWriteFileSync } from './fs_atomic';
 import { listProviders, modelsFor, validateModel } from './catalog';
 
 export interface ModelDescription {
@@ -37,7 +38,7 @@ export function providerOfModel(modelId: string): string | null {
 }
 
 /** Read-mutate-write the raw user config file (narrow patch). */
-function patchUserConfig(mutate: (cfg: any) => void, dir: string = USER_CONFIG_DIR): void {
+export function patchUserConfig(mutate: (cfg: any) => void, dir: string = USER_CONFIG_DIR): void {
   const file = path.join(dir, 'config.yaml');
   let cfg: any = {};
   if (fs.existsSync(file)) {
@@ -46,8 +47,7 @@ function patchUserConfig(mutate: (cfg: any) => void, dir: string = USER_CONFIG_D
   mutate(cfg);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   // config.yaml may hold plaintext API keys — keep it owner-only.
-  fs.writeFileSync(file, yaml.stringify(cfg), { encoding: 'utf-8', mode: 0o600 });
-  try { fs.chmodSync(file, 0o600); } catch { /* best-effort (e.g. Windows) */ }
+  atomicWriteFileSync(file, yaml.stringify(cfg), 0o600);
 }
 
 /** Apply the same mutation to the in-memory runtime config (hot effect). */

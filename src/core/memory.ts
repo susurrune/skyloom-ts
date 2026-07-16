@@ -15,6 +15,7 @@ import * as os from 'os';
 import type { MemoryConfig } from './config';
 import { getLogger } from './logger';
 import { getScorer } from './semantic';
+import { atomicWriteFileSync } from './fs_atomic';
 
 const logger = getLogger('memory');
 
@@ -73,6 +74,7 @@ export class Memory {
   public working: Record<string, any> = {};
 
   private dbPath: string;
+  private migrateLegacySharedDb = false;
   private db: SqlJsDatabase | null = null;
   private SQL: SqlJsStatic | null = null;
   private loaded = false;
@@ -90,6 +92,15 @@ export class Memory {
 
     const base = expandUserPath(config.dbPath);
     this.dbPath = path.join(path.dirname(base), `${agentName}.db`);
+    const legacyPath = path.join(path.dirname(base), '.db');
+    if (agentName === 'fog' && !fs.existsSync(this.dbPath) && fs.existsSync(legacyPath)) {
+      try {
+        fs.copyFileSync(legacyPath, this.dbPath);
+        this.migrateLegacySharedDb = true;
+      } catch (err) {
+        logger.warn('legacy_memory_copy_failed', { from: legacyPath, to: this.dbPath, error: String(err) });
+      }
+    }
   }
 
   /**
@@ -216,6 +227,21 @@ export class Memory {
       )
     `);
 
+    if (this.migrateLegacySharedDb) {
+      try {
+        this.db.run('BEGIN');
+        for (const table of ['memories', 'messages', 'sessions', 'working_data']) {
+          this.db.run(`UPDATE ${table} SET agent = ? WHERE agent = ''`, [this.agentName]);
+        }
+        this.db.run('COMMIT');
+        this.persistDb();
+        logger.info('legacy_memory_migrated', { agent: this.agentName, path: this.dbPath });
+      } catch (err) {
+        try { this.db.run('ROLLBACK'); } catch { /* best-effort */ }
+        logger.warn('legacy_memory_migration_failed', { agent: this.agentName, error: String(err) });
+      }
+    }
+
     this.loadShortTerm();
     this.loadWorking();
   }
@@ -227,7 +253,7 @@ export class Memory {
     if (!this.db) return;
     try {
       const data = this.db.export();
-      fs.writeFileSync(this.dbPath, Buffer.from(data));
+      atomicWriteFileSync(this.dbPath, Buffer.from(data), 0o600);
     } catch (err) {
       logger.warn('persist_db_failed', { path: this.dbPath, error: String(err) });
     }
@@ -598,9 +624,14 @@ export class Memory {
       );
 
       if (sessionId) {
+        const preview = role === 'user' ? content.trim().slice(0, 80) : '';
         this.dbRun(
-          'UPDATE sessions SET message_count = message_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-          [sessionId]
+          `UPDATE sessions
+           SET message_count = message_count + 1,
+               updated_at = CURRENT_TIMESTAMP,
+               preview = CASE WHEN preview = '' AND ? != '' THEN ? ELSE preview END
+           WHERE id = ?`,
+          [preview, preview, sessionId]
         );
       }
 
@@ -1014,10 +1045,16 @@ export class Memory {
     const preview = name || '';
 
     if (this.db) {
-      this.dbRun(
-        'INSERT INTO sessions (id, agent, name, preview) VALUES (?, ?, ?, ?)',
-        [sessionId, this.agentName, name, preview]
-      );
+      try {
+        this.db.run(
+          'INSERT INTO sessions (id, agent, name, preview) VALUES (?, ?, ?, ?)',
+          [sessionId, this.agentName, name ?? null, preview]
+        );
+        this.scheduleSave();
+      } catch (error) {
+        logger.warn('session_create_failed', { agent: this.agentName, error: String(error) });
+        throw new Error('Failed to create session');
+      }
     }
 
     this.activeSession = sessionId;
@@ -1036,7 +1073,17 @@ export class Memory {
     }
 
     const rows = this.dbAll(
-      'SELECT id, agent, name, preview, message_count, created_at, updated_at FROM sessions WHERE agent = ? ORDER BY updated_at DESC LIMIT 50',
+      `SELECT s.id, s.agent, s.name,
+              COALESCE(NULLIF(s.preview, ''), (
+                SELECT SUBSTR(m.content, 1, 80)
+                FROM messages m
+                WHERE m.agent = s.agent AND m.session_id = s.id AND m.role = 'user'
+                ORDER BY m.id ASC LIMIT 1
+              ), '') AS preview,
+              s.message_count, s.created_at, s.updated_at
+       FROM sessions s
+       WHERE s.agent = ?
+       ORDER BY s.updated_at DESC LIMIT 50`,
       [this.agentName]
     );
 
@@ -1049,6 +1096,49 @@ export class Memory {
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     }));
+  }
+
+  /**
+   * Check whether a session exists for this agent without loading it.
+   */
+  async sessionExists(sessionId: string): Promise<boolean> {
+    if (!this.db) {
+      return false;
+    }
+    const row = this.dbGet(
+      'SELECT id FROM sessions WHERE id = ? AND agent = ?',
+      [sessionId, this.agentName]
+    );
+    return Boolean(row);
+  }
+
+  /** Read a persisted session without changing the active in-memory session. */
+  getSessionMessages(sessionId: string): Record<string, any>[] | null {
+    if (!this.db) return null;
+    const session = this.dbGet(
+      'SELECT id FROM sessions WHERE id = ? AND agent = ?',
+      [sessionId, this.agentName]
+    );
+    if (!session) return null;
+
+    const rows = this.dbAll(
+      `SELECT role, content, name, tool_call_id, tool_calls, reasoning_content
+       FROM messages
+       WHERE agent = ? AND session_id = ?
+       ORDER BY id DESC LIMIT ?`,
+      [this.agentName, sessionId, this.config.shortTermLimit]
+    ).reverse();
+
+    return rows.map((row: any) => {
+      const message: Record<string, any> = { role: row.role, content: row.content };
+      if (row.name) message.name = row.name;
+      if (row.tool_call_id) message.tool_call_id = row.tool_call_id;
+      if (row.tool_calls) {
+        try { message.tool_calls = JSON.parse(row.tool_calls); } catch { /* malformed historical metadata */ }
+      }
+      if (row.reasoning_content) message.reasoning_content = row.reasoning_content;
+      return message;
+    });
   }
 
   /**
@@ -1101,6 +1191,22 @@ export class Memory {
     return true;
   }
 
+  /** Load the latest session with this stable external name, or create it. */
+  async loadOrCreateNamedSession(name: string): Promise<string> {
+    const normalized = name.trim().slice(0, 240);
+    if (!normalized || !this.db) return this.createSession(normalized || null);
+
+    const row = this.dbGet(
+      'SELECT id FROM sessions WHERE agent = ? AND name = ? ORDER BY updated_at DESC LIMIT 1',
+      [this.agentName, normalized]
+    );
+    if (row?.id) {
+      await this.loadSession(String(row.id));
+      return String(row.id);
+    }
+    return this.createSession(normalized);
+  }
+
   /**
    * Delete a session.
    */
@@ -1118,15 +1224,23 @@ export class Memory {
       return false;
     }
 
-    this.dbRun(
-      'DELETE FROM messages WHERE agent = ? AND session_id = ?',
-      [this.agentName, sessionId]
-    );
-
-    this.dbRun(
-      'DELETE FROM sessions WHERE id = ? AND agent = ?',
-      [sessionId, this.agentName]
-    );
+    try {
+      this.db.run('BEGIN');
+      this.db.run(
+        'DELETE FROM messages WHERE agent = ? AND session_id = ?',
+        [this.agentName, sessionId]
+      );
+      this.db.run(
+        'DELETE FROM sessions WHERE id = ? AND agent = ?',
+        [sessionId, this.agentName]
+      );
+      this.db.run('COMMIT');
+      this.scheduleSave();
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch { /* best-effort */ }
+      logger.warn('session_delete_failed', { agent: this.agentName, sessionId, error: String(error) });
+      throw new Error('Failed to delete session');
+    }
 
     if (this.activeSession === sessionId) {
       this.activeSession = null;

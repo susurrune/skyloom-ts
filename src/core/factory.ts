@@ -11,8 +11,37 @@ import { LLMClient } from './llm';
 import { getLogger } from './logger';
 import { SkillRegistry } from './skill';
 import { ToolRegistry } from './tool';
+import { getBackgroundManager } from './bgproc';
+import { loadHooks, runSessionStartHooks } from './hooks';
+import { resolveWorkspacePath, initWorkspace } from './workspace';
+import { MCPManager, loadPersistedServers, loadProjectMcpJson } from './mcp';
+import { matchPipeline, buildTasksFromPipeline } from './pipelines';
+import { OrchestrationRunStore, type OrchestrationRun } from './run_store';
+import { registerBuiltinTools } from '../tools/builtin';
+import { registerAllSkills } from '../skills/loader';
+import { PluginLoader } from '../plugins/loader';
+import { createDelegateTool } from '../tools/delegate';
+import { createSpawnAgentTool } from '../tools/spawn';
+import { createModelTools } from '../tools/model_tool';
+import { createTodoTool } from '../tools/todo';
+import { registerMcpTools } from '../tools/mcp';
+import { FogAgent } from '../agents/fog';
+import { RainAgent } from '../agents/rain';
+import { FrostAgent } from '../agents/frost';
+import { SnowAgent } from '../agents/snow';
+import { DewAgent } from '../agents/dew';
+import { FairAgent } from '../agents/fair';
 
 const log = getLogger('factory');
+
+const AGENT_CLASSES: Record<string, new (...args: any[]) => BaseAgent> = {
+  fog: FogAgent,
+  rain: RainAgent,
+  frost: FrostAgent,
+  snow: SnowAgent,
+  dew: DewAgent,
+  fair: FairAgent,
+};
 
 export class SystemContext {
   config: ReturnType<typeof loadConfig>;
@@ -70,10 +99,7 @@ export class SystemContext {
 
   async closeAll(): Promise<void> {
     // Terminate any background shell jobs started this session.
-    try {
-      const { getBackgroundManager } = require('./bgproc');
-      getBackgroundManager().killAll();
-    } catch { /* best-effort */ }
+    getBackgroundManager().killAll();
     for (const agent of this.agentMap.values()) {
       await agent.close();
     }
@@ -91,14 +117,12 @@ export function createSystemContext(): SystemContext {
 
   // session_start hooks — user-configured shell commands (see core/hooks)
   try {
-    const { loadHooks, runSessionStartHooks } = require('./hooks');
     const hooks = loadHooks(config);
     if (hooks.sessionStart.length > 0) runSessionStartHooks(hooks);
   } catch { /* hooks must never block startup */ }
 
   let workspacePath = '';
   try {
-    const { resolveWorkspacePath, initWorkspace } = require('./workspace');
     const wsRoot = resolveWorkspacePath((config as any).workspace?.path || 'auto');
     initWorkspace(wsRoot);
     workspacePath = wsRoot;
@@ -113,7 +137,6 @@ export function createSystemContext(): SystemContext {
 
   // Register builtin tools
   try {
-    const { registerBuiltinTools } = require('../tools/builtin');
     registerBuiltinTools(baseToolRegistry);
   } catch (e) {
     log.warn('builtin_tools_not_available', { error: String(e) });
@@ -121,16 +144,14 @@ export function createSystemContext(): SystemContext {
 
   // Register all skills
   try {
-    const { registerAllSkills } = require('../skills/loader');
     registerAllSkills(baseSkillRegistry);
   } catch (e) {
     log.warn('skills_not_available', { error: String(e) });
   }
 
   // Load plugins (ordered hook lifecycle — see plugins/loader)
-  let pluginLoader: any = null;
+  let pluginLoader: PluginLoader | null = null;
   try {
-    const { PluginLoader } = require('../plugins/loader');
     pluginLoader = new PluginLoader(baseToolRegistry, config);
     const pluginConfig = (config as any).plugins;
     const pluginDirs = pluginConfig?.enabled ? (pluginConfig.directories || []) : [];
@@ -140,10 +161,10 @@ export function createSystemContext(): SystemContext {
   }
 
   // Configure MCP manager
-  let mcpManager: any = null;
+  let mcpManager: MCPManager | null = null;
   try {
-    const { MCPManager, loadPersistedServers, loadProjectMcpJson } = require('./mcp');
     mcpManager = new MCPManager(baseToolRegistry);
+    registerMcpTools(baseToolRegistry, () => mcpManager);
     const persisted = loadPersistedServers();
     const mcpServers = (config as any).mcp?.servers || [];
     const projectServers = loadProjectMcpJson(); // Claude Code 标准 .mcp.json
@@ -166,8 +187,7 @@ export function createSystemContext(): SystemContext {
   // Per-agent registries
   const agents = new Map<string, BaseAgent>();
 
-  // Try to dynamically load agent classes
-  const agentNames = ['fog', 'rain', 'frost', 'snow', 'dew', 'fair'];
+  const agentNames = Object.keys(AGENT_CLASSES);
 
   for (const name of agentNames) {
     const agentRegistry = new ToolRegistry();
@@ -176,22 +196,7 @@ export function createSystemContext(): SystemContext {
     agentSkills.merge(baseSkillRegistry);
 
     try {
-      // Try dynamic import
-      const clsName = name.charAt(0).toUpperCase() + name.slice(1) + 'Agent';
-      // Use require for now since dynamic imports are async
-      let AgentClass: any = null;
-      try {
-        const mod = require(`../agents/${name}`);
-        AgentClass = mod[clsName];
-      } catch {
-        log.warn('agent_class_missing', { agent: name });
-        continue;
-      }
-
-      if (!AgentClass) {
-        log.warn('agent_class_not_found', { agent: name, class: clsName });
-        continue;
-      }
+      const AgentClass = AGENT_CLASSES[name];
 
       const agent = new AgentClass(
         config,
@@ -200,10 +205,10 @@ export function createSystemContext(): SystemContext {
         agentRegistry,
         agentSkills
       ) as BaseAgent;
+      agent.planMode = Boolean((config.agents as any)?.[name]?.plan_mode);
 
       // Register delegate_to tool
       try {
-        const { createDelegateTool } = require('../tools/delegate');
         agentRegistry.register(createDelegateTool(agents, agent));
       } catch (e) {
         log.warn('delegate_tool_not_available', { agent: name, error: String(e) });
@@ -211,7 +216,6 @@ export function createSystemContext(): SystemContext {
 
       // Register the spawn_agent tool — isolated-context subagents (Task tool).
       try {
-        const { createSpawnAgentTool } = require('../tools/spawn');
         agentRegistry.register(createSpawnAgentTool({
           config,
           llm,
@@ -225,7 +229,6 @@ export function createSystemContext(): SystemContext {
 
       // Register model self-service tools (list_models / set_my_model)
       try {
-        const { createModelTools } = require('../tools/model_tool');
         for (const t of createModelTools(name, config)) agentRegistry.register(t);
       } catch (e) {
         log.warn('model_tools_not_available', { agent: name, error: String(e) });
@@ -233,7 +236,6 @@ export function createSystemContext(): SystemContext {
 
       // Register the task-checklist tool (todo_write)
       try {
-        const { createTodoTool } = require('../tools/todo');
         agentRegistry.register(createTodoTool(agent));
       } catch (e) {
         log.warn('todo_tool_not_available', { agent: name, error: String(e) });
@@ -274,6 +276,8 @@ export class TaskExecutionResult {
   description: string;
   success: boolean;
   content: string;
+  fullContent: string;
+  traceId: string | null;
 
   constructor(opts: {
     id: string;
@@ -281,12 +285,16 @@ export class TaskExecutionResult {
     description: string;
     success: boolean;
     content: string;
+    fullContent?: string;
+    traceId?: string | null;
   }) {
     this.id = opts.id;
     this.agent = opts.agent;
     this.description = opts.description;
     this.success = opts.success;
     this.content = opts.content;
+    this.fullContent = opts.fullContent ?? opts.content;
+    this.traceId = opts.traceId ?? null;
   }
 }
 
@@ -341,28 +349,37 @@ async function executeWithRetry(
   agent: BaseAgent,
   aTask: any,
   maxAttempts: number,
-  onStatus?: ((status: string) => void) | null
+  onStatus?: ((status: string) => void) | null,
+  signal?: AbortSignal,
 ): Promise<any> {
   let lastResult: any = null;
   const originalDescription = aTask.description;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (signal?.aborted) return { success: false, content: '[cancelled] task interrupted by user' };
+    const attemptTask = new AgentTask({
+      id: aTask.id,
+      description: attempt === 1
+        ? originalDescription
+        : `${originalDescription}\n\n[retry ${attempt}/${maxAttempts}] previous attempt did not produce a valid deliverable. You MUST produce the actual deliverable.`,
+      assignedTo: aTask.assignedTo,
+      parentId: aTask.parentId,
+      dependsOn: Array.from(aTask.dependsOn || []),
+      metadata: { ...(aTask.metadata || {}), attempt },
+    });
     try {
-      const result = await agent.executeTask(aTask, onStatus);
+      const result = await agent.executeTask(attemptTask, onStatus, signal);
+      if (signal?.aborted) return { success: false, content: '[cancelled] task interrupted by user' };
       const content = (result.content || '').trim();
       const truncated = (result as any).truncated === true;
       const ok = result.success && !isThinContent(content);
 
       if (ok && !truncated) return result;
       lastResult = result;
-
-      if (attempt < maxAttempts) {
-        const reason = truncated
-          ? 'previous attempt was truncated'
-          : 'previous attempt was empty or a placeholder ack';
-        aTask.description = `${originalDescription}\n\n[retry ${attempt + 1}/${maxAttempts}] ${reason}. You MUST produce the actual deliverable.`;
-      }
     } catch (e) {
+      if (signal?.aborted || (e as { name?: string })?.name === 'AbortError') {
+        return { success: false, content: '[cancelled] task interrupted by user' };
+      }
       lastResult = { success: false, content: `Attempt ${attempt} threw: ${e}` };
     }
     if (attempt < maxAttempts) {
@@ -370,7 +387,6 @@ async function executeWithRetry(
     }
   }
 
-  aTask.description = originalDescription;
   return lastResult || { success: false, content: `All ${maxAttempts} attempts failed` };
 }
 
@@ -380,20 +396,39 @@ async function executePending(
   results: TaskExecutionResult[],
   resultsById: Map<string, TaskExecutionResult>,
   fullContentsById: Map<string, string>,
-  completed: Set<string>,
+  succeeded: Set<string>,
   options: {
     onTaskStart?: ((task: any) => Promise<void>) | null;
     onTaskDone?: ((task: any, result: TaskExecutionResult) => Promise<void>) | null;
     onToolStatus?: ((status: string) => void) | null;
     resultTruncate?: number | null;
     maxTaskRetries: number;
+    signal?: AbortSignal;
   }
 ): Promise<void> {
   while (pending.length > 0) {
-    const ready = pending.filter(t => t.allDeps.every((dep: string) => completed.has(dep)));
+    if (options.signal?.aborted) {
+      for (const t of pending) {
+        if (t.status !== TaskState.PENDING) continue;
+        t.transitionTo(TaskState.FAILED);
+        const result = new TaskExecutionResult({
+          id: t.id,
+          agent: t.assignedTo || '',
+          description: t.description,
+          success: false,
+          content: '[cancelled] orchestration stopped before this task started',
+        });
+        results.push(result);
+        resultsById.set(result.id, result);
+        if (options.onTaskDone) await options.onTaskDone(t, result);
+      }
+      pending.length = 0;
+      return;
+    }
+    const ready = pending.filter(t => t.allDeps.every((dep: string) => succeeded.has(dep)));
     if (ready.length === 0) {
       for (const t of pending) {
-        const missing = t.allDeps.filter((d: string) => !completed.has(d));
+        const missing = t.allDeps.filter((d: string) => !succeeded.has(d));
         t.transitionTo(TaskState.FAILED);
         const r = new TaskExecutionResult({
           id: t.id, agent: t.assignedTo || '',
@@ -402,7 +437,6 @@ async function executePending(
         });
         results.push(r);
         resultsById.set(r.id, r);
-        completed.add(r.id);
         if (options.onTaskDone) await options.onTaskDone(t, r);
       }
       pending.length = 0;
@@ -413,15 +447,17 @@ async function executePending(
 
     const batchResults = await Promise.all(
       ready.map(async (t: any) => {
+        if (options.onTaskStart) await options.onTaskStart(t);
         const agent = agentMap.get(t.assignedTo);
         if (!agent) {
-          return new TaskExecutionResult({
+          const result = new TaskExecutionResult({
             id: t.id, agent: t.assignedTo || '',
             description: t.description, success: false,
             content: `Agent '${t.assignedTo}' not found`,
           });
+          if (options.onTaskDone) await options.onTaskDone(t, result);
+          return result;
         }
-        if (options.onTaskStart) await options.onTaskStart(t);
 
         let description = t.description;
         const upstreamSections: string[] = [];
@@ -460,7 +496,7 @@ async function executePending(
           metadata: t.metadata,
         });
 
-        const result = await executeWithRetry(agent, aTask, options.maxTaskRetries, options.onToolStatus);
+        const result = await executeWithRetry(agent, aTask, options.maxTaskRetries, options.onToolStatus, options.signal);
 
         if (result.success) t.transitionTo(TaskState.COMPLETED);
         else t.transitionTo(TaskState.FAILED);
@@ -474,6 +510,8 @@ async function executePending(
           id: t.id, agent: t.assignedTo || '',
           description: t.description, success: result.success,
           content: tr,
+          fullContent: full,
+          traceId: typeof agent.getLastTrace === 'function' ? agent.getLastTrace()?.traceId ?? null : null,
         });
         if (options.onTaskDone) await options.onTaskDone(t, r);
         return r;
@@ -483,7 +521,7 @@ async function executePending(
     for (const r of batchResults) {
       results.push(r);
       resultsById.set(r.id, r);
-      completed.add(r.id);
+      if (r.success) succeeded.add(r.id);
     }
     for (const t of ready) {
       const idx = pending.indexOf(t);
@@ -552,6 +590,10 @@ export async function orchestrateTask(
     maxReplanRounds?: number;
     maxTotalTasks?: number;
     resume?: boolean;
+    runId?: string;
+    runStore?: OrchestrationRunStore;
+    onRun?: ((run: OrchestrationRun) => void) | null;
+    signal?: AbortSignal;
   }
 ): Promise<[any[], TaskExecutionResult[], string]> {
   const snowAgent = snow || agentMap.get('snow') || null;
@@ -563,38 +605,88 @@ export async function orchestrateTask(
   const maxReplanRounds = options?.maxReplanRounds ?? 1;
   const maxTotalTasks = options?.maxTotalTasks ?? 6;
   const resultTruncate = options?.resultTruncate ?? 500;
+  const runStore = options?.runStore ?? new OrchestrationRunStore();
+  let run = options?.resume
+    ? options.runId ? runStore.load(options.runId) : runStore.latestRecoverable(goal)
+    : null;
+  if (options?.resume && !run) throw new Error('No recoverable orchestration run was found');
 
   // Try pipeline match first
   let tasks: any[];
-  try {
-    const { matchPipeline, buildTasksFromPipeline } = require('./pipelines');
-    const matched = matchPipeline(goal);
-    if (matched) {
-      tasks = buildTasksFromPipeline(matched, goal);
-    } else {
+  if (run) {
+    if (run.goal !== goal) throw new Error(`Run '${run.runId}' belongs to a different goal`);
+    tasks = run.tasks.map(task => ({
+      id: task.id,
+      description: task.description,
+      assignedTo: task.agent,
+      dependsOn: task.dependsOn,
+      metadata: task.metadata,
+    }));
+  } else {
+    try {
+      const matched = matchPipeline(goal);
+      if (matched) {
+        tasks = buildTasksFromPipeline(matched, goal);
+      } else {
+        tasks = await (snowAgent as any).orchestrate(goal);
+      }
+    } catch {
       tasks = await (snowAgent as any).orchestrate(goal);
     }
-  } catch {
-    tasks = await (snowAgent as any).orchestrate(goal);
   }
 
   if (!tasks || tasks.length === 0) {
     return [[], [], 'No tasks were planned'];
   }
 
+  tasks = tasks.map((task: any) => task instanceof AgentTask ? task : new AgentTask({
+    id: String(task.id),
+    description: String(task.description || ''),
+    assignedTo: task.assignedTo ?? task.assigned_to ?? null,
+    parentId: task.parentId ?? task.parent_id ?? null,
+    dependsOn: Array.from(task.dependsOn ?? task.depends_on ?? []),
+    metadata: { ...(task.metadata || {}) },
+  }));
+  if (!run) run = runStore.create(goal, tasks, options?.runId);
+  for (const task of tasks) task.metadata = { ...(task.metadata || {}), runId: run.runId };
+  options?.onRun?.(run);
+  const releaseLease = options?.resume ? runStore.acquireLease(run.runId) : () => {};
+
+  try {
+  if (run.status === 'completed') {
+    const restored = run.tasks.map(task => new TaskExecutionResult({
+      id: task.id, agent: task.agent, description: task.description,
+      success: true, content: task.result || '', fullContent: task.result || '',
+    }));
+    return [tasks, restored, run.summary || ''];
+  }
+  runStore.start(run);
+
   // Notify caller of the plan
   if (options?.onPlanned) {
     const proceed = await options.onPlanned(tasks);
     if (proceed === false) {
+      runStore.cancel(run, '[CANCELLED] plan rejected before execution');
       return [tasks, [], '[CANCELLED] plan rejected before execution'];
     }
   }
 
-  const completed = new Set<string>();
+  const succeeded = new Set<string>();
   const results: TaskExecutionResult[] = [];
   const resultsById = new Map<string, TaskExecutionResult>();
   const fullContentsById = new Map<string, string>();
-  let pending = tasks.filter((t: any) => t.assignedTo && t.assignedTo !== 'snow');
+  for (const stored of run.tasks) {
+    if (stored.status !== 'completed') continue;
+    const restored = new TaskExecutionResult({
+      id: stored.id, agent: stored.agent, description: stored.description,
+      success: true, content: stored.result || '', fullContent: stored.result || '',
+    });
+    results.push(restored);
+    resultsById.set(restored.id, restored);
+    fullContentsById.set(restored.id, restored.fullContent);
+    succeeded.add(restored.id);
+  }
+  let pending = tasks.filter((t: any) => t.assignedTo && t.assignedTo !== 'snow' && !succeeded.has(t.id));
   let replanRound = 0;
 
   // Cycle detection
@@ -615,21 +707,34 @@ export async function orchestrateTask(
         description: t.description, success: false,
         content: `[cycle detected] task ${t.id} has circular dependency`,
       }));
-      completed.add(t.id);
+      runStore.taskFinished(run!, t.id, false, `[cycle detected] task ${t.id} has circular dependency`);
       return false;
     }
     return true;
   });
 
   while (true) {
-    await executePending(pending, agentMap, results, resultsById, fullContentsById, completed, {
-      onTaskStart: options?.onTaskStart || null,
-      onTaskDone: options?.onTaskDone || null,
+    await executePending(pending, agentMap, results, resultsById, fullContentsById, succeeded, {
+      onTaskStart: async (task) => {
+        runStore.taskStarted(run!, task.id);
+        if (options?.onTaskStart) await options.onTaskStart(task);
+      },
+      onTaskDone: async (task, result) => {
+        runStore.taskFinished(run!, task.id, result.success, result.fullContent, result.traceId);
+        if (options?.onTaskDone) await options.onTaskDone(task, result);
+      },
       onToolStatus: options?.onToolStatus || null,
       resultTruncate,
       maxTaskRetries,
+      signal: options?.signal,
     });
     pending = [];
+
+    if (options?.signal?.aborted) {
+      const cancelled = '[CANCELLED] orchestration stopped by user; completed task results were preserved';
+      runStore.cancel(run, cancelled);
+      return [tasks, results, cancelled];
+    }
 
     if (!results.length || replanRound >= maxReplanRounds) break;
     if (results.length === 1 && results[0].success) break;
@@ -644,12 +749,20 @@ export async function orchestrateTask(
         new Set(tasks.map((t: any) => t.id)));
       if (!extraTasks || extraTasks.length === 0) break;
       if (tasks.length + extraTasks.length > maxTotalTasks) break;
-      tasks.push(...extraTasks);
+      const hydratedExtraTasks = extraTasks.map((task: any) => task instanceof AgentTask ? task : new AgentTask({
+        id: String(task.id), description: String(task.description || ''),
+        assignedTo: task.assignedTo ?? task.assigned_to ?? null,
+        parentId: task.parentId ?? task.parent_id ?? null,
+        dependsOn: Array.from(task.dependsOn ?? task.depends_on ?? []),
+        metadata: { ...(task.metadata || {}) },
+      }));
+      tasks.push(...hydratedExtraTasks);
+      runStore.appendTasks(run, hydratedExtraTasks);
       if (options?.onPlanned) {
         const proceed = await options.onPlanned(tasks);
         if (proceed === false) break;
       }
-      pending = extraTasks.filter((t: any) => t.assignedTo && t.assignedTo !== 'snow');
+      pending = hydratedExtraTasks.filter((t: any) => t.assignedTo && t.assignedTo !== 'snow');
     } catch {
       break;
     }
@@ -681,5 +794,10 @@ export async function orchestrateTask(
     } catch { /* ignore */ }
   }
 
+  runStore.finish(run, summary);
+
   return [tasks, results, summary];
+  } finally {
+    releaseLease();
+  }
 }

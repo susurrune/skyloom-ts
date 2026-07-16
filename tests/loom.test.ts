@@ -1,8 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { visualWidth } from "../src/cli/tui";
 import {
   cutVisual, padAnsi, wrapPlain, Screen, mountainRow, overlay, circled,
-  LoomUI, OrchState,
+  LoomUI, OrchState, resolveLoomLayout, summarizeApprovalArgs,
 } from "../src/cli/loom";
 
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -49,6 +49,35 @@ describe("ANSI-aware helpers", () => {
   it("circled maps indices to ①②…", () => {
     expect(circled(0)).toBe("①");
     expect(circled(5)).toBe("⑥");
+  });
+});
+
+describe("enterprise terminal layout", () => {
+  it("adapts decoration and navigation to the available terminal", () => {
+    expect(resolveLoomLayout(120, 32)).toMatchObject({ railW: 18, skyH: 1, compact: false });
+    expect(resolveLoomLayout(96, 28)).toMatchObject({ railW: 14, skyH: 1, compact: false });
+    expect(resolveLoomLayout(84, 24)).toMatchObject({ railW: 0, skyH: 0, compact: true });
+    expect(resolveLoomLayout(76, 18)).toMatchObject({ railW: 0, skyH: 0, compact: true });
+    expect(resolveLoomLayout(58, 13)).toMatchObject({ railW: 0, skyH: 0, compact: true });
+  });
+
+  it("redacts secret-looking approval arguments", () => {
+    const summary = summarizeApprovalArgs({
+      path: "src/index.ts",
+      apiKey: "sk-live-super-secret",
+      nested: { authorization: "Bearer private-token" },
+      environment: { name: "OPENAI_API_KEY", value: "hidden-env-value" },
+      url: "https://example.test/run?token=query-secret&mode=safe",
+      command: "deploy --api-key command-secret --dry-run",
+    }, 300);
+    expect(summary).toContain("src/index.ts");
+    expect(summary).toContain("[REDACTED]");
+    expect(summary).not.toContain("sk-live-super-secret");
+    expect(summary).not.toContain("private-token");
+    expect(summary).not.toContain("hidden-env-value");
+    expect(summary).not.toContain("query-secret");
+    expect(summary).not.toContain("command-secret");
+    expect(summary.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(5);
   });
 });
 
@@ -172,6 +201,14 @@ describe("LoomUI frame composition", () => {
     expect(text).toContain("①");
   });
 
+  it("keeps the wide rail focused on navigation instead of decorative copy", () => {
+    const ui = makeUI(120, 32);
+    const text = ui.paint().map(strip).join("\n");
+    expect(text).toContain("六灵");
+    expect(text).not.toContain("山色有无中");
+    expect(text).not.toContain("烟灰");
+  });
+
   it("updates line blocks in place by id", () => {
     const ui = makeUI();
     ui.line("· task running", "task-x");
@@ -185,6 +222,33 @@ describe("LoomUI frame composition", () => {
     const ui = makeUI(40, 8);
     const frame = ui.paint();
     expect(strip(frame[0])).toContain("窗口太小");
+  });
+
+  it("never paints beyond the physical width of a tiny terminal", () => {
+    const ui = makeUI(30, 8);
+    const frame = ui.paint();
+    expect(frame).toHaveLength(3);
+    expect(frame.every((line) => visualWidth(line) === 30)).toBe(true);
+    expect(strip(frame.join('\n'))).toContain('Ctrl-C');
+  });
+
+  it("shows operational context without overflowing a compact frame", () => {
+    const ui = makeUI(58, 13);
+    ui.headerContext = () => "customer-platform";
+    ui.statusLeft = () => "session 8f31 · strict";
+    ui.statusRight = () => "deepseek-v4-flash · $0.0042 · 42%";
+    ui.statusRightCompact = () => "$0.0042 · 42%";
+    ui.line("Production task output");
+    const frame = ui.paint();
+    const text = frame.map(strip).join("\n");
+
+    expect(text).toContain("customer-platform");
+    expect(text).toContain("session 8f31");
+    expect(text).toContain("$0.0042 · 42%");
+    expect(text).toContain("Production task output");
+    expect(text).not.toContain("fog");
+    expect(frame).toHaveLength(13);
+    for (const row of frame) expect(visualWidth(row)).toBe(58);
   });
 
   it("survives many turns and long text without width drift", () => {
@@ -389,6 +453,16 @@ describe("mouse wheel scrolling", () => {
     expect(ui.scrollOff).toBeLessThan(up);
   });
 
+  it("shows a stable scrollbar thumb for long transcripts", () => {
+    const ui = fillUI();
+    const tail = ui.paint().map(strip).join("\n");
+    expect(tail).toContain("┃");
+    wheel(ui, 64);
+    const history = ui.paint().map(strip).join("\n");
+    expect(history).toContain("回看");
+    expect(history).toContain("┃");
+  });
+
   it("mouse fragments never leak into the input line", () => {
     const ui = fillUI();
     wheel(ui, 64);
@@ -449,5 +523,59 @@ describe("input cursor — Home/End", () => {
     expect(ui.cursor).toBe(0);
     ui.onKey("", { name: "end" });
     expect(ui.cursor).toBe(5);
+  });
+});
+
+describe("enterprise input handling", () => {
+  it("enables bracketed paste and restores the terminal mode on exit", () => {
+    let writes = "";
+    const out = { columns: 80, rows: 24, isTTY: true, write: (s: string) => { writes += s; return true; } };
+    const ui = new LoomUI({ out, inp: null, headless: false });
+    ui.start();
+    ui.destroy();
+    expect(writes).toContain("\x1b[?2004h");
+    expect(writes).toContain("\x1b[?2004l");
+  });
+
+  it("preserves word boundaries in multiline paste", () => {
+    const ui = makeUI() as any;
+    ui.onKey("alpha\r\nbeta\ngamma", { name: "undefined" });
+    expect(ui.inputGlyphs.join("")).toBe("alpha beta gamma");
+  });
+
+  it("reassembles bracketed paste without interpreting embedded keys", () => {
+    const ui = makeUI() as any;
+    ui.onKey("", { sequence: "\x1b[200~" });
+    ui.onKey("/clear\r\n", { name: "undefined" });
+    ui.onKey("second line", { name: "undefined" });
+    ui.onKey("", { sequence: "\x1b[201~" });
+    expect(ui.inputGlyphs.join("")).toBe("/clear second line");
+    expect(ui.paletteIdx).toBe(0);
+  });
+
+  it("keeps drafted input and explains why submit is blocked while busy", () => {
+    const ui = makeUI() as any;
+    ui.busy = true;
+    for (const ch of "next request") ui.onKey(ch, { name: ch });
+    ui.onKey("", { name: "return" });
+    expect(ui.inputGlyphs.join("")).toBe("next request");
+    expect(ui.flashHint).toContain("仍在运行");
+  });
+
+  it("requests graceful interruption first and reserves double Ctrl-C for force exit", () => {
+    const ui = makeUI() as any;
+    const interrupt = vi.fn();
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => { throw new Error("exit"); }) as never);
+    ui.busy = true;
+    ui.onInterrupt = interrupt;
+    try {
+      ui.onKey("", { name: "c", ctrl: true });
+      expect(interrupt).toHaveBeenCalledTimes(1);
+      expect(exit).not.toHaveBeenCalled();
+      expect(() => ui.onKey("", { name: "c", ctrl: true })).toThrow("exit");
+      expect(exit).toHaveBeenCalledWith(130);
+    } finally {
+      exit.mockRestore();
+    }
   });
 });

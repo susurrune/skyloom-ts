@@ -5,8 +5,27 @@
  */
 
 import axios from 'axios';
-import * as fs from 'fs';
 import * as path from 'path';
+import { safeFetch } from '../tools/guards';
+
+const MAX_MEDIA_BYTES = 30 * 1024 * 1024;
+export const MAX_INBOUND_MEDIA_BYTES = 10 * 1024 * 1024;
+
+export function boundedMediaBuffer(
+  data: ArrayBuffer | ArrayBufferView,
+  declaredLength?: number,
+): Buffer {
+  if (Number.isFinite(declaredLength) && Number(declaredLength) > MAX_INBOUND_MEDIA_BYTES) {
+    throw new Error(`inbound media exceeds ${MAX_INBOUND_MEDIA_BYTES} byte limit`);
+  }
+  const buffer = ArrayBuffer.isView(data)
+    ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+    : Buffer.from(data);
+  if (buffer.length > MAX_INBOUND_MEDIA_BYTES) {
+    throw new Error(`inbound media exceeds ${MAX_INBOUND_MEDIA_BYTES} byte limit`);
+  }
+  return buffer;
+}
 
 /**
  * Resolve a secret/config value. Accepts a literal string, or an env-ref object
@@ -68,34 +87,49 @@ export interface LoadedMedia {
 }
 
 /**
- * Load media bytes from a local filesystem path or an http(s) URL. Local paths
- * are read directly; remote URLs are fetched (capped at 30 MiB to avoid
- * pulling something huge into memory). Throws if the source can't be loaded.
+ * Load outbound media from a public http(s) URL. Local paths are deliberately
+ * rejected: agent-authored replies must not become an arbitrary file-read
+ * channel. Redirects and resolved addresses pass through the shared SSRF guard.
  */
 export async function loadMedia(src: string): Promise<LoadedMedia> {
-  if (/^https?:\/\//i.test(src)) {
-    const res = await axios.get(src, {
-      responseType: 'arraybuffer',
-      timeout: 30000,
-      maxContentLength: 30 * 1024 * 1024,
-      validateStatus: (s) => s >= 200 && s < 300,
-    });
-    const urlName = path.basename(new URL(src).pathname) || 'file';
-    const ct = res.headers['content-type'];
-    return {
-      data: Buffer.from(res.data),
-      filename: urlName,
-      contentType: typeof ct === 'string' ? ct : undefined,
-    };
+  if (!isSendableSrc(src)) throw new Error('outbound media must use a public http(s) URL');
+  const res = await safeFetch(src, {}, { timeoutMs: 30000 });
+  if (!res.ok) throw new Error(`media request failed with HTTP ${res.status}`);
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_MEDIA_BYTES) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`media exceeds ${MAX_MEDIA_BYTES} byte limit`);
   }
-  const data = fs.readFileSync(src); // throws ENOENT if missing — caller handles
-  return { data, filename: path.basename(src) };
+  const chunks: Buffer[] = [];
+  let total = 0;
+  if (res.body) {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_MEDIA_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`media exceeds ${MAX_MEDIA_BYTES} byte limit`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  }
+  return {
+    data: Buffer.concat(chunks),
+    filename: path.basename(new URL(src).pathname) || 'file',
+    contentType: res.headers.get('content-type') || undefined,
+  };
 }
 
-/** Is this a sendable media source (http(s) URL or an existing local file)? */
+/** Local filesystem references are never sendable from agent-authored replies. */
 export function isSendableSrc(src: string): boolean {
-  if (/^https?:\/\//i.test(src)) return true;
-  try { return fs.existsSync(src) && fs.statSync(src).isFile(); } catch { return false; }
+  try {
+    const url = new URL(src);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 /** POST multipart/form-data (Node 18+ FormData/Blob), return parsed JSON. */
@@ -126,17 +160,34 @@ export async function postMultipart(
 export class TokenCache {
   private token: string | null = null;
   private expiresAt = 0;
+  private refresh: { generation: number; promise: Promise<string> } | null = null;
+  private generation = 0;
   constructor(private fetcher: () => Promise<{ token: string; expiresInSec: number }>) {}
 
   async get(): Promise<string> {
     const now = Date.now();
     if (this.token && now < this.expiresAt - 60_000) return this.token;
-    const { token, expiresInSec } = await this.fetcher();
-    this.token = token;
-    this.expiresAt = now + Math.max(60, expiresInSec) * 1000;
-    return token;
+    if (this.refresh?.generation === this.generation) return this.refresh.promise;
+
+    const generation = this.generation;
+    const promise = this.fetcher().then(({ token, expiresInSec }) => {
+      if (generation === this.generation) {
+        this.token = token;
+        this.expiresAt = Date.now() + Math.max(60, expiresInSec) * 1000;
+      }
+      return token;
+    }).finally(() => {
+      if (this.refresh?.promise === promise) this.refresh = null;
+    });
+    this.refresh = { generation, promise };
+    return promise;
   }
 
   /** Force the next get() to refetch (e.g. after a 401). */
-  invalidate(): void { this.token = null; this.expiresAt = 0; }
+  invalidate(): void {
+    this.generation++;
+    this.token = null;
+    this.expiresAt = 0;
+    this.refresh = null;
+  }
 }

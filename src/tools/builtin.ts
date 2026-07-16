@@ -8,7 +8,7 @@ import type { ToolRegistry } from '../core/tool';
 import { getLogger } from '../core/logger';
 import { registerComputerTools } from './computer';
 import { registerExtraTools } from './extra';
-import { isPrivateIp, assertFetchAllowed, fenceRoot, fenceCheck } from './guards';
+import { isPrivateIp, assertFetchAllowed, safeFetch, readResponseText, fenceRoot, fenceCheck } from './guards';
 import { webSearch, formatSearchResults, readPage } from './websearch';
 import { countOccurrences, unifiedDiff } from '../core/diff';
 import { getDiagnostics, formatDiagnostics } from '../core/diagnostics';
@@ -243,7 +243,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'timeout', type: 'number', description: 'Timeout in milliseconds (default: 30000). Ignored when background=true.', required: false },
       { name: 'background', type: 'boolean', description: 'Run detached in the background and return a job id instead of blocking (default false)', required: false },
     ],
-    handler: async (params) => {
+    handler: async (params, context) => {
       const cmd = params.command as string;
       const background = params.background === true || params.background === 'true';
       if (background) {
@@ -257,7 +257,7 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       const timeout = (params.timeout as number) || 30000;
       try {
         const { runInSandbox, formatSandboxResult } = require('../core/sandbox');
-        const result = runInSandbox(cmd, { timeoutMs: timeout });
+        const result = await runInSandbox(cmd, { timeoutMs: timeout, signal: context.signal });
         return formatSandboxResult(result);
       } catch (e: any) { return `Error: ${e.message || e}`; }
     },
@@ -318,11 +318,10 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     parameters: [
       { name: 'url', type: 'string', description: 'URL to fetch', required: true },
     ],
-    handler: async (params) => {
+    handler: async (params, context) => {
       try {
-        await assertFetchAllowed(params.url as string);
-        const response = await fetch(params.url as string);
-        const text = await response.text();
+        const response = await safeFetch(params.url as string, { signal: context?.signal });
+        const text = await readResponseText(response);
         return `Status: ${response.status}\n\n${text.slice(0, 10000)}${text.length > 10000 ? '\n...[truncated]' : ''}`;
       } catch (e) {
         return `Error fetching URL: ${e instanceof Error ? e.message : e}`;
@@ -363,13 +362,14 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
     // Larger than webSearch's internal budget (~22s) so the waterfall returns a
     // clear "no results" message rather than being cut off as a generic timeout.
     timeout: 45000,
-    handler: async (params) => {
+    handler: async (params, context) => {
       const query = String(params.query || '').trim();
       if (!query) return 'Error: query is required';
       try {
         const res = await webSearch(query, {
           max: Number(params.max_results) || 8,
           engine: String(params.engine || '').trim().toLowerCase() || undefined,
+          signal: context?.signal,
           onProviderError: (provider, error) => log.warn('web_search_provider_failed', { provider, error }),
         });
         return formatSearchResults(res);
@@ -389,11 +389,11 @@ export function registerBuiltinTools(registry: ToolRegistry): void {
       { name: 'url', type: 'string', description: 'The http(s) URL to read', required: true },
       { name: 'max_chars', type: 'number', description: 'Max characters to return (default 12000)', required: false },
     ],
-    handler: async (params) => {
+    handler: async (params, context) => {
       const url = String(params.url || '').trim();
       if (!url) return 'Error: url is required';
       try {
-        return await readPage(url, { maxChars: Number(params.max_chars) || 12000 });
+        return await readPage(url, { maxChars: Number(params.max_chars) || 12000, signal: context?.signal });
       } catch (e: any) {
         return `Error reading page: ${String(e?.message || e)}`;
       }

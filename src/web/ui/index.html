@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-agent="fog">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f2e9">
+<title>水墨气象台 · Skyloom</title>
+<link rel="icon" type="image/png" href="/ui/assets/image2-favicon.png?v={{CACHE_BUST}}">
+<link rel="preload" href="/ui/styles.css?v={{CACHE_BUST}}" as="style">
+<link rel="stylesheet" href="/ui/styles.css?v={{CACHE_BUST}}">
+<script>window.__SKYLOOM__ = {{BOOT}};</script>
+<script defer src="/ui/app.js?v={{CACHE_BUST}}"></script>
+</head>
+<body>
+
+<div id="grain" aria-hidden="true"></div>
+<div id="mountain-wash" aria-hidden="true"></div>
+<div id="ambient-layer" aria-hidden="true"></div>
+<div id="kanji-seal" aria-hidden="true">霧</div>
+
+<nav id="sidebar" aria-label="六灵切换">
+  <div id="logo"><span class="logo-mark img2-icon icon-brand" aria-hidden="true"></span><b>水墨气象台</b><small>SKYLOOM FIELD NOTES</small></div>
+  <div id="agents-list" role="listbox" aria-label="选择灵"></div>
+  <div id="side-foot">
+    <div id="side-dock">
+      <div id="side-status"><span id="conn-dot" aria-hidden="true"></span><span id="ws-name"></span></div>
+      <div id="side-actions" aria-label="界面工具">
+        <button class="side-btn theme-tool" id="theme-btn" type="button" title="切换主题" aria-label="切换主题"><span class="ui-icon img2-icon icon-moon" aria-hidden="true"></span></button>
+        <button class="side-btn help-tool" id="keys-btn" type="button" title="快捷键 (?)" aria-label="快捷键"><span class="ui-icon img2-icon icon-help" aria-hidden="true"></span></button>
+      </div>
+    </div>
+    <div id="verse">山色有无中</div>
+  </div>
+</nav>
+
+<main id="main">
+  <header id="strip">
+    <span id="strip-weather" class="weather-doodle img2-icon icon-fog" aria-hidden="true"></span>
+    <span id="strip-name">雾 Fog</span>
+    <span id="strip-pig">松烟墨 · 探索洞察</span>
+    <span id="strip-sp"></span>
+    <div id="strip-actions" aria-label="会话操作">
+      <button class="strip-btn" id="settings-btn" type="button" title="工坊设置" aria-label="工坊设置" aria-haspopup="dialog" aria-expanded="false"><span class="ui-icon img2-icon icon-home" aria-hidden="true"></span></button>
+      <button class="strip-btn health-btn" id="health-btn" type="button" title="运行健康" aria-label="运行健康" aria-haspopup="dialog" aria-expanded="false"><span class="ui-icon img2-icon icon-help" aria-hidden="true"></span></button>
+      <button class="strip-btn history-btn" id="sessions-btn" type="button" title="聊天历史" aria-label="聊天历史" aria-haspopup="dialog" aria-expanded="false"><span class="ui-icon img2-icon icon-brand" aria-hidden="true"></span><span class="history-label">历史</span></button>
+      <button class="strip-btn" id="retry-btn" type="button" title="重新发送上一条消息" aria-label="重试" disabled><span class="ui-icon img2-icon icon-retry" aria-hidden="true"></span></button>
+      <button class="strip-btn" id="export-btn" type="button" title="导出会话为 Markdown" aria-label="导出"><span class="ui-icon img2-icon icon-download" aria-hidden="true"></span></button>
+      <button class="strip-btn" id="clear-btn" type="button" title="开始新会话" aria-label="新会话"><span class="ui-icon img2-icon icon-plus" aria-hidden="true"></span></button>
+    </div>
+  </header>
+  <section id="messages" aria-label="会话消息"></section>
+  <button id="scroll-pill" type="button"><span class="ui-icon img2-icon icon-down" aria-hidden="true"></span><span>回到底部</span></button>
+  <form id="composer" action="javascript:void(0)">
+    <div id="input-card">
+      <textarea id="chat-input" rows="1" placeholder="写下你想说的话…" aria-label="消息内容" autofocus></textarea>
+      <span id="char-count" aria-live="polite"></span>
+      <button id="send-btn" type="button" title="发送 (Enter)" aria-label="发送"><span class="ui-icon img2-icon icon-send send-ico" aria-hidden="true"></span></button>
+    </div>
+    <div id="hint">Enter 发送 · Shift+Enter 换行 · Esc 停止 · ? 快捷键</div>
+  </form>
+</main>
+
+<div id="sessions-panel" role="dialog" aria-modal="true" aria-labelledby="sessions-title">
+  <section id="sessions-sheet">
+    <header class="sessions-head">
+      <div><span class="sheet-kicker">FIELD ARCHIVE</span><h2 id="sessions-title">历史会话</h2></div>
+      <button id="sessions-close" type="button">关闭</button>
+    </header>
+    <div class="sessions-tools">
+      <label class="sessions-search">
+        <span class="ui-icon img2-icon icon-help" aria-hidden="true"></span>
+        <input id="sessions-filter" type="search" autocomplete="off" spellcheck="false" placeholder="搜索问题、日期或条数" aria-label="搜索历史会话">
+      </label>
+      <span id="sessions-count" aria-live="polite">0 段</span>
+    </div>
+    <p id="sessions-empty-filter" class="sessions-empty" hidden>没有找到匹配的会话</p>
+    <div id="sessions-list" aria-live="polite"></div>
+  </section>
+</div>
+
+<div id="health-panel" role="dialog" aria-modal="true" aria-labelledby="health-title">
+  <section id="health-sheet">
+    <header class="health-head">
+      <div><span class="sheet-kicker">RUN HEALTH</span><h2 id="health-title">运行健康</h2></div>
+      <button id="health-close" type="button">关闭</button>
+    </header>
+    <div id="health-loading" aria-live="polite">正在诊脉…</div>
+    <div id="health-content" hidden>
+      <section class="health-summary" aria-label="健康摘要">
+        <div><span>状态</span><b id="health-state">—</b></div>
+        <div><span>Agent</span><b id="health-agents">—</b></div>
+        <div><span>工具</span><b id="health-tools">—</b></div>
+      </section>
+      <section class="health-actions" aria-labelledby="health-actions-title">
+        <span class="section-no">01 · NEXT ACTIONS</span>
+        <h3 id="health-actions-title">下一步</h3>
+        <div id="health-actions-list"></div>
+      </section>
+      <section class="health-checks-section" aria-labelledby="health-checks-title">
+        <span class="section-no">02 · DOCTOR CHECKS</span>
+        <h3 id="health-checks-title">检查项</h3>
+        <div id="health-checks" aria-live="polite"></div>
+      </section>
+    </div>
+  </section>
+</div>
+
+<div id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+  <section id="settings-sheet">
+    <header class="settings-head">
+      <div><span class="sheet-kicker">LOOM WORKSHOP</span><h2 id="settings-title">工坊设置</h2></div>
+      <button id="settings-close" type="button">关闭</button>
+    </header>
+    <form id="settings-form">
+      <div id="settings-loading" aria-live="polite">正在展开设置卷册…</div>
+      <div id="settings-content" hidden>
+        <section class="settings-section" aria-labelledby="default-settings-title">
+          <div class="settings-section-head compact"><div><span class="section-no">01 · DEFAULT</span><h3 id="default-settings-title">全局与工作区</h3></div></div>
+          <label class="setting-row setting-wide"><span>统一默认模型</span><select id="setting-unified-model"></select></label>
+          <label class="setting-row setting-wide"><span>工作区路径</span><input id="setting-workspace" type="text" autocomplete="off" spellcheck="false"></label>
+        </section>
+
+        <section class="settings-section agent-settings" aria-labelledby="agent-settings-title">
+          <div class="settings-section-head">
+            <span id="settings-agent-icon" class="weather-doodle img2-icon icon-fog" aria-hidden="true"></span>
+            <div><span class="section-no">02 · AGENT</span><h3 id="agent-settings-title">当前灵</h3></div>
+            <span id="settings-agent-name"></span>
+          </div>
+          <label class="setting-row setting-wide"><span>模型</span><select id="setting-model"></select></label>
+          <label class="setting-row"><span>创造性 <output id="setting-temperature-value" for="setting-temperature"></output></span><input id="setting-temperature" type="range" min="0" max="2" step="0.05"></label>
+          <label class="setting-row"><span>回复上限</span><select id="setting-max-tokens"><option value="1024">1,024</option><option value="2048">2,048</option><option value="4096">4,096</option><option value="8192">8,192</option><option value="16384">16,384</option><option value="32768">32,768</option></select></label>
+          <label class="setting-toggle"><span><b>计划模式</b><small>只读调研与方案输出</small></span><input id="setting-plan-mode" type="checkbox"><i aria-hidden="true"></i></label>
+        </section>
+
+        <section class="settings-section" aria-labelledby="runtime-settings-title">
+          <div class="settings-section-head compact"><div><span class="section-no">03 · RUNTIME</span><h3 id="runtime-settings-title">运行织法</h3></div></div>
+          <div class="settings-grid">
+            <label class="setting-row"><span>回复语言</span><select id="setting-language"><option value="zh">中文</option><option value="en">English</option></select></label>
+            <label class="setting-row"><span>权限模式</span><select id="setting-approval"><option value="interactive">询问确认</option><option value="auto">自动判断</option><option value="acceptEdits">接受编辑</option><option value="strict">严格只读</option><option value="bypass">放行模式</option></select></label>
+            <label class="setting-row"><span>工具并发</span><input id="setting-concurrency" type="number" min="1" max="16" step="1"></label>
+            <label class="setting-row"><span>工具结果上限</span><select id="setting-result-limit"><option value="12000">12k</option><option value="24000">24k</option><option value="50000">50k</option><option value="100000">100k</option><option value="200000">200k</option></select></label>
+          </div>
+          <label class="setting-toggle runtime-toggle"><span><b>夜墨模式</b><small>界面主题</small></span><input id="setting-dark-mode" type="checkbox"><i aria-hidden="true"></i></label>
+        </section>
+
+        <section class="settings-section" aria-labelledby="credential-settings-title">
+          <div class="settings-section-head compact"><div><span class="section-no">04 · CONNECTION</span><h3 id="credential-settings-title">模型连接</h3></div><span id="setting-key-state"></span></div>
+          <div class="credential-row">
+            <label class="setting-row"><span>Provider</span><select id="setting-key-provider"></select></label>
+            <label class="setting-row key-field"><span>新 API Key</span><input id="setting-api-key" type="password" autocomplete="new-password" placeholder="••••••••"></label>
+          </div>
+          <label class="setting-row setting-wide"><span>兼容端点</span><input id="setting-provider-endpoint" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1"></label>
+          <div class="credential-actions"><small>仅保存本机配置，端点不得包含账号或密码。</small><button id="setting-clear-key" type="button">清除已存 Key</button></div>
+        </section>
+      </div>
+      <footer class="settings-foot">
+        <span id="settings-result" role="status" aria-live="polite"></span>
+        <button id="settings-save" type="submit" disabled><span class="ui-icon img2-icon icon-check" aria-hidden="true"></span><span>落印保存</span></button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div id="keys-modal" role="dialog" aria-modal="true" aria-labelledby="keys-title"><div id="keys-card">
+  <h3 id="keys-title">快捷键</h3>
+  <div class="key-row"><span>发送</span><kbd>Enter</kbd></div>
+  <div class="key-row"><span>换行</span><kbd>Shift + Enter</kbd></div>
+  <div class="key-row"><span>停止生成</span><kbd>Esc</kbd></div>
+  <div class="key-row"><span>切换灵</span><kbd id="kbd-agents"></kbd></div>
+  <div class="key-row"><span>聚焦输入</span><kbd id="kbd-focus"></kbd></div>
+  <div class="key-row"><span>快速聚焦</span><kbd>/</kbd></div>
+  <div class="key-row"><span>本面板</span><kbd>?</kbd></div>
+</div></div>
+
+<div id="toasts" aria-live="polite"></div>
+</body>
+</html>

@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "http";
 import { AddressInfo } from "net";
-import { MCPClient } from "../src/core/mcp";
+import { formatMcpHealthLines, MCPClient } from "../src/core/mcp";
 
 /**
  * A minimal MCP-over-SSE server: one event-stream connection, a POST endpoint
@@ -105,8 +105,47 @@ describe("MCP SSE transport", () => {
     mock = await startMockSSEServer();
     client = new MCPClient({ name: "mock", url: mock.url });
 
+    expect(client.getHealthSnapshot()).toMatchObject({
+      name: "mock",
+      transport: "sse",
+      connected: false,
+      state: "disconnected",
+      healthy: false,
+    });
+
     await client.initialize();
+    expect(client.getHealthSnapshot()).toMatchObject({
+      connected: true,
+      state: "connected",
+      healthy: null,
+      tools: 1,
+    });
+
     const health = await client.healthCheck();
     expect(health.healthy).toBe(true);
+    expect(client.getHealthSnapshot()).toMatchObject({
+      connected: true,
+      state: "healthy",
+      healthy: true,
+      details: "ok",
+      tools: 1,
+    });
+    expect(client.getHealthSnapshot().lastCheckedAt).toEqual(expect.any(String));
+  });
+
+  it("formats MCP health snapshots for TUI surfaces", () => {
+    expect(formatMcpHealthLines([], ["legacy: 2 tools"])).toEqual(["legacy: 2 tools"]);
+    expect(formatMcpHealthLines([{
+      name: "mock",
+      transport: "sse",
+      target: "http://127.0.0.1/sse",
+      tools: 1,
+      connected: true,
+      state: "healthy",
+      healthy: true,
+      details: "ok",
+      lastCheckedAt: "2026-07-12T00:00:00.000Z",
+      connectedAt: "2026-07-12T00:00:00.000Z",
+    }])[0]).toContain("mock | sse | healthy | 1 tools");
   });
 });

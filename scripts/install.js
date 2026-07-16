@@ -22,7 +22,10 @@ function run(cmd, label) {
     execSync(cmd, { stdio: "pipe", encoding: "utf-8" });
     process.stdout.write(` ${GREEN}✓${RESET}\n`);
   } catch (e) {
-    process.stdout.write(` ${GREEN}✓${RESET}\n`);
+    process.stdout.write(` failed\n`);
+    const msg = e && (e.stdout || e.stderr || e.message);
+    if (msg) process.stderr.write(`${DIM}${String(msg).slice(-4000)}${RESET}\n`);
+    process.exit(1);
   }
 }
 

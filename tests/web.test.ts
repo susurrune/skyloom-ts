@@ -1,6 +1,56 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
+import type { Server } from "http";
 import { escapeHtml, highlightCode, mdInline, mdToHtml } from "../src/web/markdown";
-import { renderInkWashUI, AGENTS_META } from "../src/web/ui";
+import { AGENT_THEMES } from "../src/core/theme";
+import { renderInkWashAppJS, renderInkWashCSS, renderInkWashUI, AGENTS_META } from "../src/web/ui";
+import { isAuthorizedWebRequest, MIN_WEB_TOKEN_LENGTH, resolveWebAccessPolicy } from "../src/web/auth";
+import { OrchestrationRunStore } from "../src/core/run_store";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve) => {
+    server.close(() => resolve());
+    server.closeIdleConnections?.();
+  });
+}
+
+let nextSafeWebPort = 18080;
+function safeWebPort(): number {
+  return nextSafeWebPort++;
+}
+
+describe("web · remote access policy", () => {
+  const token = "a".repeat(MIN_WEB_TOKEN_LENGTH);
+
+  it("refuses non-loopback binding without a strong token", () => {
+    expect(() => resolveWebAccessPolicy("0.0.0.0")).toThrow(/Refusing non-loopback/);
+    expect(() => resolveWebAccessPolicy("192.168.1.8", "short")).toThrow(/minimum/);
+    expect(resolveWebAccessPolicy("127.0.0.1")).toMatchObject({ loopbackOnly: true, token: null });
+  });
+
+  it("accepts bearer, explicit and browser basic authentication", () => {
+    expect(isAuthorizedWebRequest({ authorization: `Bearer ${token}` }, token)).toBe(true);
+    expect(isAuthorizedWebRequest({ "x-skyloom-token": token }, token)).toBe(true);
+    const basic = Buffer.from(`skyloom:${token}`).toString("base64");
+    expect(isAuthorizedWebRequest({ authorization: `Basic ${basic}` }, token)).toBe(true);
+    expect(isAuthorizedWebRequest({ authorization: "Bearer wrong" }, token)).toBe(false);
+  });
+
+  it("uses bounded HTTP request and keep-alive lifetimes", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const server = await startWebServer(0);
+    try {
+      expect(server.headersTimeout).toBe(15_000);
+      expect(server.requestTimeout).toBe(30_000);
+      expect(server.keepAliveTimeout).toBe(5_000);
+      expect(server.maxRequestsPerSocket).toBe(100);
+    } finally {
+      await closeServer(server);
+    }
+  });
+});
 
 /* ════════ markdown renderer (isomorphic, injected into the page) ════════ */
 
@@ -69,9 +119,11 @@ describe("web · markdown renderer", () => {
 
 describe("web · page", () => {
   const html = renderInkWashUI();
-  const script = (html.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || "";
+  const css = renderInkWashCSS();
+  const script = renderInkWashAppJS();
+  const shipped = html + css + script;
 
-  it("injected client script is valid standalone JS with no module artifacts", () => {
+  it("client script is valid standalone JS with no module artifacts", () => {
     expect(script.length).toBeGreaterThan(1000);
     expect(() => new Function(script)).not.toThrow();
     for (const bad of ["exports.", "require(", "Object.defineProperty(exports"]) {
@@ -83,23 +135,30 @@ describe("web · page", () => {
   });
 
   it("ships the enterprise interaction surface", () => {
-    // stop-generation, theme toggle, export/clear, shortcuts, scroll pill, toasts
-    for (const marker of ["send-btn", "theme-btn", "export-btn", "clear-btn", "keys-modal", "scroll-pill", "toasts", "AbortController", "localStorage"]) {
-      expect(html, `missing: ${marker}`).toContain(marker);
+    // stop-generation, theme toggle, retry/export/new session, shortcuts, scroll pill, toasts
+    for (const marker of ["send-btn", "theme-btn", "settings-btn", "health-btn", "health-panel", "health-checks", "settings-panel", "setting-unified-model", "setting-workspace", "setting-provider-endpoint", "setting-clear-key", "setting-dark-mode", "retry-btn", "export-btn", "clear-btn", "keys-modal", "kbd-focus", "scroll-pill", "toasts", "AbortController", "localStorage", "isEditableTarget", "trapDialogFocus"]) {
+      expect(shipped, `missing: ${marker}`).toContain(marker);
     }
     // tool timeline + reasoning + markdown body classes exist in CSS
     for (const cls of [".tool-row", ".think", ".codeblock", ".md-table", ".caret", ".welcome"]) {
-      expect(html, `missing css: ${cls}`).toContain(cls);
+      expect(css, `missing css: ${cls}`).toContain(cls);
     }
+    // static shell now references separated assets
+    expect(html).toContain('/ui/styles.css?v=');
+    expect(html).toContain('/ui/app.js?v=');
+    expect(html).toContain('icon-brand');
+    expect(html).toContain('icon-fog');
+    expect(html).toContain('icon-send');
+    expect(css).toContain("image2-icons.png");
+    expect(html).toContain('aria-live="polite"');
     // dark mode tokens
-    expect(html).toContain("[data-theme=dark]");
-    expect(html).toContain("prefers-reduced-motion");
+    expect(css).toContain("[data-theme=dark]");
+    expect(css).toContain("prefers-reduced-motion");
   });
 
   it("shortcut labels are OS-aware, not hardcoded to macOS", () => {
     // no ⌘ baked into the static HTML/hint — labels are filled at boot
-    const staticHtml = html.replace(/<script>[\s\S]*?<\/script>/, "");
-    expect(staticHtml).not.toContain("⌘");
+    expect(html).not.toContain("⌘");
     // the client detects Apple platforms and picks per-platform modifiers:
     // ⌘ on Apple; Alt+digit (Ctrl+digit is browser-reserved) and Ctrl+K elsewhere
     expect(script).toContain("isApple");
@@ -109,6 +168,75 @@ describe("web · page", () => {
     // physical-key matching so macOS Option+digit (¡™£…) still works
     expect(script).toContain("Digit[1-6]");
     expect(script).toContain("e.altKey");
+    expect(script).toContain("skyweb.agent");
+    expect(script).toContain("skyweb.draft.");
+    expect(script).toContain("skyweb.session.");
+    expect(script).toContain("function syncHistory");
+    expect(script).toContain("const historyUrl =");
+    expect(script).toContain("fetch(historyUrl)");
+    expect(script).toContain("FIELD NOTE / 01");
+    expect(script).toContain("store.setItem(DKEY(cur.name), inp.value);");
+    expect(script).toContain("function retryLast");
+    expect(script).toMatch(/fetch\(["']\/api\/session["']/);
+    expect(html).toContain('id="sessions-btn"');
+    expect(html).toContain('aria-label="聊天历史"');
+    expect(html).toContain('<span class="history-label">历史</span>');
+    expect(html).toContain('id="sessions-panel"');
+    expect(html).toContain('id="sessions-filter"');
+    expect(html).toContain('id="sessions-count"');
+    expect(html).toContain('id="sessions-empty-filter"');
+    expect(css).toContain(".sessions-tools");
+    expect(css).toContain(".session-row.hide");
+    expect(script).toContain("LEGACY_HKEY");
+    expect(script).toMatch(/["']skyweb\.h\.["'] \+ a \+ ["']\.["']/);
+    expect(script).toContain("tabStore.getItem(SKEY(a))");
+    expect(script).toContain("if (sessionId) body.sessionId = sessionId");
+    expect(script).toMatch(/Array\.isArray\(parsed\)/);
+    expect(script).toContain("cancelAnimationFrame");
+    expect(script).toContain("function openSessions");
+    expect(script).toContain("function normalizeSessionQuery");
+    expect(script).toContain("function applySessionFilter");
+    expect(script).toContain("row.dataset.search");
+    expect(script).toContain("没有找到匹配的会话");
+    expect(script).toContain("function openSettings");
+    expect(script).toContain("/api/settings");
+    expect(script).toContain("function apiErrorText");
+    expect(script).toContain("function readApiError");
+    expect(script).toContain("function apiErrorPayload");
+    expect(script).toContain("function isMissingSessionError");
+    expect(script).toContain("function chatRequestBody");
+    expect(script).toContain("tabStore.removeItem(SKEY(agentName));");
+    expect(script).toContain("function bindResponseSession");
+    expect(script).toContain("X-Skyloom-Session-Id");
+    expect(script).toContain('"skyweb.h." + agentName + ".pending"');
+    expect(script).not.toContain("const h = loadHist(agentName);");
+    expect(script).toContain("staleSessionRetried");
+    expect(script).toContain("会话已过期，正在重新接续");
+    expect(script).toContain("error.action");
+    expect(script).toContain("response.clone().json()");
+    expect(script).toContain("apiErrorText(ev.error");
+    expect(script).toMatch(/fetch\(["']\/api\/sessions\?agent=/);
+    expect(script).toContain("const tabStore = window.sessionStorage");
+    expect(script).toContain("&sessionId=");
+    expect(script).toMatch(/method:\s*["']DELETE["']/);
+    expect(script).toContain("function isCurrentAgent");
+    expect(script).toContain("body: JSON.stringify({ agent: agent.name, sessionId, replacement: deletingActive })");
+    expect(script).toContain("isCurrentAgent(agent)");
+    expect(script).not.toContain("当前会话已是空的");
+  });
+
+  it("keeps failed turns retryable without duplicating the user message", () => {
+    expect(script).toContain("function markPendingUserFailed");
+    expect(script).toContain("send(last.failed ? last : void 0)");
+    expect(script).toContain("if (failed && !content.trim() && !tools.length) turn.remove();");
+    expect(script).toContain("delete pendingUser.failed");
+  });
+
+  it("makes history synchronization failures explicit", () => {
+    expect(script).toContain("function showHistorySyncWarning");
+    expect(script).toContain("历史同步失败，当前显示本机缓存");
+    expect(script).toContain("clearHistorySyncWarning");
+    expect(script).not.toContain("catch { /* retain the local cache while offline */ }");
   });
 
   it("includes all six agents with light+dark pigments and suggestions", () => {
@@ -117,7 +245,19 @@ describe("web · page", () => {
       expect(a.light).toMatch(/^#[0-9a-f]{6}$/i);
       expect(a.dark).toMatch(/^#[0-9a-f]{6}$/i);
       expect(a.tips.length).toBeGreaterThanOrEqual(3);
-      expect(html).toContain(a.kanji);
+      expect(shipped).toContain(a.kanji);
+    }
+  });
+
+  it("derives web agent identity from the shared core theme", () => {
+    for (const a of AGENTS_META) {
+      const theme = AGENT_THEMES[a.name];
+      expect(theme).toBeTruthy();
+      expect(a.light).toBe(theme.hex);
+      expect(a.kanji).toBe(theme.kanji);
+      expect(a.pig).toBe(theme.pigment);
+      expect(a.sub).toBe(theme.specialty);
+      expect(a.poem).toBe(theme.poem);
     }
   });
 });
@@ -130,45 +270,194 @@ describe("web · server", () => {
 
   it("serves the UI and the JSON API; rejects bad requests", async () => {
     const { startWebServer } = await import("../src/web/server");
-    const port = 3789 + Math.floor(Math.random() * 1000);
-    await startWebServer(port);
+    const port = safeWebPort();
+    const server = await startWebServer(port);
+    close = () => server.close();
 
     const page = await fetch(`http://127.0.0.1:${port}/`);
     expect(page.status).toBe(200);
     const body = await page.text();
     expect(body).toContain("水墨气象台");
-    expect(body).toContain("clientMain()");
-    expect(body).toContain('href="/favicon.svg?v=');
-    expect(body).toContain('href="/favicon.ico?v=');
+    expect(body).toContain('/ui/styles.css?v=');
+    expect(body).toContain('/ui/app.js?v=');
+    expect(body).toContain('href="/ui/assets/image2-favicon.png?v=');
+    expect(body).toContain('id="side-dock"');
+    expect(body).toContain('class="side-btn theme-tool"');
+    expect(body).toContain('class="side-btn help-tool"');
 
-    const icon = await fetch(`http://127.0.0.1:${port}/favicon.svg?v=test`);
+    const styles = await fetch(`http://127.0.0.1:${port}/ui/styles.css?v=test`);
+    expect(styles.status).toBe(200);
+    expect(styles.headers.get("content-type")).toContain("text/css");
+    expect(styles.headers.get("cache-control")).toContain("must-revalidate");
+    const stylesEtag = styles.headers.get("etag");
+    expect(stylesEtag).toMatch(/^"[a-f0-9]{16,}"$/);
+    const stylesBody = await styles.text();
+    expect(stylesBody).toContain("#mountain-wash");
+    expect(stylesBody).toContain(".tool-row");
+    const stylesCached = await fetch(`http://127.0.0.1:${port}/ui/styles.css?v=test`, {
+      headers: { "If-None-Match": stylesEtag || "" },
+    });
+    expect(stylesCached.status).toBe(304);
+
+    const app = await fetch(`http://127.0.0.1:${port}/ui/app.js?v=test`);
+    expect(app.status).toBe(200);
+    expect(app.headers.get("content-type")).toContain("application/javascript");
+    const appEtag = app.headers.get("etag");
+    expect(appEtag).toMatch(/^"[a-f0-9]{16,}"$/);
+    expect(await app.text()).toContain("function clientMain");
+    const appCached = await fetch(`http://127.0.0.1:${port}/ui/app.js?v=test`, {
+      headers: { "If-None-Match": appEtag || "" },
+    });
+    expect(appCached.status).toBe(304);
+
+    const atlas = await fetch(`http://127.0.0.1:${port}/ui/assets/image2-icons.png?v=test`);
+    expect(atlas.status).toBe(200);
+    expect(atlas.headers.get("content-type")).toContain("image/png");
+    expect(atlas.headers.get("cache-control")).toContain("immutable");
+    const atlasEtag = atlas.headers.get("etag");
+    expect(atlasEtag).toMatch(/^"[a-f0-9]{16,}"$/);
+    expect((await atlas.arrayBuffer()).byteLength).toBeGreaterThan(1000);
+    const atlasCached = await fetch(`http://127.0.0.1:${port}/ui/assets/image2-icons.png?v=test`, {
+      headers: { "If-None-Match": atlasEtag || "" },
+    });
+    expect(atlasCached.status).toBe(304);
+
+    const icon = await fetch(`http://127.0.0.1:${port}/ui/assets/image2-favicon.png?v=test`);
     expect(icon.status).toBe(200);
-    expect(icon.headers.get("content-type")).toContain("image/svg+xml");
-    expect(icon.headers.get("cache-control")).toContain("no-cache");
-    expect(await icon.text()).toContain("<svg");
+    expect(icon.headers.get("content-type")).toContain("image/png");
+    expect((await icon.arrayBuffer()).byteLength).toBeGreaterThan(1000);
 
     const legacyIcon = await fetch(`http://127.0.0.1:${port}/favicon.ico?v=test`, { redirect: "manual" });
     expect(legacyIcon.status).toBe(200);
-    expect(legacyIcon.headers.get("content-type")).toContain("image/svg+xml");
+    expect(legacyIcon.headers.get("content-type")).toContain("image/png");
 
     const agents = await fetch(`http://127.0.0.1:${port}/api/agents`);
     expect(agents.status).toBe(200);
     const aj: any = await agents.json();
-    // agent construction is environment-dependent (needs provider config);
-    // the contract here is the response shape, not the roster
     expect(Array.isArray(aj.agents)).toBe(true);
+    expect(aj.agents.map((agent: any) => agent.name).sort()).toEqual([
+      'dew', 'fair', 'fog', 'frost', 'rain', 'snow',
+    ]);
 
     const status = await fetch(`http://127.0.0.1:${port}/api/status`);
     expect(status.status).toBe(200);
+    expect(status.headers.get("cache-control")).toBe("no-store");
+    expect(status.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(status.headers.get("x-frame-options")).toBe("DENY");
+    expect(status.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    const sj: any = await status.json();
+    expect(sj).toMatchObject({
+      version: expect.any(String),
+      workspace: expect.any(String),
+      runtime: { node: expect.any(String), uptimeSeconds: expect.any(Number) },
+      agents: { summary: { total: expect.any(Number), busy: expect.any(Number), idle: expect.any(Number) } },
+      tools: { registered: expect.any(Number), calls: expect.any(Number), failures: expect.any(Number) },
+      background: { total: expect.any(Number), running: expect.any(Number) },
+      mcp: { connected: expect.any(Number), servers: expect.any(Array) },
+    });
+    expect(sj.agents.summary.total).toBe(6);
+    expect(sj.tools.registered).toBeGreaterThan(20);
+
+    const health = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(health.status).toBe(200);
+    const hj: any = await health.json();
+    expect(hj).toMatchObject({
+      schemaVersion: 1,
+      ok: expect.any(Boolean),
+      generatedAt: expect.any(String),
+      runtime: { status: expect.any(Object) },
+      doctor: {
+        summary: {
+          pass: expect.any(Number),
+          warn: expect.any(Number),
+          fail: expect.any(Number),
+        },
+        checks: expect.any(Array),
+      },
+      nextActions: expect.any(Array),
+    });
+    expect(JSON.stringify(hj)).not.toMatch(/sk-[a-z0-9_-]{8,}/i);
+
+    const settings = await fetch(`http://127.0.0.1:${port}/api/settings`);
+    expect(settings.status).toBe(200);
+    const settingsJson: any = await settings.json();
+    expect(settingsJson.runtime).toMatchObject({
+      language: expect.any(String),
+      approvalMode: expect.any(String),
+      toolConcurrency: expect.any(Number),
+    });
+    expect(Array.isArray(settingsJson.agents)).toBe(true);
+    expect(JSON.stringify(settingsJson)).not.toMatch(/api[_-]?key/i);
 
     const bad = await fetch(`http://127.0.0.1:${port}/api/chat`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
     });
     expect(bad.status).toBe(400);
+    await expect(bad.json()).resolves.toMatchObject({
+      error: {
+        code: "web.bad_request",
+        message: "message is required",
+        retryable: false,
+        action: expect.any(String),
+      },
+    });
+
+    const malformed = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{",
+    });
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toMatchObject({
+      error: { code: "web.invalid_json", retryable: false },
+    });
+
+    const http = await import("http");
+    const tooLarge = await new Promise<{ status: number; body: any }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("large request was not rejected before reading the body")), 500);
+      const request = http.request(
+        {
+          host: "127.0.0.1",
+          port,
+          path: "/api/chat",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": String(1024 * 1024 + 1),
+          },
+        },
+        (response) => {
+          let raw = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => { raw += chunk; });
+          response.on("end", () => {
+            clearTimeout(timer);
+            resolve({ status: response.statusCode || 0, body: JSON.parse(raw) });
+          });
+        },
+      );
+      request.on("error", reject);
+      request.flushHeaders();
+    });
+    expect(tooLarge.status).toBe(413);
+    expect(tooLarge.body).toMatchObject({
+      error: {
+        code: "web.payload_too_large",
+        retryable: false,
+        action: "缩短消息或拆成多次发送。",
+      },
+    });
+
+    const evilOrigin = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://evil.example.com" },
+      body: JSON.stringify({ message: "hi" }),
+    });
+    expect(evilOrigin.status).toBe(403);
+    await expect(evilOrigin.json()).resolves.toMatchObject({
+      error: { code: "web.forbidden_origin", retryable: false },
+    });
 
     // Host-header guard: a rebound/evil Host is refused on loopback binding.
     // (fetch/undici silently drops a Host override, so use raw http.)
-    const http = await import("http");
     const evilStatus = await new Promise<number>((resolve, reject) => {
       const r = http.request(
         { host: "127.0.0.1", port, path: "/api/agents", headers: { Host: "evil.example.com" } },
@@ -178,4 +467,606 @@ describe("web · server", () => {
     });
     expect(evilStatus).toBe(403);
   }, 15000);
+
+  it("enforces authentication on every remotely-bound surface", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const token = "remote-access-token-with-strong-length";
+    const fakeContext = { agentMap: new Map(), workspacePath: process.cwd() };
+    const server = await (startWebServer as any)(port, fakeContext, { host: "0.0.0.0", token });
+    try {
+      const anonymous = await fetch(`http://127.0.0.1:${port}/`, { redirect: "manual" });
+      expect(anonymous.status).toBe(401);
+      expect(anonymous.headers.get("www-authenticate")).toContain("Basic");
+
+      const basic = Buffer.from(`skyloom:${token}`).toString("base64");
+      const browser = await fetch(`http://127.0.0.1:${port}/`, {
+        headers: { Authorization: `Basic ${basic}` },
+      });
+      expect(browser.status).toBe(200);
+      expect(await browser.text()).toContain("水墨气象台");
+
+      const apiClient = await fetch(`http://127.0.0.1:${port}/ui/styles.css`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(apiClient.status).toBe(200);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("does not expose unexpected server error details to API clients", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const secret = "C:\\private\\workspace\\provider-key.txt";
+    const fakeContext = { workspacePath: process.cwd() } as Record<string, unknown>;
+    Object.defineProperty(fakeContext, "agentMap", {
+      get() { throw new Error(secret); },
+    });
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/status`);
+      const body = await response.text();
+      expect(response.status).toBe(500);
+      expect(body).not.toContain(secret);
+      expect(JSON.parse(body)).toMatchObject({
+        error: {
+          code: "web.internal_error",
+          category: "internal",
+          retryable: true,
+          action: expect.any(String),
+        },
+      });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("exposes durable run summaries, details and audit events", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "skyloom-web-runs-"));
+    const runStore = new OrchestrationRunStore(root);
+    const run = runStore.create("ship safely", [
+      { id: "1", description: "build", assignedTo: "rain", dependsOn: [] },
+    ], "web-run");
+    runStore.start(run);
+    runStore.taskStarted(run, "1");
+    runStore.taskFinished(run, "1", true, "artifact", "trace-web");
+    runStore.finish(run, "done");
+    const port = safeWebPort();
+    const fakeContext = { agentMap: new Map(), workspacePath: process.cwd() };
+    const server = await (startWebServer as any)(port, fakeContext, { runStore });
+    try {
+      const list = await fetch(`http://127.0.0.1:${port}/api/runs`);
+      expect(await list.json()).toMatchObject({
+        schemaVersion: 1,
+        runs: [{ runId: "web-run", status: "completed", taskSummary: { total: 1, completed: 1 } }],
+      });
+      const detail = await fetch(`http://127.0.0.1:${port}/api/runs/web-run`);
+      expect(await detail.json()).toMatchObject({ runId: "web-run", tasks: [{ traceIds: ["trace-web"] }] });
+      const events = await fetch(`http://127.0.0.1:${port}/api/runs/web-run/events`);
+      expect(await events.json()).toMatchObject({ schemaVersion: 1, runId: "web-run", events: expect.any(Array) });
+    } finally {
+      await closeServer(server);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("starts a genuinely new backend session for the selected agent", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const createSession = vi.fn(async () => "session-new");
+    const init = vi.fn(async () => undefined);
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init,
+      memory: { createSession },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog" }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ sessionId: "session-new" });
+      expect(init).toHaveBeenCalledTimes(1);
+      expect(createSession).toHaveBeenCalledTimes(1);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("serves the active backend conversation without internal tool messages", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        getActiveSession: () => "session-active",
+        getMessages: () => [
+          { role: "system", content: "internal prompt" },
+          { role: "user", content: "请检查项目" },
+          { role: "assistant", content: "先读取", toolCalls: [{ id: "call-1" }] },
+          { role: "tool", content: "secret tool output" },
+          { role: "assistant", content: "检查完成" },
+        ],
+      },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/history?agent=fog`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        sessionId: "session-active",
+        messages: [
+          { role: "user", content: "请检查项目" },
+          { role: "assistant", content: "检查完成" },
+        ],
+      });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("serves a requested session history without changing the active session", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const getSessionMessages = vi.fn((sessionId: string) => sessionId === "session-a"
+      ? [{ role: "user", content: "A" }, { role: "assistant", content: "answer A" }]
+      : null);
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        getActiveSession: () => "session-b",
+        getMessages: vi.fn(() => [{ role: "user", content: "B" }]),
+        getSessionMessages,
+      },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/history?agent=fog&sessionId=session-a`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        sessionId: "session-a",
+        messages: [
+          { role: "user", content: "A" },
+          { role: "assistant", content: "answer A" },
+        ],
+      });
+      expect(getSessionMessages).toHaveBeenCalledWith("session-a");
+      expect(fakeAgent.memory.getMessages).not.toHaveBeenCalled();
+      expect(fakeAgent.memory.getActiveSession()).toBe("session-b");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("identifies the backend session used by a successful chat stream", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: { getActiveSession: () => "session-active" },
+      chatStream: vi.fn(async function* () {
+        yield { type: "content", text: "hello" };
+      }),
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", message: "hello" }),
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("x-skyloom-session-id")).toBe("session-active");
+      expect(await response.text()).toContain('"text":"hello"');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("does not expose provider error details in a failed chat stream", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const secret = "provider rejected sk-secret-value at C:\\private\\model.json";
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: { getActiveSession: () => "session-active" },
+      chatStream: vi.fn(async function* () {
+        throw new Error(secret);
+      }),
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", message: "hello" }),
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toContain('"code":"web.chat_failed"');
+      expect(body).not.toContain(secret);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("rejects a missing chat session before streaming starts", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const sessionExists = vi.fn(async () => false);
+    const chatStreamInSession = vi.fn(async function* () {
+      yield { type: "content", text: "should-not-stream" };
+    });
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: { sessionExists },
+      chatStreamInSession,
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", message: "hello", sessionId: "missing-session" }),
+      });
+      expect(response.status).toBe(404);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: "web.session_not_found",
+          message: "session not found",
+          retryable: false,
+          action: expect.any(String),
+        },
+      });
+      expect(sessionExists).toHaveBeenCalledWith("missing-session");
+      expect(chatStreamInSession).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("rejects chat requests while the selected agent is busy", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const chatStream = vi.fn(async function* () {
+      yield { type: "content", text: "should-not-stream" };
+    });
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "thinking",
+      init: vi.fn(async () => undefined),
+      memory: {},
+      chatStream,
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", message: "hello" }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: "web.agent_busy",
+          message: "agent is busy",
+          category: "conflict",
+          retryable: true,
+          action: expect.any(String),
+        },
+      });
+      expect(chatStream).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("admits only one concurrent web chat per agent", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => { releaseStream = resolve; });
+    const chatStreamInSession = vi.fn(async function* () {
+      yield { type: "content", text: "started" };
+      await streamGate;
+      yield { type: "done" };
+    });
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        sessionExists: vi.fn(async () => true),
+        getActiveSession: () => "session-a",
+      },
+      chatStreamInSession,
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+    const request = () => fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: "fog", message: "hello", sessionId: "session-a" }),
+    });
+
+    try {
+      const first = await request();
+      expect(first.status).toBe(200);
+
+      const second = await request();
+      expect(second.status).toBe(409);
+      await expect(second.json()).resolves.toMatchObject({ error: { code: "web.agent_busy" } });
+      expect(chatStreamInSession).toHaveBeenCalledTimes(1);
+
+      releaseStream();
+      await first.text();
+      const third = await request();
+      expect(third.status).toBe(200);
+      await third.text();
+      expect(chatStreamInSession).toHaveBeenCalledTimes(2);
+    } finally {
+      releaseStream();
+      await closeServer(server);
+    }
+  });
+
+  it("lists, restores, and deletes persisted web sessions", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    let activeSession = "session-current";
+    const loadSession = vi.fn(async (sessionId: string) => {
+      if (sessionId !== "session-older") return false;
+      activeSession = sessionId;
+      return true;
+    });
+    const deleteSession = vi.fn(async (sessionId: string) => {
+      if (sessionId !== activeSession) return false;
+      activeSession = null as any;
+      return true;
+    });
+    const createSession = vi.fn(async () => {
+      activeSession = "session-fresh";
+      return activeSession;
+    });
+    const sessions = [
+      { id: "session-current", preview: "当前问题", messageCount: 4, updatedAt: "2026-07-04 20:00:00" },
+      { id: "session-older", preview: "旧问题", messageCount: 2, updatedAt: "2026-07-03 20:00:00" },
+    ];
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        listSessions: vi.fn(async () => sessions),
+        getActiveSession: () => activeSession,
+        loadSession,
+        deleteSession,
+        createSession,
+      },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const listed = await fetch(`http://127.0.0.1:${port}/api/sessions?agent=fog`);
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toEqual({ activeSessionId: "session-current", sessions });
+
+      const loaded = await fetch(`http://127.0.0.1:${port}/api/session/load`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", sessionId: "session-older" }),
+      });
+      expect(loaded.status).toBe(200);
+      expect(await loaded.json()).toEqual({ sessionId: "session-older" });
+      expect(loadSession).toHaveBeenCalledWith("session-older");
+
+      const deleted = await fetch(`http://127.0.0.1:${port}/api/session`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog", sessionId: "session-older" }),
+      });
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toEqual({ deleted: true, sessionId: "session-fresh" });
+      expect(deleteSession).toHaveBeenCalledWith("session-older");
+      expect(createSession).toHaveBeenCalledTimes(1);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("returns a structured not-found error for unknown agents across session APIs", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "idle",
+      init: vi.fn(async () => undefined),
+      memory: {
+        listSessions: vi.fn(async () => []),
+        getActiveSession: () => null,
+        getMessages: () => [],
+        createSession: vi.fn(async () => "session-new"),
+        loadSession: vi.fn(async () => false),
+        deleteSession: vi.fn(async () => false),
+      },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const cases = [
+        fetch(`http://127.0.0.1:${port}/api/sessions?agent=ghost`),
+        fetch(`http://127.0.0.1:${port}/api/history?agent=ghost`),
+        fetch(`http://127.0.0.1:${port}/api/session`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent: "ghost" }),
+        }),
+        fetch(`http://127.0.0.1:${port}/api/session/load`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent: "ghost", sessionId: "session-x" }),
+        }),
+        fetch(`http://127.0.0.1:${port}/api/session`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent: "ghost", sessionId: "session-x" }),
+        }),
+      ];
+      for (const response of await Promise.all(cases)) {
+        expect(response.status).toBe(404);
+        await expect(response.json()).resolves.toMatchObject({
+          error: {
+            code: "web.agent_not_found",
+            message: "Agent 'ghost' not found",
+            category: "not_found",
+            retryable: false,
+            action: expect.any(String),
+          },
+        });
+      }
+      expect(fakeAgent.init).not.toHaveBeenCalled();
+      expect(fakeAgent.memory.createSession).not.toHaveBeenCalled();
+      expect(fakeAgent.memory.loadSession).not.toHaveBeenCalled();
+      expect(fakeAgent.memory.deleteSession).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("refuses to reset a session while the agent is busy", async () => {
+    const { startWebServer } = await import("../src/web/server");
+    const port = safeWebPort();
+    const createSession = vi.fn(async () => "should-not-run");
+    const fakeAgent = {
+      name: "fog",
+      displayName: "雾",
+      emoji: "",
+      specialty: "test",
+      state: "thinking",
+      init: vi.fn(async () => undefined),
+      memory: { createSession },
+      getStatus: () => ({}),
+    };
+    const fakeContext = {
+      agentMap: new Map([["fog", fakeAgent]]),
+      workspacePath: process.cwd(),
+    };
+    const server = await (startWebServer as any)(port, fakeContext);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: "fog" }),
+      });
+      expect(response.status).toBe(409);
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
 });

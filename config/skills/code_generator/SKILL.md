@@ -5,6 +5,9 @@ triggers:
   - "generate"
   - "code gen"
   - "scaffold"
+  - "写代码"
+  - "实现功能"
+  - "生成代码"
 ---
 
 ## Production code generation

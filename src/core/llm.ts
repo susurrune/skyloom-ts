@@ -510,7 +510,8 @@ export class LLMClient {
    * Get max retries from config.
    */
   private _getRetries(): number {
-    return (this.config.llm as any)?.maxRetries ?? 2;
+    const llm = (this.config.llm as any) || {};
+    return llm.max_retries ?? llm.maxRetries ?? 2;
   }
 
   /**
@@ -612,8 +613,10 @@ export class LLMClient {
     agentName?: string,
     tools?: string[],
     stream: boolean = false,
-    overrides?: Record<string, unknown>
+    overrides?: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
+    signal?.throwIfAborted();
     this.checkBudget();
 
     const ov = overrides || {};
@@ -641,9 +644,11 @@ export class LLMClient {
           agentName,
           tools,
           stream,
-          overrides
+          overrides,
+          signal,
         );
       } catch (e) {
+        if (signal?.aborted || (e as { name?: string })?.name === "AbortError") throw e;
         lastError = e instanceof Error ? e : new Error(String(e));
         this.log?.warn("llm_fallback", {
           model: attemptModel,
@@ -674,27 +679,48 @@ export class LLMClient {
     agentName?: string,
     tools?: string[],
     _stream: boolean = false,
-    overrides?: Record<string, unknown>
+    overrides?: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
-    const temperature = (overrides?.temperature as number) ?? 0.7;
-    const maxTokens = (overrides?.maxTokens as number) ?? 4096;
-    const maxRetries = (this.config.llm as any)?.maxRetries ?? 2;
+    const agentConfig = (agentName ? this.config.agents?.[agentName] : null) || {};
+    const llmConfig = this.config.llm || {};
+    const temperature = (overrides?.temperature as number) ?? agentConfig.temperature ?? llmConfig.temperature ?? 0.7;
+    const maxTokens = (overrides?.maxTokens as number) ?? agentConfig.max_tokens ?? llmConfig.max_tokens ?? 4096;
+    const maxRetries = llmConfig.max_retries ?? llmConfig.maxRetries ?? 2;
     const isAnthropic = model.includes("claude") || model.startsWith("anthropic/");
 
     let lastError: Error | null = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+        signal?.throwIfAborted();
+        if (attempt > 0) {
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => {
+              clearTimeout(timer);
+              if (signal?.reason instanceof Error) reject(signal.reason);
+              else {
+                const error = new Error("Aborted");
+                error.name = "AbortError";
+                reject(error);
+              }
+            };
+            const timer = setTimeout(() => {
+              signal?.removeEventListener("abort", onAbort);
+              resolve();
+            }, 1000 * Math.pow(2, attempt - 1));
+            signal?.addEventListener("abort", onAbort, { once: true });
+          });
+        }
 
         let content: string;
         let toolCalls: ToolCall[] = [];
         let usage: UsageStats = { promptTokens: 0, completionTokens: 0 };
 
         if (isAnthropic) {
-          const r = await this.callAnthropic(model, messages, tools, temperature, maxTokens, agentName);
+          const r = await this.callAnthropic(model, messages, tools, temperature, maxTokens, agentName, signal);
           content = r.content; toolCalls = r.toolCalls; usage = r.usage;
         } else {
-          const r = await this.callOpenAI(model, messages, tools, temperature, maxTokens, agentName);
+          const r = await this.callOpenAI(model, messages, tools, temperature, maxTokens, agentName, signal);
           content = r.content; toolCalls = r.toolCalls; usage = r.usage;
         }
 
@@ -707,6 +733,7 @@ export class LLMClient {
 
         return { content, toolCalls, model, usage, cost, truncated: false };
       } catch (e: any) {
+        if (signal?.aborted || e?.name === "AbortError") throw e;
         lastError = e;
         if (attempt >= maxRetries) throw e;
       }
@@ -715,7 +742,7 @@ export class LLMClient {
   }
 
   private async callOpenAI(
-    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string, signal?: AbortSignal
   ): Promise<{ content: string; toolCalls: ToolCall[]; usage: UsageStats }> {
     const apiKey = this.getApiKey(m, agentName);
     const baseUrl = this.getBaseUrl(m);
@@ -724,7 +751,7 @@ export class LLMClient {
       const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
       if (defs.length) body.tools = defs.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: this.paramsToSchema(t.parameters || []) } }));
     }
-    const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body) });
+    const resp = await fetch(baseUrl + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: JSON.stringify(body), signal });
     if (!resp.ok) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
     const data: any = await resp.json();
     const msg = data.choices?.[0]?.message || {};
@@ -732,7 +759,7 @@ export class LLMClient {
   }
 
   private async callAnthropic(
-    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string
+    m: string, messages: Record<string, unknown>[], tools?: string[], temp?: number, maxTok?: number, agentName?: string, signal?: AbortSignal
   ): Promise<{ content: string; toolCalls: ToolCall[]; usage: UsageStats }> {
     const apiKey = this.getApiKey("anthropic", agentName);
     const body: Record<string, unknown> = { model: m, max_tokens: maxTok ?? 4096, messages: messages.filter(msg => msg.role !== "system"), temperature: temp ?? 0.7 };
@@ -741,7 +768,7 @@ export class LLMClient {
       const defs = tools.map(t => this._toolRegistry.get(t)).filter(Boolean) as any[];
       if (defs.length) body.tools = defs.map(t => ({ name: t.name, description: t.description, input_schema: this.paramsToSchema(t.parameters || []) }));
     }
-    const resp = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" }, body: JSON.stringify(body) });
+    const resp = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" }, body: JSON.stringify(body), signal });
     if (!resp.ok) { const e: any = new Error("API " + resp.status + ": " + ((await resp.text()).slice(0, 200))); e.status_code = resp.status; throw e; }
     const data: any = await resp.json(); let content = ""; const toolCalls: ToolCall[] = [];
     for (const b of data.content || []) { if (b.type === "text") content += b.text; if (b.type === "tool_use") toolCalls.push({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input) } }); }
@@ -768,8 +795,13 @@ export class LLMClient {
     const envVar = envMap.get(provider) || (provider.toUpperCase() + "_API_KEY");
 
     // 1. Check environment variable first
-    let key = process.env[envVar];
+    const key = process.env[envVar];
     if (key) return key;
+
+    // Runtime config may have been updated by the Web workshop. Read it before
+    // falling back to disk so a credential change affects the next request.
+    const configuredKey = (this.config as any).api_keys?.[provider];
+    if (configuredKey) return String(configuredKey);
 
     // 2. Check config file (~/.skyloom/config.yaml)
     try {
@@ -787,7 +819,16 @@ export class LLMClient {
 
   private getBaseUrl(model: string): string {
     let provider = "openai"; const [pr] = splitProvider(model); if (pr) provider = pr;
-    else { const l = model.toLowerCase(); if (l.includes("claude")) return "https://api.anthropic.com/v1"; else if (l.includes("deepseek")) return "https://api.deepseek.com/v1"; else if (l.includes("groq")) return "https://api.groq.com/openai/v1"; else if (l.includes("openrouter")) return "https://openrouter.ai/api/v1"; else if (l.includes("ollama")) return ((process.env.OLLAMA_HOST || "http://localhost:11434") + "/v1"); }
+    else {
+      const l = model.toLowerCase();
+      if (l.includes("claude")) provider = "anthropic";
+      else if (l.includes("deepseek")) provider = "deepseek";
+      else if (l.includes("groq")) provider = "groq";
+      else if (l.includes("openrouter")) provider = "openrouter";
+      else if (l.includes("ollama")) provider = "ollama";
+    }
+    const configured = (this.config as any).providers?.[provider]?.base_url;
+    if (typeof configured === "string" && configured.trim()) return configured.trim().replace(/\/+$/, "");
     const urls: Record<string, string> = {
       openai: "https://api.openai.com/v1",
       anthropic: "https://api.anthropic.com/v1",
@@ -900,14 +941,16 @@ export class LLMClient {
     this.checkBudget();
     const ov = overrides || {};
     const model: string = typeof ov.model === "string" ? ov.model : this.getModel(agentName);
-    const temperature = (ov.temperature as number) ?? 0.7;
-    const maxTokens = (ov.maxTokens as number) ?? 4096;
+    const agentConfig = (agentName ? this.config.agents?.[agentName] : null) || {};
+    const llmConfig = this.config.llm || {};
+    const temperature = (ov.temperature as number) ?? agentConfig.temperature ?? llmConfig.temperature ?? 0.7;
+    const maxTokens = (ov.maxTokens as number) ?? agentConfig.max_tokens ?? llmConfig.max_tokens ?? 4096;
     const isAnthropic = model.includes("claude") || model.startsWith("anthropic/");
 
     // Blocking fallback used for Anthropic (different wire format) and on
     // failures before any content has streamed (preserves fallback chain + retry).
     const blockingFallback = async function* (this: LLMClient): AsyncGenerator<StreamEvent> {
-      const response = await this.complete(messages, agentName, tools, false, overrides);
+      const response = await this.complete(messages, agentName, tools, false, overrides, signal);
       if (response.content) yield { type: "content", text: response.content };
       for (const tc of response.toolCalls || []) yield { type: "tool_call", toolCall: tc };
       yield { type: "done", usage: response.usage, reasoningContent: response.reasoningContent };

@@ -23,6 +23,7 @@
  */
 
 import axios from 'axios';
+import { assertFetchAllowed, readResponseText, safeFetch } from './guards';
 
 export interface SearchResult {
   title: string;
@@ -36,11 +37,17 @@ export interface SearchResponse {
   answer?: string;         // direct answer / summary, when the provider offers one
 }
 
+interface WebHttpOptions {
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 /** Minimal HTTP surface — injectable for tests. */
 export interface WebHttp {
-  getJson(url: string, opts?: { headers?: Record<string, string>; timeoutMs?: number }): Promise<any>;
-  postJson(url: string, body: any, opts?: { headers?: Record<string, string>; timeoutMs?: number }): Promise<any>;
-  getText(url: string, opts?: { headers?: Record<string, string>; timeoutMs?: number }): Promise<string>;
+  getJson(url: string, opts?: WebHttpOptions): Promise<any>;
+  postJson(url: string, body: any, opts?: WebHttpOptions): Promise<any>;
+  getText(url: string, opts?: WebHttpOptions): Promise<string>;
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -54,6 +61,7 @@ export const defaultHttp: WebHttp = {
     const res = await axios.get(url, {
       headers: { 'User-Agent': UA, Accept: 'application/json', ...(opts?.headers || {}) },
       timeout: opts?.timeoutMs ?? DEFAULT_TIMEOUT,
+      signal: opts?.signal,
       maxRedirects: 5,
       validateStatus: (s) => s >= 200 && s < 300,
     });
@@ -63,6 +71,7 @@ export const defaultHttp: WebHttp = {
     const res = await axios.post(url, body, {
       headers: { 'User-Agent': UA, Accept: 'application/json', 'Content-Type': 'application/json', ...(opts?.headers || {}) },
       timeout: opts?.timeoutMs ?? DEFAULT_TIMEOUT,
+      signal: opts?.signal,
       maxRedirects: 5,
       validateStatus: (s) => s >= 200 && s < 300,
     });
@@ -77,6 +86,7 @@ export const defaultHttp: WebHttp = {
         ...(opts?.headers || {}),
       },
       timeout: opts?.timeoutMs ?? DEFAULT_TIMEOUT,
+      signal: opts?.signal,
       maxRedirects: 5,
       validateStatus: (s) => s >= 200 && s < 300,
       responseType: 'text',
@@ -298,6 +308,16 @@ export interface WebSearchOptions {
   onProviderError?: (provider: string, error: string) => void;
   /** Total wall-clock budget for the waterfall; stop trying once exceeded. */
   budgetMs?: number;
+  signal?: AbortSignal;
+}
+
+function withAbortSignal(http: WebHttp, signal?: AbortSignal): WebHttp {
+  if (!signal) return http;
+  return {
+    getJson: (url, opts) => http.getJson(url, { ...opts, signal }),
+    postJson: (url, body, opts) => http.postJson(url, body, { ...opts, signal }),
+    getText: (url, opts) => http.getText(url, { ...opts, signal }),
+  };
 }
 
 /**
@@ -312,7 +332,7 @@ export async function webSearch(query: string, opts: WebSearchOptions = {}): Pro
   if (!q) throw new Error('query is required');
   const max = Math.max(1, Math.min(20, Math.floor(opts.max ?? 8)));
   const env = opts.env ?? (process.env as EnvMap);
-  const http = opts.http ?? defaultHttp;
+  const http = withAbortSignal(opts.http ?? defaultHttp, opts.signal);
   const pinned = (opts.engine || env.SKYLOOM_SEARCH_ENGINE || '').trim();
   const budgetMs = opts.budgetMs ?? 22000;
   const start = Date.now();
@@ -321,6 +341,7 @@ export async function webSearch(query: string, opts: WebSearchOptions = {}): Pro
   const tried: string[] = [];
   let errors = 0;
   for (const provider of providers) {
+    if (opts.signal?.aborted) throw new Error('web search cancelled');
     // Out of time: stop the waterfall and return what we have (a clear empty
     // result), rather than letting a slow tail provider blow the tool timeout.
     if (tried.length > 0 && Date.now() - start > budgetMs) break;
@@ -329,6 +350,7 @@ export async function webSearch(query: string, opts: WebSearchOptions = {}): Pro
       const res = await provider.run(http, env, q, max);
       if (res.results.length > 0 || res.answer) return { ...res, tried };
     } catch (e: any) {
+      if (opts.signal?.aborted) throw new Error('web search cancelled');
       errors++;
       opts.onProviderError?.(provider.id, String(e?.message || e));
     }
@@ -362,20 +384,34 @@ export function formatSearchResults(res: SearchResponse & { tried?: string[]; er
  * is what makes "read the top news article" actually usable — raw HTML is
  * mostly boilerplate.
  */
-export async function readPage(url: string, opts: { env?: EnvMap; http?: WebHttp; maxChars?: number } = {}): Promise<string> {
+export async function readPage(
+  url: string,
+  opts: { env?: EnvMap; http?: WebHttp; maxChars?: number; signal?: AbortSignal } = {},
+): Promise<string> {
   const env = opts.env ?? (process.env as EnvMap);
-  const http = opts.http ?? defaultHttp;
+  const http = withAbortSignal(opts.http ?? defaultHttp, opts.signal);
   const maxChars = opts.maxChars ?? 12000;
   if (!/^https?:\/\//i.test(url)) throw new Error('url must be http(s)');
+  await assertFetchAllowed(url);
+
+  const getText = async (target: string, headers: Record<string, string> | undefined, timeoutMs: number): Promise<string> => {
+    if (opts.http) return http.getText(target, { headers, timeoutMs });
+    const response = await safeFetch(target, { headers, signal: opts.signal }, { timeoutMs });
+    if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    return readResponseText(response, 2 * 1024 * 1024);
+  };
 
   const headers: Record<string, string> = { Accept: 'text/plain' };
   if (env.JINA_API_KEY) headers.Authorization = `Bearer ${env.JINA_API_KEY}`;
   try {
-    const text = await http.getText(`https://r.jina.ai/${url}`, { headers, timeoutMs: 20000 });
+    const text = await getText(`https://r.jina.ai/${url}`, headers, 20000);
     if (text && text.trim()) return clip(text, maxChars);
-  } catch { /* fall through to raw fetch */ }
+  } catch (error) {
+    if (opts.signal?.aborted) throw error;
+    // Fall through to the original page when the reader endpoint is unavailable.
+  }
 
-  const raw = await http.getText(url, { timeoutMs: 15000 });
+  const raw = await getText(url, undefined, 15000);
   return clip(stripTags(raw), maxChars);
 }
 

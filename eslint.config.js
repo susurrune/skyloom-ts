@@ -3,9 +3,11 @@
 // parserOptions.project) so it's fast and doesn't need a second TS program;
 // the strict tsconfig already does the type checking.
 //
-// Philosophy: errors catch real bugs (unused vars, unsafe patterns); the large
-// existing `any` surface and a few stylistic rules are warnings so the gate is
-// honest without forcing a mass rewrite to go green. Tighten over time.
+// Philosophy: errors catch real bugs (unused vars, unsafe patterns). This
+// project intentionally has dynamic boundaries around LLM/tool/plugin/MCP/SQL
+// payloads; use `tsc --strict` for the hard type gate and tighten local `any`
+// surfaces with focused refactors instead of making lint noisy across the whole
+// runtime.
 
 const tsParser = require('@typescript-eslint/parser');
 const tsPlugin = require('@typescript-eslint/eslint-plugin');
@@ -52,8 +54,8 @@ module.exports = [
       'valid-typeof': 'error',
       'no-cond-assign': ['error', 'except-parens'],
 
-      // ── Debt warnings (honest, not blocking) ──
-      '@typescript-eslint/no-explicit-any': 'warn',
+      // ── Debt / style warnings (honest, not blocking) ──
+      '@typescript-eslint/no-explicit-any': 'off',
       'no-empty': ['warn', { allowEmptyCatch: true }],
       'prefer-const': 'warn',
       'no-var': 'warn',

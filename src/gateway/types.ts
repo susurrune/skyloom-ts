@@ -46,7 +46,7 @@ export interface MediaAttachment {
 /** An outbound media item the agent wants to send (parsed from its reply). */
 export interface OutboundMedia {
   kind: 'image' | 'file';
-  /** Local filesystem path or http(s) URL to the binary. */
+  /** Public http(s) URL to the binary. */
   src: string;
   /** Optional caption / alt text. */
   alt?: string;
@@ -64,8 +64,8 @@ export interface ParsedReply {
  *   - Markdown image:  ![alt](src)
  *   - Explicit image:  [[image:src]]  or  [[image:src|alt]]
  *   - Explicit file:   [[file:src]]   or  [[file:src|alt]]
- * `src` is a local path or http(s) URL. Only http(s) and existing local files
- * are treated as media; anything else is left in the text untouched.
+ * `src` is parsed here and validated before delivery. The gateway only sends
+ * public http(s) URLs; local files and private-network targets are rejected.
  */
 export function parseReply(reply: string): ParsedReply {
   const media: OutboundMedia[] = [];

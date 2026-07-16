@@ -1,8 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { FogAgent } from "../src/agents/fog";
-import { MessageBus } from "../src/core/bus";
+import { RainAgent } from "../src/agents/rain";
+import { Event, EventType, MessageBus } from "../src/core/bus";
 import { ToolRegistry } from "../src/core/tool";
-import { SkillRegistry } from "../src/core/skill";
+import { Skill, SkillRegistry } from "../src/core/skill";
+import { Task, TaskResult } from "../src/core/agent/task";
 
 /**
  * Characterization tests for the agent chat/tool loop, driven by a scripted
@@ -40,11 +42,15 @@ class MockLLM {
   setLogger() { /* noop */ }
 }
 
-function makeAgent(turns: Turn[], tools: { name: string; handler: (a: any) => Promise<string>; idempotent?: boolean }[] = []) {
+function makeAgent(
+  turns: Turn[],
+  tools: { name: string; handler: (a: any) => Promise<string>; idempotent?: boolean }[] = [],
+  bus: MessageBus = new MessageBus(),
+) {
   const reg = new ToolRegistry();
   for (const t of tools) reg.register({ name: t.name, description: t.name, handler: t.handler, idempotent: t.idempotent });
   const config = { agents: { fog: {} }, llm: { language: "zh" }, memory: { shortTermLimit: 100, dbPath: "/tmp/sky-test" } };
-  const agent = new FogAgent(config as any, new MockLLM(turns) as any, new MessageBus(), reg, new SkillRegistry());
+  const agent = new FogAgent(config as any, new MockLLM(turns) as any, bus, reg, new SkillRegistry());
   return agent;
 }
 
@@ -55,6 +61,147 @@ async function collect(gen: AsyncGenerator<any>, cap = 500): Promise<any[]> {
 }
 
 describe("agent · chat loop (mock LLM)", () => {
+  it("allocates a distinct named memory store for each agent during base construction", () => {
+    const config = { agents: { fog: {}, rain: {} }, llm: {}, memory: { shortTermLimit: 100, dbPath: "/tmp/sky-agent-memory/base.db" } };
+    const bus = new MessageBus();
+    const reg = new ToolRegistry();
+    const skills = new SkillRegistry();
+    const fog = new FogAgent(config as any, new MockLLM([]) as any, bus, reg, skills);
+    const rain = new RainAgent(config as any, new MockLLM([]) as any, bus, reg, skills);
+
+    expect((fog.memory as any).dbPath).toMatch(/[\\/]fog\.db$/);
+    expect((rain.memory as any).dbPath).toMatch(/[\\/]rain\.db$/);
+    expect((fog.memory as any).dbPath).not.toBe((rain.memory as any).dbPath);
+  });
+
+  it("initializes only once when repeated calls overlap", async () => {
+    const bus = new MessageBus();
+    const subscribe = vi.spyOn(bus, "subscribe");
+    const agent = makeAgent([{ content: "ok" }], [], bus);
+
+    await Promise.all([agent.init(), agent.init(), agent.init()]);
+
+    expect(subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the delegation timeout as soon as a response arrives", async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      const bus = new MessageBus();
+      const agent = makeAgent([], [], bus);
+      await agent.init();
+
+      const reply = agent.requestHelp("rain", "inspect this", 60);
+      const timeoutHandle = setTimeoutSpy.mock.results.at(-1)?.value;
+      expect(timeoutHandle).toBeDefined();
+      await Promise.resolve();
+      const request = bus.getHistory("fog").find((event) => event.type === EventType.AGENT_REQUEST);
+      expect(request).toBeTruthy();
+
+      await bus.publish(new Event(
+        EventType.AGENT_RESPONSE,
+        "rain",
+        "fog",
+        { correlation_id: request!.data.correlation_id, content: "done", success: true },
+      ));
+
+      await expect(reply).resolves.toBe("done");
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(timeoutHandle);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("settles a delegation with a fallback when the target times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const agent = makeAgent([]);
+      const reply = agent.requestHelp("rain", "inspect this", 2);
+      let result: string | undefined;
+      void reply.then((value) => { result = value; });
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.resolve();
+
+      expect(result).toBe("[rain did not respond within 2s]");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for an inbound delegation to finish before closing", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const agent = makeAgent([]);
+    vi.spyOn(agent, "executeTask").mockImplementation(async () => {
+      await gate;
+      return new TaskResult(true, "delegated result");
+    });
+
+    await agent.handleEvent(new Event(
+      EventType.AGENT_REQUEST,
+      "rain",
+      "fog",
+      { correlation_id: "close-123", description: "finish first", source: "rain" },
+    ));
+
+    let closed = false;
+    const closing = agent.close().then(() => { closed = true; });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+
+    release();
+    await closing;
+    expect(closed).toBe(true);
+  });
+
+  it("routes a delegation response to the event source when payload source is absent", async () => {
+    const bus = new MessageBus();
+    const agent = makeAgent([], [], bus);
+    vi.spyOn(agent, "executeTask").mockResolvedValue(new TaskResult(true, "private result"));
+
+    await agent.handleEvent(new Event(
+      EventType.AGENT_REQUEST,
+      "rain",
+      "fog",
+      { correlation_id: "route-123", description: "inspect" },
+    ));
+    await agent.close();
+
+    const response = bus.getHistory().find((event) => event.type === EventType.AGENT_RESPONSE);
+    expect(response?.target).toBe("rain");
+  });
+
+  it("serializes overlapping streaming turns for the same agent", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const llm = {
+      async *streamWithTools() {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        yield { type: "content", text: "ok" };
+        active--;
+        yield { type: "done", usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+      async complete() { return { content: "ok", toolCalls: [], usage: {}, cost: 0, truncated: false }; },
+      getTotalCost() { return 0; },
+      getModel() { return "mock"; },
+      setLogger() { /* noop */ },
+    };
+    const config = { agents: { fog: {} }, llm: {}, memory: { shortTermLimit: 100, dbPath: "/tmp/sky-test-stream-lock" } };
+    const agent = new FogAgent(config as any, llm as any, new MessageBus(), new ToolRegistry(), new SkillRegistry());
+
+    await Promise.all([
+      collect(agent.chatStream("first")),
+      collect(agent.chatStream("second")),
+    ]);
+
+    expect(maxActive).toBe(1);
+  });
+
   it("streams a simple reply and records both messages", async () => {
     const agent = makeAgent([{ content: "你好，我是雾。" }]);
     const evs = await collect(agent.chatStream("你好"));
@@ -72,6 +219,36 @@ describe("agent · chat loop (mock LLM)", () => {
     expect(reply).toContain("42");
   });
 
+  it("keeps explicitly selected sessions isolated while streaming", async () => {
+    const agent = makeAgent([{ content: "reply-one" }, { content: "reply-two" }]);
+    await agent.init();
+    const first = await agent.memory.createSession("first");
+    const second = await agent.memory.createSession("second");
+
+    await collect((agent as any).chatStreamInSession(first, "message-one"));
+    await collect((agent as any).chatStreamInSession(second, "message-two"));
+
+    await agent.memory.loadSession(first);
+    expect(agent.memory.getMessages().filter((m) => m.role !== "system").map((m) => m.content))
+      .toEqual(["message-one", "reply-one"]);
+    await agent.memory.loadSession(second);
+    expect(agent.memory.getMessages().filter((m) => m.role !== "system").map((m) => m.content))
+      .toEqual(["message-two", "reply-two"]);
+  });
+
+  it("does not mutate current history when a requested session is missing", async () => {
+    const agent = makeAgent([{ content: "unused" }]);
+    await agent.init();
+    const existing = await agent.memory.createSession("existing");
+    agent.memory.addMessage("user", "keep-me");
+
+    await expect(collect((agent as any).chatStreamInSession("missing-session", "new-message")))
+      .rejects.toThrow("session not found");
+
+    expect(agent.memory.getActiveSession()).toBe(existing);
+    expect(agent.memory.getMessages().map((m) => m.content)).toContain("keep-me");
+  });
+
   it("streams reasoning before content", async () => {
     const agent = makeAgent([{ reasoning: "先想一下…", content: "结论。" }]);
     const evs = await collect(agent.chatStream("?"));
@@ -87,8 +264,12 @@ describe("agent · chat loop (mock LLM)", () => {
     );
     const evs = await collect(agent.chatStream("用 echo 工具"));
     expect(received).toEqual({ text: "hi" });                       // tool actually ran with parsed args
-    expect(evs.some((e) => e.type === "tool_status" && e.tool_name === "echo")).toBe(true);
-    expect(evs.some((e) => e.type === "tool_done" && e.tool_name === "echo" && e.success)).toBe(true);
+    const status = evs.find((e) => e.type === "tool_status" && e.tool_name === "echo");
+    const done = evs.find((e) => e.type === "tool_done" && e.tool_name === "echo" && e.success);
+    expect(status).toBeTruthy();
+    expect(done).toBeTruthy();
+    expect(status.tool_call_id).toMatch(/^call_/);
+    expect(done.tool_call_id).toBe(status.tool_call_id);
     expect(evs.filter((e) => e.type === "content").map((e) => e.text).join("")).toContain("工具回显");
     // tool result recorded to memory
     expect(agent.memory.getMessages().some((m) => m.role === "tool" && String(m.content).includes("echo:hi"))).toBe(true);
@@ -108,6 +289,100 @@ describe("agent · chat loop (mock LLM)", () => {
     expect(evs.some((e) => e.type === "done")).toBe(true);
     expect(llm.calls).toBeLessThan(50); // bounded by the round cap / guard, not 60+
   }, 15000);
+});
+
+describe("agent · skill routing", () => {
+  function makeSkilledAgent(skills: Skill[]) {
+    const registry = new SkillRegistry();
+    for (const skill of skills) registry.register(skill);
+    const config = {
+      agents: { fog: {} },
+      llm: { language: "zh" },
+      memory: { shortTermLimit: 100, dbPath: `/tmp/sky-skill-${Date.now()}-${Math.random()}.db` },
+    };
+    return new FogAgent(
+      config as any,
+      new MockLLM([{ content: "ok" }]) as any,
+      new MessageBus(),
+      new ToolRegistry(),
+      registry,
+    );
+  }
+
+  it("prioritizes the current agent's skills and limits automatic activation", async () => {
+    const agent = makeSkilledAgent([
+      new Skill({ name: "generic_one", description: "generic", triggers: ["创建"] }),
+      new Skill({ name: "code_analysis", description: "analysis", triggers: ["创建"] }),
+      new Skill({ name: "web_research", description: "research", triggers: ["创建"] }),
+      new Skill({ name: "generic_two", description: "generic", triggers: ["创建"] }),
+    ]);
+    await agent.init();
+
+    const activated = (agent as any).autoActivateSkills("请创建一个方案");
+
+    expect(activated).toEqual(["web_research", "code_analysis"]);
+    expect(agent.getActiveSkills().sort()).toEqual(["code_analysis", "web_research"]);
+  });
+
+  it("replaces skills selected automatically for the previous turn", async () => {
+    const agent = makeSkilledAgent([
+      new Skill({ name: "web_research", description: "research", triggers: ["搜索"] }),
+      new Skill({ name: "code_analysis", description: "analysis", triggers: ["分析"] }),
+    ]);
+    await agent.init();
+
+    expect((agent as any).autoActivateSkills("请搜索资料")).toEqual(["web_research"]);
+    expect((agent as any).autoActivateSkills("现在分析代码")).toEqual(["code_analysis"]);
+    expect(agent.getActiveSkills()).toEqual(["code_analysis"]);
+  });
+
+  it("keeps manually activated skills pinned across turns", async () => {
+    const agent = makeSkilledAgent([
+      new Skill({ name: "web_research", description: "research", triggers: ["搜索"] }),
+      new Skill({ name: "code_analysis", description: "analysis", triggers: ["分析"] }),
+    ]);
+    await agent.init();
+    expect(agent.activateSkill("web_research")).toBe(true);
+
+    expect((agent as any).autoActivateSkills("现在分析代码")).toEqual(["code_analysis"]);
+    expect(agent.getActiveSkills().sort()).toEqual(["code_analysis", "web_research"]);
+    expect((agent as any).autoActivateSkills("普通对话")).toEqual([]);
+    expect(agent.getActiveSkills()).toEqual(["web_research"]);
+  });
+
+  it("does not match short latin triggers inside unrelated words", async () => {
+    const agent = makeSkilledAgent([
+      new Skill({ name: "ci_cd_manager", description: "CI", triggers: ["ci"] }),
+    ]);
+    await agent.init();
+
+    expect((agent as any).autoActivateSkills("Discuss social impact")).toEqual([]);
+  });
+
+  it("lists recommended skills before general capabilities", async () => {
+    const agent = makeSkilledAgent([
+      new Skill({ name: "generic", description: "generic" }),
+      new Skill({ name: "web_research", description: "research" }),
+      new Skill({ name: "code_analysis", description: "analysis" }),
+    ]);
+    await agent.init();
+
+    expect(agent.getAvailableSkills()).toEqual([
+      { name: "web_research", description: "research", active: false, recommended: true },
+      { name: "code_analysis", description: "analysis", active: false, recommended: true },
+      { name: "generic", description: "generic", active: false, recommended: false },
+    ]);
+  });
+
+  it("auto-selects skills for blocking chat as well as streaming chat", async () => {
+    const agent = makeSkilledAgent([
+      new Skill({ name: "web_research", description: "research", triggers: ["搜索"] }),
+    ]);
+
+    await agent.chat("请搜索资料");
+
+    expect(agent.getActiveSkills()).toEqual(["web_research"]);
+  });
 });
 
 describe("agent · context window (catalog-aware compaction)", () => {
@@ -191,6 +466,28 @@ describe("agent · progress-based stopping", () => {
 });
 
 describe("agent · interrupt (Ctrl-C)", () => {
+  it("does not mutate state or call the model when the turn is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const llm = new MockLLM([{ content: "must not run" }]);
+    const config = { agents: { fog: {} }, llm: {}, memory: { shortTermLimit: 200, dbPath: "/tmp/sky-test" } };
+    const agent = new FogAgent(
+      config as any,
+      llm as any,
+      new MessageBus(),
+      new ToolRegistry(),
+      new SkillRegistry(),
+    );
+
+    const before = agent.state;
+    const events = await collect(agent.chatStream("cancelled", controller.signal));
+
+    expect(events).toEqual([{ type: "interrupted" }, { type: "done" }]);
+    expect(agent.state).toBe(before);
+    expect(agent.memory.getMessages().some((message) => message.content === "cancelled")).toBe(false);
+    expect(llm.calls).toBe(0);
+  });
+
   it("stops between rounds on abort and preserves partial output", async () => {
     const controller = new AbortController();
     // Round 1 streams some content + a tool call; the tool aborts the signal.
@@ -264,6 +561,23 @@ describe("agent · run tracing", () => {
 
     // every span is closed once the turn ends
     expect(trace!.spans.every((s: any) => s.endMs !== null)).toBe(true);
+  });
+
+  it("creates a closed trace for non-streaming orchestration tasks", async () => {
+    const agent = makeAgent([{ content: "actual task deliverable" }]);
+    const task = new Task({
+      id: "task-1",
+      description: "produce a deliverable",
+      assignedTo: "fog",
+      metadata: { runId: "run-1", attempt: 1 },
+    });
+    const outcome = await agent.executeTask(task);
+    const trace = agent.getLastTrace();
+
+    expect(outcome.success).toBe(true);
+    expect(trace?.label).toContain("[task]");
+    expect(trace?.spans.some(span => span.kind === "llm")).toBe(true);
+    expect(trace?.spans.every(span => span.endMs !== null)).toBe(true);
   });
 });
 

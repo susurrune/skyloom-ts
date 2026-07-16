@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { Skill } from '../src/core/skill';
 
 describe('Skill', () => {
   it('creates a skill with model override', async () => {
@@ -169,5 +170,34 @@ describe('SkillRegistry', () => {
     r2.register(new Skill({ name: 'b', description: 'B' }));
     r1.merge(r2);
     expect(r1.get('b')).toBeDefined();
+  });
+});
+
+describe('built-in skill catalog', () => {
+  it('gives every built-in skill at least one Chinese trigger', async () => {
+    const skillsDir = path.resolve(__dirname, '../config/skills');
+    const skillFiles = fs.readdirSync(skillsDir)
+      .map(name => path.join(skillsDir, name, 'SKILL.md'))
+      .filter(file => fs.existsSync(file));
+
+    const loaded = skillFiles
+      .map(file => Skill.fromMarkdown(file))
+      .filter((skill): skill is Skill => skill !== null);
+    expect(loaded).toHaveLength(skillFiles.length);
+
+    const missing = loaded
+      .filter(skill => !skill.triggers.some(trigger => /[\u3400-\u9fff]/.test(trigger)))
+      .map(skill => skill.name);
+
+    expect(missing).toEqual([]);
+  });
+
+  it('keeps self-evolution opt-in instead of matching generic optimization work', () => {
+    const skill = Skill.fromMarkdown(path.resolve(__dirname, '../config/skills/self_evolve/SKILL.md'));
+
+    expect(skill).not.toBeNull();
+    expect(skill?.triggers).not.toContain('optimize');
+    expect(skill?.triggers).toContain('self-improve');
+    expect(skill?.triggers).toContain('自我改进');
   });
 });

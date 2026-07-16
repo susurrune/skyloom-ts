@@ -5,7 +5,7 @@
  * processes and services, and install/uninstall software.
  */
 
-import { execSync, execFileSync } from 'child_process';
+import { execSync, execFileSync, spawn } from 'child_process';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -36,21 +36,18 @@ export function registerComputerTools(registry: ToolRegistry): void {
       if (!name) return 'Error: app name is required';
 
       try {
-        if (platform === 'win32') {
-          execSync(`start "" "${name}"`, { timeout: 10000 });
-          return `Launched ${name}`;
-        } else if (platform === 'darwin') {
-          execSync(`open -a "${name.replace(/"/g, '\\"')}"`, { timeout: 10000 });
-          return `Launched ${name}`;
-        } else {
-          // Linux - try xdg-open or direct exec
-          try {
-            execSync(`${name} &`, { timeout: 5000, shell: true as any });
-          } catch {
-            execSync(`xdg-open "${name}" 2>/dev/null || ${name}`, { timeout: 5000, shell: true as any });
-          }
-          return `Launched ${name}`;
-        }
+        const child = spawn(name, [], {
+          detached: true,
+          shell: false,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        await new Promise<void>((resolve, reject) => {
+          child.once('spawn', resolve);
+          child.once('error', reject);
+        });
+        child.unref();
+        return `Launched ${name}`;
       } catch (e: any) {
         return `Error launching ${name}: ${e.message || e}`;
       }
@@ -71,13 +68,8 @@ export function registerComputerTools(registry: ToolRegistry): void {
       if (!fs.existsSync(resolved)) return `Error: path not found: ${resolved}`;
 
       try {
-        if (platform === 'win32') {
-          execSync(`explorer "${resolved}"`, { timeout: 5000 });
-        } else if (platform === 'darwin') {
-          execSync(`open "${resolved}"`, { timeout: 5000 });
-        } else {
-          execSync(`xdg-open "${resolved}"`, { timeout: 5000 });
-        }
+        const opener = platform === 'win32' ? 'explorer.exe' : platform === 'darwin' ? 'open' : 'xdg-open';
+        execFileSync(opener, [resolved], { timeout: 5000, stdio: 'ignore' });
         return `Opened ${resolved}`;
       } catch (e: any) {
         return `Error opening ${resolved}: ${e.message || e}`;
@@ -95,14 +87,14 @@ export function registerComputerTools(registry: ToolRegistry): void {
     handler: async (params) => {
       const url = String(params.url || '').trim();
       if (!url) return 'Error: url is required';
+      let parsed: URL;
+      try { parsed = new URL(url); } catch { return 'Error: invalid URL'; }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return `Error: blocked URL scheme '${parsed.protocol}' (only http/https are allowed)`;
+      }
       try {
-        if (platform === 'win32') {
-          execSync(`start "" "${url}"`, { timeout: 10000 });
-        } else if (platform === 'darwin') {
-          execSync(`open "${url}"`, { timeout: 10000 });
-        } else {
-          execSync(`xdg-open "${url}"`, { timeout: 10000 });
-        }
+        const opener = platform === 'win32' ? 'explorer.exe' : platform === 'darwin' ? 'open' : 'xdg-open';
+        execFileSync(opener, [parsed.href], { timeout: 10000, stdio: 'ignore' });
         return `Opened ${url} in browser`;
       } catch (e: any) {
         return `Error opening browser: ${e.message || e}`;

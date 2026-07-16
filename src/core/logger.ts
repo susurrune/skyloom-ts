@@ -25,6 +25,17 @@ export enum LogLevel {
 export type LogSink = (line: string) => void;
 let logSink: LogSink = (line) => { try { process.stderr.write(line); } catch { /* ignore */ } };
 
+const SENSITIVE_KEY = /^(?:authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|apiKey|token|access[_-]?token|accessToken|refresh[_-]?token|refreshToken|secret|client[_-]?secret|clientSecret|password|passwd|credential|credentials)$/i;
+
+function redactString(value: string): string {
+  return value
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=.:~-]+/gi, '$1 [REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{8,}\b/gi, '[REDACTED]')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{12,}\b/g, '[REDACTED]')
+    .replace(/\bAIza[A-Za-z0-9_-]{20,}\b/g, '[REDACTED]');
+}
+
 /** Send all logs to `fn` instead of stderr. */
 export function setLogSink(fn: LogSink): void { logSink = fn; }
 
@@ -41,7 +52,8 @@ export function setLogFile(filePath?: string): string | null {
     : path.join(os.homedir(), ".skyloom", "skyloom.log");
   try {
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    const fd = fs.openSync(target, "a");
+    const fd = fs.openSync(target, "a", 0o600);
+    try { fs.chmodSync(target, 0o600); } catch { /* best effort on Windows */ }
     logSink = (line) => { try { fs.writeSync(fd, line); } catch { /* ignore */ } };
     return target;
   } catch {
@@ -91,24 +103,28 @@ export class Logger {
     if (level < this.minLevel) return;
 
     const entry = this.formatEntry(levelName, msg, extra);
-    const line = JSON.stringify(entry, (_key, value) => {
-      // Ensure dates are serializable
-      if (value instanceof Date) {
-        return value.toISOString();
-      }
+    const seen = new WeakSet<object>();
+    const line = JSON.stringify(entry, (key, value) => {
+      if (SENSITIVE_KEY.test(key)) return "[REDACTED]";
       if (value instanceof Error) {
         return {
           name: value.name,
-          message: value.message,
-          stack: value.stack,
+          message: redactString(value.message),
+          stack: value.stack ? redactString(value.stack) : undefined,
         };
+      }
+      if (typeof value === "string") return redactString(value);
+      if (typeof value === "bigint") return value.toString();
+      if (value && typeof value === "object") {
+        if (seen.has(value)) return "[Circular]";
+        seen.add(value);
       }
       return value;
     });
 
     // Route through the configured sink (stderr by default; a file in TUI mode
     // so log lines never paint over the rendered frame).
-    logSink(line + "\n");
+    try { logSink(line + "\n"); } catch { /* logging must never break runtime work */ }
   }
 
   debug(msg: string, extra?: Record<string, unknown>) {

@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as crypto from "crypto";
-import { resolveSecret, TokenCache } from "../src/gateway/helpers";
+import { Readable } from "stream";
+import { boundedMediaBuffer, MAX_INBOUND_MEDIA_BYTES, resolveSecret, TokenCache } from "../src/gateway/helpers";
 import { describeMedia, parseReply } from "../src/gateway/types";
 import { isSendableSrc } from "../src/gateway/helpers";
 import { describeImages } from "../src/gateway/vision";
@@ -9,6 +10,7 @@ import { decryptFeishu, createFeishuAdapter } from "../src/gateway/channels/feis
 import { wecomSignature, decryptWecom, createWecomAdapter } from "../src/gateway/channels/wecom";
 import { qqSeed, qqSignValidation, qqVerify, createQQAdapter } from "../src/gateway/channels/qq";
 import type { RawRequest } from "../src/gateway/types";
+import * as gatewayCore from "../src/gateway/gateway";
 
 function req(partial: Partial<RawRequest> & { body?: Buffer | string }): RawRequest {
   return {
@@ -36,9 +38,51 @@ describe("gateway · helpers", () => {
     tc.invalidate();
     expect(await tc.get()).toBe("t2");
   });
+
+  it("TokenCache coalesces concurrent refreshes into one platform request", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    const tc = new TokenCache(async () => {
+      calls++;
+      await ready;
+      return { token: "shared-token", expiresInSec: 7200 };
+    });
+
+    const pending = [tc.get(), tc.get(), tc.get()];
+    release();
+
+    await expect(Promise.all(pending)).resolves.toEqual([
+      "shared-token", "shared-token", "shared-token",
+    ]);
+    expect(calls).toBe(1);
+  });
+
+  it("does not reuse a refresh invalidated while it is still in flight", async () => {
+    const releases: Array<(token: string) => void> = [];
+    const tc = new TokenCache(() => new Promise((resolve) => {
+      releases.push((token) => resolve({ token, expiresInSec: 7200 }));
+    }));
+
+    const stale = tc.get();
+    tc.invalidate();
+    const fresh = tc.get();
+    expect(releases).toHaveLength(2);
+
+    releases[0]("stale-token");
+    releases[1]("fresh-token");
+    await expect(stale).resolves.toBe("stale-token");
+    await expect(fresh).resolves.toBe("fresh-token");
+    await expect(tc.get()).resolves.toBe("fresh-token");
+  });
 });
 
 describe("gateway · media", () => {
+  it("rejects oversized inbound media before vision encoding", () => {
+    expect(() => boundedMediaBuffer(Buffer.alloc(1), MAX_INBOUND_MEDIA_BYTES + 1)).toThrow(/exceeds/);
+    expect(() => boundedMediaBuffer(Buffer.alloc(MAX_INBOUND_MEDIA_BYTES + 1))).toThrow(/exceeds/);
+  });
+
   it("describeMedia renders a compact readable line", () => {
     expect(describeMedia(undefined)).toBe("");
     expect(describeMedia([])).toBe("");
@@ -50,9 +94,9 @@ describe("gateway · media", () => {
   });
 
   it("feishu normalizes an image message to a media attachment", async () => {
-    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const payload = {
-      header: { event_id: "img1", event_type: "im.message.receive_v1" },
+      header: { event_id: "img1", event_type: "im.message.receive_v1", token: "good" },
       event: {
         sender: { sender_id: { open_id: "o" } },
         message: { chat_id: "c", message_type: "image", content: JSON.stringify({ image_key: "img_xxx" }) },
@@ -113,9 +157,10 @@ describe("gateway · parseReply (outbound media)", () => {
 });
 
 describe("gateway · isSendableSrc", () => {
-  it("accepts http(s) URLs, rejects bare non-existent paths", () => {
+  it("accepts http(s) URLs and rejects local filesystem paths", () => {
     expect(isSendableSrc("https://x.com/a.png")).toBe(true);
     expect(isSendableSrc("http://x.com/a.png")).toBe(true);
+    expect(isSendableSrc(__filename)).toBe(false);
     expect(isSendableSrc("/no/such/file/xyz.png")).toBe(false);
     expect(isSendableSrc("not a path")).toBe(false);
   });
@@ -209,6 +254,114 @@ describe("gateway · streaming dispatch", () => {
     // sendStreaming exists but will fall back to a single send in raw mode.
     expect(typeof a.sendStreaming).toBe("function");
   });
+
+  it("routes each channel conversation through its own named agent session", async () => {
+    async function* reply() { yield { type: "content", text: "ok" }; }
+    const chatStreamInNamedSession = vi.fn(() => reply());
+    const agent = {
+      init: vi.fn(async () => undefined),
+      chatStream: vi.fn(() => { throw new Error("shared session must not be used"); }),
+      chatStreamInNamedSession,
+    };
+    const send = vi.fn(async () => undefined);
+    const adapter: any = { id: "feishu", name: "Feishu", defaultAgent: "fair", send };
+    const ctx: any = {
+      config: { channels: {} },
+      agentMap: new Map([["fair", agent]]),
+    };
+    const msg: any = {
+      channel: "feishu",
+      conversationId: "chat-42",
+      userId: "user-1",
+      text: "hello",
+      replyTo: { chatId: "chat-42" },
+    };
+
+    await (gatewayCore as any).dispatch(ctx, adapter, msg);
+
+    expect(chatStreamInNamedSession).toHaveBeenCalledWith("gateway:feishu:chat-42", "hello");
+    expect(send).toHaveBeenCalled();
+  });
+
+  it("does not expose internal Agent errors to channel users", async () => {
+    async function* failedReply(): AsyncGenerator<Record<string, unknown>> {
+      throw new Error("provider secret sk-live-sensitive internal-host.local");
+    }
+    const adapter: any = {
+      id: "wecom",
+      name: "WeCom",
+      defaultAgent: "fair",
+      send: vi.fn(async () => undefined),
+    };
+    const ctx: any = {
+      config: { channels: {} },
+      agentMap: new Map([["fair", {
+        init: vi.fn(async () => undefined),
+        chatStreamInNamedSession: vi.fn(() => failedReply()),
+      }]]),
+    };
+    const msg: any = {
+      channel: "wecom",
+      conversationId: "safe-errors",
+      userId: "user-1",
+      text: "hello",
+      replyTo: { channel: "wecom", toUser: "user-1" },
+    };
+
+    await (gatewayCore as any).dispatch(ctx, adapter, msg);
+
+    const reply = String(adapter.send.mock.calls[0][1]);
+    expect(reply).toContain("暂时无法完成");
+    expect(reply).not.toContain("sk-live-sensitive");
+    expect(reply).not.toContain("internal-host.local");
+  });
+
+  it("does not deliver local-file or private-network media from agent replies", async () => {
+    async function* reply() {
+      yield { type: "content", text: `report [[file:${__filename}|source]] ![internal](http://127.0.0.1/secret.png)` };
+    }
+    const agent = {
+      init: vi.fn(async () => undefined),
+      chatStreamInNamedSession: vi.fn(() => reply()),
+    };
+    const sendMedia = vi.fn(async () => undefined);
+    const adapter: any = {
+      id: "feishu",
+      name: "Feishu",
+      defaultAgent: "fair",
+      send: vi.fn(async () => undefined),
+      sendMedia,
+    };
+    const ctx: any = {
+      config: { channels: {} },
+      agentMap: new Map([["fair", agent]]),
+    };
+    const msg: any = {
+      channel: "feishu",
+      conversationId: "chat-safe",
+      userId: "user-1",
+      text: "send report",
+      replyTo: { chatId: "chat-safe" },
+    };
+
+    await (gatewayCore as any).dispatch(ctx, adapter, msg);
+
+    expect(sendMedia).not.toHaveBeenCalled();
+  });
+
+  it("uses a valid default gateway port when the environment is unset or invalid", () => {
+    const resolveGatewayPort = (gatewayCore as any).resolveGatewayPort;
+    expect(resolveGatewayPort(undefined, {})).toBe(8848);
+    expect(resolveGatewayPort(undefined, { SKYLOOM_GATEWAY_PORT: "9001" })).toBe(9001);
+    expect(resolveGatewayPort(undefined, { SKYLOOM_GATEWAY_PORT: "not-a-port" })).toBe(8848);
+  });
+
+  it("rejects oversized webhook bodies before buffering them in memory", async () => {
+    const request = Readable.from([Buffer.alloc(6), Buffer.alloc(6)]);
+    await expect((gatewayCore as any).readBody(request, 10)).rejects.toMatchObject({
+      code: "PAYLOAD_TOO_LARGE",
+    });
+  });
 });
 
 describe("gateway · feishu", () => {
@@ -227,17 +380,17 @@ describe("gateway · feishu", () => {
   });
 
   it("answers the url_verification challenge", async () => {
-    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
-    const out = await a.handleWebhook(req({ body: JSON.stringify({ type: "url_verification", challenge: "C1" }) }));
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
+    const out = await a.handleWebhook(req({ body: JSON.stringify({ type: "url_verification", token: "good", challenge: "C1" }) }));
     expect(out.response?.status).toBe(200);
     expect(JSON.parse(out.response!.body!).challenge).toBe("C1");
     expect(out.message).toBeUndefined();
   });
 
   it("normalizes an im.message.receive_v1 text event", async () => {
-    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const payload = {
-      header: { event_id: "e1", event_type: "im.message.receive_v1" },
+      header: { event_id: "e1", event_type: "im.message.receive_v1", token: "good" },
       event: {
         sender: { sender_id: { open_id: "ou_123" } },
         message: { chat_id: "oc_chat", message_type: "text", content: JSON.stringify({ text: "@_user_1 你好" }) },
@@ -250,9 +403,9 @@ describe("gateway · feishu", () => {
   });
 
   it("dedupes a redelivered event_id", async () => {
-    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const payload = {
-      header: { event_id: "dup", event_type: "im.message.receive_v1" },
+      header: { event_id: "dup", event_type: "im.message.receive_v1", token: "good" },
       event: { sender: { sender_id: { open_id: "o" } }, message: { chat_id: "c", message_type: "text", content: JSON.stringify({ text: "hi" }) } },
     };
     const first = await a.handleWebhook(req({ body: JSON.stringify(payload) }));
@@ -265,6 +418,35 @@ describe("gateway · feishu", () => {
     const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
     const out = await a.handleWebhook(req({ body: JSON.stringify({ header: { token: "bad", event_type: "im.message.receive_v1" }, event: {} }) }));
     expect(out.response?.status).toBe(403);
+  });
+
+  it("rejects plaintext events when no verification credential is configured", async () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s" }, {})!;
+    const out = await a.handleWebhook(req({
+      body: JSON.stringify({
+        header: { event_id: "unsigned", event_type: "im.message.receive_v1" },
+        event: { message: { chat_id: "c", message_type: "text", content: '{"text":"run"}' } },
+      }),
+    }));
+    expect(out.response?.status).toBe(403);
+    expect(out.message).toBeUndefined();
+  });
+
+  it("requires the configured verification token on challenges and events", async () => {
+    const a = createFeishuAdapter({ appId: "a", appSecret: "s", verificationToken: "good" }, {})!;
+    const challenge = await a.handleWebhook(req({
+      body: JSON.stringify({ type: "url_verification", challenge: "C1" }),
+    }));
+    const event = await a.handleWebhook(req({
+      body: JSON.stringify({
+        header: { event_id: "missing-token", event_type: "im.message.receive_v1" },
+        event: { message: { chat_id: "c", message_type: "text", content: '{"text":"run"}' } },
+      }),
+    }));
+
+    expect(challenge.response?.status).toBe(403);
+    expect(event.response?.status).toBe(403);
+    expect(event.message).toBeUndefined();
   });
 });
 
@@ -355,6 +537,20 @@ describe("gateway · qq", () => {
       body: JSON.stringify({ op: 0, t: "GROUP_AT_MESSAGE_CREATE", d: { content: "hi" } }),
     }));
     expect(out.response?.status).toBe(403);
+  });
+
+  it("rejects unsigned event pushes", async () => {
+    const a = createQQAdapter({ appId: "123", secret: "supersecretseedvalue" }, {})!;
+    const body = JSON.stringify({ op: 0, t: "GROUP_AT_MESSAGE_CREATE", d: { content: "run agent" } });
+    const missingBoth = await a.handleWebhook(req({ body }));
+    const missingTimestamp = await a.handleWebhook(req({
+      headers: { "x-signature-ed25519": "00" },
+      body,
+    }));
+
+    expect(missingBoth.response?.status).toBe(403);
+    expect(missingTimestamp.response?.status).toBe(403);
+    expect(missingBoth.message).toBeUndefined();
   });
 
   it("normalizes a signed GROUP_AT_MESSAGE_CREATE", async () => {

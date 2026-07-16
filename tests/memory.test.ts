@@ -155,6 +155,127 @@ describe("Memory · long-term (SQLite)", () => {
     await b.close();
   });
 
+  it("migrates the legacy shared empty-name database into Fog without losing history", async () => {
+    const cfg = tmpConfig();
+    const legacy = new Memory(cfg, "");
+    await legacy.initDb();
+    const sid = await legacy.createSession();
+    legacy.addMessage("user", "旧版共享会话");
+    await flush();
+    await legacy.close();
+
+    const fog = new Memory(cfg, "fog");
+    await fog.initDb();
+    try {
+      expect((await fog.listSessions()).some((session) => session.id === sid)).toBe(true);
+      expect(await fog.loadSession(sid)).toBe(true);
+      expect(fog.getMessages().some((message) => message.content === "旧版共享会话")).toBe(true);
+    } finally {
+      await fog.close();
+    }
+  });
+
+  it("uses the first user message as an unnamed session preview", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    try {
+      const sid = await mem.createSession();
+      mem.addMessage("user", "帮我排查登录接口偶发超时");
+      mem.addMessage("assistant", "我先检查请求链路");
+      await flush();
+
+      const session = (await mem.listSessions()).find((item) => item.id === sid);
+      expect(session?.preview).toBe("帮我排查登录接口偶发超时");
+    } finally {
+      await mem.close();
+    }
+  });
+
+  it("derives a preview for legacy sessions whose stored preview is blank", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    try {
+      const sid = await mem.createSession();
+      mem.addMessage("user", "这是旧数据库里已有的第一条问题");
+      await flush();
+      (mem as any).dbRun("UPDATE sessions SET preview = '' WHERE id = ?", [sid]);
+
+      const session = (await mem.listSessions()).find((item) => item.id === sid);
+      expect(session?.preview).toBe("这是旧数据库里已有的第一条问题");
+    } finally {
+      await mem.close();
+    }
+  });
+
+  it("does not report a session as created when the database write fails", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    const db = (mem as any).db;
+    const originalRun = db.run.bind(db);
+    db.run = (sql: string, params?: unknown[]) => {
+      if (/^INSERT INTO sessions/i.test(sql)) throw new Error("disk write failed");
+      return originalRun(sql, params);
+    };
+
+    try {
+      await expect(mem.createSession("unwritten")).rejects.toThrow("Failed to create session");
+      expect(mem.getActiveSession()).toBeNull();
+      expect(await mem.listSessions()).toEqual([]);
+    } finally {
+      db.run = originalRun;
+      await mem.close();
+    }
+  });
+
+  it("rolls back message deletion when deleting the session fails", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    const sid = await mem.createSession("keep-on-failure");
+    mem.addMessage("user", "must survive rollback");
+    await flush();
+
+    const db = (mem as any).db;
+    const originalRun = db.run.bind(db);
+    db.run = (sql: string, params?: unknown[]) => {
+      if (/^DELETE FROM sessions/i.test(sql)) throw new Error("disk write failed");
+      return originalRun(sql, params);
+    };
+
+    try {
+      await expect(mem.deleteSession(sid)).rejects.toThrow("Failed to delete session");
+      expect(mem.getActiveSession()).toBe(sid);
+    } finally {
+      db.run = originalRun;
+    }
+
+    expect(await mem.sessionExists(sid)).toBe(true);
+    expect(mem.getMessages().some((message) => message.content === "must survive rollback")).toBe(true);
+    await mem.close();
+  });
+
+  it("reads another session without changing the active conversation", async () => {
+    const mem = new Memory(tmpConfig(), "fog");
+    await mem.initDb();
+    try {
+      const first = await mem.createSession("first");
+      mem.addMessage("user", "first question");
+      mem.addMessage("assistant", "first answer");
+      await flush();
+      const second = await mem.createSession("second");
+      mem.addMessage("user", "second question");
+      await flush();
+
+      expect(mem.getSessionMessages(first)).toEqual([
+        { role: "user", content: "first question" },
+        { role: "assistant", content: "first answer" },
+      ]);
+      expect(mem.getActiveSession()).toBe(second);
+      expect(mem.getMessages().some((message) => message.content === "second question")).toBe(true);
+    } finally {
+      await mem.close();
+    }
+  });
+
   it("getMemoryStats returns a populated object", async () => {
     const mem = new Memory(tmpConfig(), "fog");
     await mem.initDb();

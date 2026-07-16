@@ -7,6 +7,9 @@ triggers:
   - "find"
   - "look up"
   - "investigate"
+  - "搜索资料"
+  - "联网查找"
+  - "调查"
 ---
 
 ## Web research

@@ -154,7 +154,7 @@ export function parseSchema<T extends Record<string, unknown>>(
 
   try {
     const extracted = extractJSON(raw);
-    let data = JSON.parse(extracted);
+    const data = JSON.parse(extracted);
     return data as T;
   } catch (error) {
     if (error instanceof SchemaValidationError) throw error;

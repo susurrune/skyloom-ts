@@ -5,7 +5,9 @@ triggers:
   - "evolve"
   - "self-improve"
   - "learn from"
-  - "optimize"
+  - "自我改进"
+  - "复盘失败"
+  - "优化提示词"
 ---
 
 ## Self evolution

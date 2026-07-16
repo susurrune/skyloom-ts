@@ -181,7 +181,7 @@ export class GenericSubagent extends BaseAgent {
     skillRegistry: SkillRegistry,
     runtimeName: string,
   ) {
-    super(config, llm, bus, toolRegistry, skillRegistry);
+    super(config, llm, bus, toolRegistry, skillRegistry, runtimeName);
     this.name = runtimeName;
     this.displayName = def.name;
     this.emoji = '◇';
@@ -215,8 +215,9 @@ export async function runSubagent(opts: {
   baseToolRegistry: ToolRegistry;
   baseSkillRegistry: SkillRegistry;
   onStatus?: ((status: string) => void) | null;
+  signal?: AbortSignal;
 }): Promise<string> {
-  const { def, task, config, llm, bus, baseToolRegistry, baseSkillRegistry, onStatus } = opts;
+  const { def, task, config, llm, bus, baseToolRegistry, baseSkillRegistry, onStatus, signal } = opts;
 
   const safe = def.name.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 24) || 'sub';
   const runtimeName = `sub-${safe}-${Date.now().toString(36)}-${(_spawnSeq++).toString(36)}`;
@@ -260,7 +261,7 @@ export async function runSubagent(opts: {
   try {
     await agent.init();
     if (onStatus) onStatus(`spawn ${def.name}…`);
-    const report = await agent.chat(task, onStatus || undefined);
+    const report = await agent.chat(task, onStatus || undefined, signal);
     return report || '(subagent produced no output)';
   } catch (e) {
     log.warn('subagent_run_failed', { agent: def.name, error: String(e) });

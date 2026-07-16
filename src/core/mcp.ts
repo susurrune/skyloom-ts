@@ -40,6 +40,37 @@ export interface MCPToolDef {
   };
 }
 
+export type MCPHealthState = "configured" | "connected" | "healthy" | "unhealthy" | "disconnected";
+
+export interface MCPServerHealth {
+  name: string;
+  transport: "stdio" | "sse";
+  target: string;
+  tools: number;
+  connected: boolean;
+  state: MCPHealthState;
+  healthy: boolean | null;
+  details: string;
+  lastCheckedAt: string | null;
+  connectedAt: string | null;
+}
+
+export function formatMcpHealthLines(health: MCPServerHealth[], fallback: string[] = []): string[] {
+  if (health.length === 0) {
+    return fallback.length > 0 ? fallback : ["none"];
+  }
+
+  return health.map((server) => {
+    const mark = server.state === "healthy" ? "[ok]"
+      : server.state === "connected" ? "[up]"
+        : server.state === "unhealthy" ? "[bad]"
+          : "[off]";
+    const target = server.target ? ` | ${server.target}` : "";
+    const details = server.details && server.details !== "connected" ? ` | ${server.details}` : "";
+    return `${mark} ${server.name} | ${server.transport} | ${server.state} | ${server.tools} tools${target}${details}`;
+  });
+}
+
 /**
  * JSON-RPC 2.0 request/response.
  */
@@ -54,6 +85,13 @@ interface JsonRpcMessage {
     message: string;
     data?: any;
   };
+}
+
+function cancellationError(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
 }
 
 /**
@@ -73,6 +111,9 @@ export class MCPClient {
     timer: NodeJS.Timeout;
   }> = new Map();
   private log: Logger | null = null;
+  private connectedAt: string | null = null;
+  private lastHealth: { healthy: boolean; details: string; checkedAt: string } | null = null;
+  private lastError: string = "";
 
   // SSE-specific state
   private sseResponse: any = null;
@@ -97,12 +138,18 @@ export class MCPClient {
    */
   async initialize(): Promise<MCPToolDef[]> {
     try {
+      this.lastError = "";
       if (this.config.command) {
-        return await this.initStdio();
+        const tools = await this.initStdio();
+        this.markInitialized(tools);
+        return tools;
       } else if (this.config.url) {
-        return await this.initSSE();
+        const tools = await this.initSSE();
+        this.markInitialized(tools);
+        return tools;
       }
     } catch (e) {
+      this.lastError = String(e);
       this.log?.warn("mcp_server_unavailable", {
         server: this.config.name,
         error: String(e),
@@ -115,12 +162,62 @@ export class MCPClient {
    * Perform a health check on the MCP connection.
    */
   async healthCheck(): Promise<{ healthy: boolean; details: string }> {
+    let health: { healthy: boolean; details: string };
     if (this.config.command) {
-      return this.healthStdio();
+      health = await this.healthStdio();
     } else if (this.config.url) {
-      return this.healthSSE();
+      health = await this.healthSSE();
+    } else {
+      health = { healthy: false, details: "No transport configured" };
     }
-    return { healthy: false, details: "No transport configured" };
+
+    this.lastHealth = { ...health, checkedAt: new Date().toISOString() };
+    if (!health.healthy) {
+      this.lastError = health.details;
+    }
+    return health;
+  }
+
+  /**
+   * Return a synchronous, non-blocking health snapshot for status UIs.
+   */
+  getHealthSnapshot(toolCount?: number): MCPServerHealth {
+    const connected = this.isTransportConnected();
+    const health = this.lastHealth;
+    const healthy = connected ? health?.healthy ?? null : false;
+    let state: MCPHealthState = connected ? "connected" : "disconnected";
+    if (connected && health?.healthy === true) state = "healthy";
+    if (connected && health?.healthy === false) state = "unhealthy";
+
+    return {
+      name: this.config.name,
+      transport: this.config.command ? "stdio" : "sse",
+      target: this.config.command || this.config.url || "",
+      tools: toolCount ?? this.serverTools.length,
+      connected,
+      state,
+      healthy,
+      details: health?.details || this.lastError || (connected ? "connected" : "not connected"),
+      lastCheckedAt: health?.checkedAt || null,
+      connectedAt: this.connectedAt,
+    };
+  }
+
+  private markInitialized(tools: MCPToolDef[]): void {
+    if (tools.length > 0) {
+      this.connectedAt = new Date().toISOString();
+      this.lastError = "";
+    }
+  }
+
+  private isTransportConnected(): boolean {
+    if (this.config.command) {
+      return Boolean(this.process && this.process.exitCode === null);
+    }
+    if (this.config.url) {
+      return Boolean(this.sseMessageUrl && this.sseResponse);
+    }
+    return false;
   }
 
   /**
@@ -488,7 +585,8 @@ export class MCPClient {
   private async requestStdio(
     method: string,
     params: Record<string, any>,
-    timeoutMs: number = 10000
+    timeoutMs: number = 10000,
+    signal?: AbortSignal,
   ): Promise<JsonRpcMessage | null> {
     if (!this.process?.stdin) {
       return null;
@@ -497,7 +595,20 @@ export class MCPClient {
     const reqId = this.newId();
 
     return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const pending = this.pending.get(reqId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(reqId);
+        void this.sendJson({
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { requestId: reqId, reason: "caller cancelled" },
+        }).catch(() => undefined);
+        reject(cancellationError(signal?.reason));
+      };
       const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
         this.pending.delete(reqId);
         this.log?.warn("mcp_stdio_timeout", {
           server: this.config.name,
@@ -507,8 +618,12 @@ export class MCPClient {
       }, timeoutMs);
 
       this.pending.set(reqId, {
-        resolve,
+        resolve: (value) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
         reject: (err) => {
+          signal?.removeEventListener("abort", onAbort);
           reject(err);
         },
         timer,
@@ -520,10 +635,13 @@ export class MCPClient {
         params,
         id: reqId,
       }).catch((err) => {
+        signal?.removeEventListener("abort", onAbort);
         clearTimeout(timer);
         this.pending.delete(reqId);
         reject(err);
       });
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -533,12 +651,26 @@ export class MCPClient {
   private async requestSSE(
     method: string,
     params: Record<string, any>,
-    timeoutMs: number = 10000
+    timeoutMs: number = 10000,
+    signal?: AbortSignal,
   ): Promise<JsonRpcMessage | null> {
     const reqId = this.newId();
 
     return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const pending = this.pending.get(reqId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(reqId);
+        void this.postJson({
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { requestId: reqId, reason: "caller cancelled" },
+        }).catch(() => undefined);
+        reject(cancellationError(signal?.reason));
+      };
       const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
         this.pending.delete(reqId);
         this.log?.warn("mcp_sse_timeout", {
           server: this.config.name,
@@ -548,8 +680,12 @@ export class MCPClient {
       }, timeoutMs);
 
       this.pending.set(reqId, {
-        resolve,
+        resolve: (value) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
         reject: (err) => {
+          signal?.removeEventListener("abort", onAbort);
           reject(err);
         },
         timer,
@@ -560,11 +696,14 @@ export class MCPClient {
         method,
         params,
         id: reqId,
-      }).catch((err) => {
+      }, signal).catch((err) => {
+        signal?.removeEventListener("abort", onAbort);
         clearTimeout(timer);
         this.pending.delete(reqId);
         reject(err);
       });
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -595,7 +734,7 @@ export class MCPClient {
    * arrives asynchronously over the event stream (see handleSSEEvent), so
    * this only confirms the message was accepted by the server.
    */
-  private async postJson(data: JsonRpcMessage): Promise<void> {
+  private async postJson(data: JsonRpcMessage, signal?: AbortSignal): Promise<void> {
     if (!this.sseMessageUrl) {
       throw new Error("SSE message URL not set");
     }
@@ -606,6 +745,7 @@ export class MCPClient {
         ...(this.config.env || {}),
       },
       timeout: 10000,
+      signal,
     });
   }
 
@@ -625,7 +765,8 @@ export class MCPClient {
    */
   async callTool(
     name: string,
-    args: Record<string, any>
+    args: Record<string, any>,
+    signal?: AbortSignal,
   ): Promise<string> {
     let response: JsonRpcMessage | null = null;
 
@@ -633,12 +774,12 @@ export class MCPClient {
       response = await this.requestStdio("tools/call", {
         name,
         arguments: args,
-      });
+      }, 10000, signal);
     } else if (this.config.url) {
       response = await this.requestSSE("tools/call", {
         name,
         arguments: args,
-      });
+      }, 10000, signal);
     }
 
     if (response && response.result) {
@@ -739,6 +880,7 @@ export class MCPManager {
   private toolRegistry: any; // ToolRegistry type
   private clients: Map<string, MCPClient> = new Map();
   private serverConfigs: MCPServerConfig[] = [];
+  private serverDiagnostics: Map<string, string> = new Map();
   private agents: Map<string, any> = new Map();
   private log: Logger | null = null;
 
@@ -768,6 +910,11 @@ export class MCPManager {
         env: s.env || {},
         enabled: s.enabled !== false,
       }));
+    for (const cfg of this.serverConfigs) {
+      if (!this.serverDiagnostics.has(cfg.name)) {
+        this.serverDiagnostics.set(cfg.name, "configured");
+      }
+    }
   }
 
   /**
@@ -788,10 +935,13 @@ export class MCPManager {
         try {
           const tools = await client.initialize();
           if (!tools || tools.length === 0) {
+            this.serverDiagnostics.set(cfg.name, "no tools returned or connection failed");
+            await client.close().catch(() => {});
             return null;
           }
           return { cfg, client, tools };
         } catch (e) {
+          this.serverDiagnostics.set(cfg.name, String(e));
           this.log?.warn("mcp_init_failed", {
             server: cfg.name,
             error: String(e),
@@ -810,6 +960,7 @@ export class MCPManager {
 
       const { cfg, client, tools } = result;
       this.clients.set(cfg.name, client);
+      this.serverDiagnostics.delete(cfg.name);
       const count = this.registerMCPTools(cfg.name, tools);
       statusLines.push(`${cfg.name}: ${count} tools`);
     }
@@ -889,13 +1040,13 @@ export class MCPManager {
   private makeMCPHandler(
     serverName: string,
     toolName: string
-  ): (kwargs: Record<string, any>) => Promise<string> {
-    return async (kwargs: Record<string, any>) => {
+  ): (kwargs: Record<string, any>, context: { signal: AbortSignal }) => Promise<string> {
+    return async (kwargs: Record<string, any>, context: { signal: AbortSignal }) => {
       const client = this.clients.get(serverName);
       if (!client) {
         return `Error: MCP server '${serverName}' not connected.`;
       }
-      return client.callTool(toolName, kwargs);
+      return client.callTool(toolName, kwargs, context.signal);
     };
   }
 
@@ -912,22 +1063,28 @@ export class MCPManager {
       return `MCP server '${name}' is already connected`;
     }
 
-    if (!config.command && !config.url) {
+    const serverConfig: MCPServerConfig = { ...config, name };
+
+    if (!serverConfig.command && !serverConfig.url) {
       return "Error: provide either 'command' (stdio) or 'url' (SSE)";
     }
 
-    const client = new MCPClient(config, this.log);
+    const client = new MCPClient(serverConfig, this.log);
 
     try {
       const tools = await client.initialize();
 
       if (!tools || tools.length === 0) {
         await client.close();
+        this.serverDiagnostics.set(name, "no tools returned or connection failed");
         return `MCP server '${name}' 未返回任何工具`;
       }
 
       this.clients.set(name, client);
-      this.serverConfigs.push(config);
+      this.serverDiagnostics.delete(name);
+      this.serverConfigs = this.serverConfigs.filter((c) => c.name !== name);
+      this.serverConfigs.push(serverConfig);
+      savePersistedServer(serverConfig);
 
       const count = this.registerMCPTools(name, tools);
       const toolNames = tools
@@ -938,6 +1095,7 @@ export class MCPManager {
       return `✓ 已接入 MCP server '${name}'，注册 ${count} 个工具: ${toolNames}`;
     } catch (e) {
       await client.close();
+      this.serverDiagnostics.set(name, String(e));
       return `连接 MCP server '${name}' 失败: ${String(e)}`;
     }
   }
@@ -949,12 +1107,20 @@ export class MCPManager {
     const cleanName = name?.trim();
     const client = this.clients.get(cleanName);
 
-    if (!client) {
+    const wasConfigured = this.serverConfigs.some((c) => c.name === cleanName);
+    const hadDiagnostics = this.serverDiagnostics.has(cleanName);
+
+    if (!client && !wasConfigured && !hadDiagnostics) {
       return `未连接 MCP server '${cleanName}'`;
     }
 
-    await client.close();
-    this.clients.delete(cleanName);
+    if (client) {
+      await client.close();
+      this.clients.delete(cleanName);
+    }
+
+    this.serverDiagnostics.delete(cleanName);
+    removePersistedServer(cleanName);
     this.serverConfigs = this.serverConfigs.filter(
       (c) => c.name !== cleanName
     );
@@ -1017,6 +1183,35 @@ export class MCPManager {
     }
 
     return result;
+  }
+
+  /**
+   * Synchronous MCP health snapshot for Web, CLI/TUI and doctor surfaces.
+   */
+  getHealthSnapshot(): MCPServerHealth[] {
+    const toolNames = this.toolRegistry.listNames?.() || [];
+
+    return this.serverConfigs.map((cfg) => {
+      const prefix = `mcp_${cfg.name}_`;
+      const count = toolNames.filter((n: string) => n.startsWith(prefix)).length;
+      const client = this.clients.get(cfg.name);
+      if (client) {
+        return client.getHealthSnapshot(count);
+      }
+
+      return {
+        name: cfg.name,
+        transport: cfg.command ? "stdio" : "sse",
+        target: cfg.command || cfg.url || "",
+        tools: count,
+        connected: false,
+        state: "configured",
+        healthy: false,
+        details: this.serverDiagnostics.get(cfg.name) || "not connected",
+        lastCheckedAt: null,
+        connectedAt: null,
+      };
+    });
   }
 
   /**

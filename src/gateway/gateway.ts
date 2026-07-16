@@ -13,21 +13,40 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http';
+import type { Server } from 'http';
 import { getLogger } from '../core/logger';
 import { createSystemContext } from '../core/factory';
 import { buildAdapters } from './registry';
 import { describeMedia, parseReply } from './types';
 import { isSendableSrc } from './helpers';
+import { assertFetchAllowed } from '../tools/guards';
 import { describeImages } from './vision';
+import { GatewayDispatchQueue } from './dispatch_queue';
 import type { ChannelAdapter, InboundMessage, RawRequest } from './types';
 import type { LoadedMedia } from './helpers';
 
 const log = getLogger('gateway');
+const PUBLIC_AGENT_ERROR_MESSAGE = '抱歉，服务暂时无法完成这次请求，请稍后重试。';
+const PUBLIC_BUSY_MESSAGE = '当前消息较多，请稍后再试。';
+const MAX_WEBHOOK_BODY_BYTES = 2 * 1024 * 1024;
 
 /** Collect the full request body. */
-async function readBody(req: IncomingMessage): Promise<Buffer> {
+export async function readBody(
+  req: IncomingMessage,
+  maxBytes = MAX_WEBHOOK_BODY_BYTES,
+): Promise<Buffer> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) {
+      const error = new Error('request body too large') as NodeJS.ErrnoException;
+      error.code = 'PAYLOAD_TOO_LARGE';
+      throw error;
+    }
+    chunks.push(buffer);
+  }
   return Buffer.concat(chunks);
 }
 
@@ -40,7 +59,7 @@ function buildPrompt(msg: InboundMessage, canSendMedia: boolean, visionText?: st
   if (mediaDesc) parts.push(`(用户发送了媒体: ${mediaDesc})`);
   if (visionText) parts.push(`(图片内容识别: ${visionText})`);
   if (canSendMedia) {
-    parts.push('(若需回发图片或文件,在回复中用 Markdown 图片 ![说明](路径或URL) 或 [[file:路径或URL]] 表示,路径可为本地文件或 http(s) 链接。)');
+    parts.push('(若需回发图片或文件,在回复中用 Markdown 图片 ![说明](公网URL) 或 [[file:公网URL]] 表示；仅支持公开 http(s) 资源。)');
   }
   return parts.join('\n\n') || msg.text;
 }
@@ -80,7 +99,7 @@ function resolveAgent(ctx: ReturnType<typeof createSystemContext>, adapter: Chan
 }
 
 /** Dispatch one inbound message to its agent and deliver the reply. */
-async function dispatch(
+export async function dispatch(
   ctx: ReturnType<typeof createSystemContext>,
   adapter: ChannelAdapter,
   msg: InboundMessage,
@@ -94,16 +113,17 @@ async function dispatch(
   // Streaming path: stream content chunks straight to the adapter (e.g. a Feishu
   // card patched as text arrives). Falls back to collect-then-send otherwise.
   const cfgStreaming = ((ctx.config as any).channels || {})[adapter.id]?.streaming !== false;
+  const sessionName = `gateway:${msg.channel}:${msg.conversationId}`;
   if (adapter.sendStreaming && cfgStreaming) {
     let full = '';
     async function* contentChunks(): AsyncGenerator<string> {
       try {
-        for await (const ev of agent.chatStream(prompt)) {
+        for await (const ev of agent.chatStreamInNamedSession(sessionName, prompt)) {
           if ((ev as any).type === 'content') { const t = (ev as any).text as string; full += t; yield t; }
         }
       } catch (e) {
         log.warn('gateway_agent_failed', { channel: adapter.id, error: String(e) });
-        yield `\n[出错了] ${String(e)}`;
+        yield `\n${PUBLIC_AGENT_ERROR_MESSAGE}`;
       }
     }
     await adapter.sendStreaming(msg.replyTo, contentChunks());
@@ -114,12 +134,12 @@ async function dispatch(
 
   let text = '';
   try {
-    for await (const ev of agent.chatStream(prompt)) {
+    for await (const ev of agent.chatStreamInNamedSession(sessionName, prompt)) {
       if ((ev as any).type === 'content') text += (ev as any).text;
     }
   } catch (e) {
     log.warn('gateway_agent_failed', { channel: adapter.id, error: String(e) });
-    text = `[出错了] ${String(e)}`;
+    text = PUBLIC_AGENT_ERROR_MESSAGE;
   }
   // Non-streaming: split out media so the text message is clean.
   if (adapter.sendMedia) {
@@ -146,6 +166,7 @@ async function deliverMedia(
       continue;
     }
     try {
+      await assertFetchAllowed(item.src);
       await adapter.sendMedia(msg.replyTo, item);
     } catch (e) {
       log.warn('gateway_send_media_failed', { channel: adapter.id, src: item.src, error: String(e) });
@@ -156,11 +177,36 @@ async function deliverMedia(
 export interface GatewayOptions {
   port?: number;
   host?: string;
+  maxActiveDispatches?: number;
+  maxPendingDispatches?: number;
+  maxPendingPerConversation?: number;
 }
 
-export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
-  const ctx = createSystemContext();
-  const adapters = buildAdapters((ctx.config as any).channels || {}, process.env);
+export interface GatewayRuntime {
+  server: Server;
+  close: () => Promise<void>;
+}
+
+function positiveInt(explicit: number | undefined, raw: string | undefined, fallback: number): number {
+  const value = explicit ?? Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+export function resolveGatewayPort(
+  explicit?: number,
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  const candidate = explicit ?? Number(env.SKYLOOM_GATEWAY_PORT);
+  return Number.isInteger(candidate) && candidate > 0 && candidate <= 65535 ? candidate : 8848;
+}
+
+export async function startGateway(
+  opts: GatewayOptions = {},
+  contextOverride?: ReturnType<typeof createSystemContext>,
+  adaptersOverride?: Map<string, ChannelAdapter>,
+): Promise<GatewayRuntime | undefined> {
+  const ctx = contextOverride ?? createSystemContext();
+  const adapters = adaptersOverride ?? buildAdapters((ctx.config as any).channels || {}, process.env);
 
   if (adapters.size === 0) {
     log.warn('gateway_no_channels', {});
@@ -177,7 +223,19 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
     }
   }
 
-  const port = opts.port ?? Number(process.env.SKYLOOM_GATEWAY_PORT) ?? 8848;
+  const dispatchQueue = new GatewayDispatchQueue({
+    maxActive: positiveInt(opts.maxActiveDispatches, process.env.SKYLOOM_GATEWAY_MAX_ACTIVE, 4),
+    maxPending: positiveInt(opts.maxPendingDispatches, process.env.SKYLOOM_GATEWAY_MAX_PENDING, 100),
+    maxPendingPerKey: positiveInt(
+      opts.maxPendingPerConversation,
+      process.env.SKYLOOM_GATEWAY_MAX_PENDING_PER_CONVERSATION,
+      20,
+    ),
+    onError: (error, key) => log.warn('gateway_dispatch_failed', { conversation: key, error: String(error) }),
+  });
+  let overflowNotices = 0;
+
+  const port = resolveGatewayPort(opts.port);
   // Gateways receive inbound webhooks from the platform's servers, so unlike the
   // local web UI they must bind to a reachable interface by default.
   const host = opts.host || process.env.SKYLOOM_GATEWAY_HOST || '0.0.0.0';
@@ -187,7 +245,7 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
     try {
       if (url.pathname === '/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' })
-          .end(JSON.stringify({ ok: true, channels: [...adapters.keys()] }));
+          .end(JSON.stringify({ ok: true, channels: [...adapters.keys()], dispatch: dispatchQueue.stats() }));
         return;
       }
       const m = url.pathname.match(/^\/webhook\/([a-z0-9_-]+)$/i);
@@ -216,14 +274,29 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
       // Route to an agent and deliver the reply asynchronously (after the ack).
       if (outcome.message) {
         const msg = outcome.message;
-        void dispatch(ctx, adapter, msg).catch((e) =>
-          log.warn('gateway_dispatch_failed', { channel: adapter.id, error: String(e) }));
+        const key = `${adapter.id}:${msg.conversationId}`;
+        if (!dispatchQueue.enqueue(key, () => dispatch(ctx, adapter, msg))) {
+          log.warn('gateway_dispatch_overflow', { channel: adapter.id, conversationId: msg.conversationId });
+          if (overflowNotices < 4) {
+            overflowNotices++;
+            void adapter.send(msg.replyTo, PUBLIC_BUSY_MESSAGE)
+              .catch((error) => log.warn('gateway_overflow_notice_failed', { channel: adapter.id, error: String(error) }))
+              .finally(() => { overflowNotices--; });
+          }
+        }
       }
     } catch (e) {
       log.warn('gateway_request_error', { error: String(e) });
-      if (!res.headersSent) res.writeHead(500).end('error');
+      if (!res.headersSent) {
+        const status = (e as NodeJS.ErrnoException)?.code === 'PAYLOAD_TOO_LARGE' ? 413 : 500;
+        res.writeHead(status).end(status === 413 ? 'request body too large' : 'error');
+      }
     }
   });
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 30_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxRequestsPerSocket = 100;
 
   await new Promise<void>((resolve) => {
     server.listen(port, host, () => {
@@ -237,11 +310,25 @@ export async function startGateway(opts: GatewayOptions = {}): Promise<void> {
     });
   });
 
-  const shutdown = async () => {
-    for (const a of adapters.values()) { try { await a.stop?.(); } catch { /* ignore */ } }
-    try { await ctx.closeAll(); } catch { /* ignore */ }
-    server.close();
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      process.off('SIGINT', onSigint);
+      process.off('SIGTERM', onSigterm);
+      dispatchQueue.stopAccepting();
+      const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeIdleConnections?.();
+      await dispatchQueue.drain();
+      for (const a of adapters.values()) { try { await a.stop?.(); } catch { /* ignore */ } }
+      try { await ctx.closeAll(); } catch { /* ignore */ }
+      await serverClosed;
+    })();
+    return shutdownPromise;
   };
-  process.on('SIGINT', () => { void shutdown().then(() => process.exit(0)); });
-  process.on('SIGTERM', () => { void shutdown().then(() => process.exit(0)); });
+  const onSigint = () => { void shutdown().then(() => process.exit(0)); };
+  const onSigterm = () => { void shutdown().then(() => process.exit(0)); };
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
+  return { server, close: shutdown };
 }

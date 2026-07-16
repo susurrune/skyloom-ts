@@ -7,6 +7,9 @@ triggers:
   - "vulnerability"
   - "owasp"
   - "injection"
+  - "安全审计"
+  - "漏洞"
+  - "注入"
 ---
 
 ## Security audit

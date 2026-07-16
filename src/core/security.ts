@@ -56,6 +56,10 @@ const TOOL_DANGER_MAP: Record<string, DangerLevel> = {
   system_diagnose: DangerLevel.SAFE,
   list_processes: DangerLevel.SAFE,
   list_installed_apps: DangerLevel.SAFE,
+  get_diagnostics: DangerLevel.SAFE,
+  bash_output: DangerLevel.SAFE,
+  list_bash: DangerLevel.SAFE,
+  list_models: DangerLevel.SAFE,
   list_skills: DangerLevel.SAFE,
   recall_facts: DangerLevel.SAFE,
   mcp_list_servers: DangerLevel.SAFE,
@@ -95,6 +99,7 @@ const TOOL_DANGER_MAP: Record<string, DangerLevel> = {
   remember_fact: DangerLevel.LOW,
   use_skill: DangerLevel.LOW,
   task_done: DangerLevel.LOW,
+  todo_write: DangerLevel.LOW,
 
   delete_file: DangerLevel.MEDIUM,
   git_add: DangerLevel.MEDIUM,
@@ -108,6 +113,7 @@ const TOOL_DANGER_MAP: Record<string, DangerLevel> = {
   launch_app: DangerLevel.MEDIUM,
   open_path: DangerLevel.MEDIUM,
   browser_open: DangerLevel.MEDIUM,
+  set_my_model: DangerLevel.MEDIUM,
 
   run_bash: DangerLevel.HIGH,
   shell_exec: DangerLevel.HIGH,
@@ -118,6 +124,9 @@ const TOOL_DANGER_MAP: Record<string, DangerLevel> = {
   git_push: DangerLevel.HIGH,
   git_pull: DangerLevel.HIGH,
   mcp_scaffold_server: DangerLevel.HIGH,
+  kill_bash: DangerLevel.HIGH,
+  spawn_agent: DangerLevel.HIGH,
+  self_evolve: DangerLevel.HIGH,
 };
 
 /* ═══════════════════════════════════════
@@ -207,9 +216,9 @@ export class SecurityContext {
   /** Switch the active permission mode at runtime. */
   setMode(mode: ApprovalMode): void { this.approvalMode = mode; }
 
-  /** Get the danger level for a tool. Defaults to SAFE for unknown tools. */
+  /** Unknown registered tools require approval until explicitly classified. */
   getDangerLevel(toolName: string): DangerLevel {
-    return TOOL_DANGER_MAP[toolName] ?? DangerLevel.SAFE;
+    return TOOL_DANGER_MAP[toolName] ?? DangerLevel.MEDIUM;
   }
 
   /** Check if arguments contain red-line patterns (critical danger). */
@@ -247,7 +256,7 @@ export class SecurityContext {
       const approved = await this.approvalCallback(toolName, args, level);
       return [approved, approved ? "user-approved" : "user-denied"];
     }
-    return [true, "no-callback"];
+    return [false, "approval unavailable: no interactive callback is installed"];
   }
 
   /** Record an audit entry. */

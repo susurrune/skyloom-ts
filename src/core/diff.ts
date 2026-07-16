@@ -50,7 +50,7 @@ export function unifiedDiff(oldStr: string, newStr: string, opts: DiffOptions = 
   const oldLines = oldStr.split('\n');
   const newLines = newStr.split('\n');
 
-  let pre = commonPrefixLen(oldLines, newLines);
+  const pre = commonPrefixLen(oldLines, newLines);
   const suf = commonSuffixLen(oldLines, newLines, pre);
 
   // The changed region (exclusive of the common prefix/suffix).

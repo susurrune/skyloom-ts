@@ -80,7 +80,7 @@ function getDriveList(): DriveInfo[] {
  * - Windows with only C: → C:\\workspace.
  * - Unix → ~/workspace.
  */
-export function detectBestWorkspaceRoot(): string {
+export function detectBestWorkspaceRoot(homeDir: string = os.homedir()): string {
   const drives = getDriveList();
 
   if (process.platform === 'win32') {
@@ -93,7 +93,7 @@ export function detectBestWorkspaceRoot(): string {
     const best = candidates[0];
     return path.join(best.path, 'workspace');
   } else {
-    return path.join(os.homedir(), 'workspace');
+    return path.join(homeDir, 'workspace');
   }
 }
 
@@ -103,11 +103,17 @@ export function detectBestWorkspaceRoot(): string {
  * - "auto" → call detectBestWorkspaceRoot()
  * - explicit path → expand ~ and return
  */
-export function resolveWorkspacePath(configValue: string): string {
+export function resolveWorkspacePath(
+  configValue: string,
+  options: { homeDir?: string; cwd?: string } = {},
+): string {
+  const homeDir = options.homeDir ?? os.homedir();
+  const cwd = options.cwd ?? process.cwd();
   if (configValue.toLowerCase() === 'auto') {
-    return detectBestWorkspaceRoot();
+    return detectBestWorkspaceRoot(homeDir);
   }
-  return path.resolve(configValue.replace(/^~/, os.homedir()));
+  const expanded = configValue.replace(/^~(?=$|[\\/])/, homeDir);
+  return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(cwd, expanded);
 }
 
 /**

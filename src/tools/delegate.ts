@@ -29,7 +29,7 @@ export function createDelegateTool(
         required: true,
       },
     ],
-    handler: async (params) => {
+    handler: async (params, context) => {
       const targetName = params.agent as string;
       const taskDesc = params.task as string;
 
@@ -39,7 +39,7 @@ export function createDelegateTool(
       }
 
       try {
-        const result = await callingAgent.requestHelp(targetName, taskDesc, 120);
+        const result = await callingAgent.requestHelp(targetName, taskDesc, 120, context.signal);
         return result;
       } catch (e) {
         return `Error delegating to ${targetName}: ${e}`;

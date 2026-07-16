@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-3a7a6e.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-3a7a6e)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](https://www.typescriptlang.org)
-[![Tests](https://img.shields.io/badge/tests-530%20passed-2ecc71)](https://github.com/susurrune/skyloom-ts/tree/main/tests)
+[![Tests](https://img.shields.io/badge/tests-667%20passed-2ecc71)](https://github.com/susurrune/skyloom-ts/tree/main/tests)
 
 </div>
 
@@ -68,12 +68,15 @@ sky
 | `sky` | 进入交互对话（全屏「立轴」水墨 TUI） |
 | `sky --classic` | 线性滚动界面（管道 / 窄终端自动回退） |
 | `sky fog` | 直接与指定 Agent 对话 |
-| `sky task "写一个CLI"` | 多 Agent DAG 编排 |
-| `sky web` | 启动 Web UI → `http://localhost:3000` |
+| `sky task "写一个CLI"` | 多 Agent DAG 编排，自动生成可恢复的运行记录 |
+| `sky task --resume [run-id]` | 仅重试失败/中断节点，保留成功节点产出 |
+| `sky runs [--json]` | 查看持久化编排运行与状态 |
+| `sky web` | 启动 Web UI → `http://localhost:7777` |
 | `sky mcp` | 启动 MCP Server（供 Claude Desktop 等调用） |
 | `sky channels` | 渠道接入向导（选软件 → 扫码进后台 → 填密钥 → 回调 URL 二维码） |
 | `sky gateway` | 启动渠道网关（飞书 / 企业微信 / QQ 机器人接入） |
 | `sky apikey set <provider> <key>` | 保存 API Key |
+| `sky doctor [--json]` | 检查配置、模型、凭据、存储、MCP 与端口，支持 CI 读取 |
 | `sky -p "问题" [--agent fog] [--json]` | Headless 模式（CI / 管道 / 外部编排） |
 
 ---
@@ -107,6 +110,9 @@ Agent 之间可通过 `delegate_to` 工具相互委托子任务，也可通过�
 - **左栏**：六灵常驻面板，多灵编排时亮起脉冲与 ✓/✗ 战绩
 - **右侧正文**：真流式逐字「晕染」入场，差量重绘只刷新变化的行
 - **织谱**：`/task` 多灵编排时逐梭列出子任务与依赖，原位更新状态与耗时
+- **响应式工作台**：宽屏完整侧栏，中屏精简导航，紧凑终端自动切为单栏并让出装饰空间
+- **运行上下文**：标题与状态区持续显示工作区、会话、权限模式、模型、费用和上下文占用
+- **可靠交互**：并行工具按调用精确计时，审批参数递归脱敏；首次 `Ctrl-C` 协作取消并保留进度，连续两次强制退出
 
 ```
 ┌─ 天空织机 Skyloom ──────────────────────────────────────── 霧 ─┐
@@ -126,7 +132,7 @@ Agent 之间可通过 `delegate_to` 工具相互委托子任务，也可通过�
 └─ /help 命令 · Tab 补全 · PgUp 回看 · Ctrl-C 退出 ──────────────┘
 ```
 
-**技术要点**：流式文本不直接写终端，而是落入虚拟块缓冲区，每帧在内存中合成后差量重绘。流式与动效互不干扰。CJK 宽度计算贯穿所有排版路径。
+**技术要点**：流式文本不直接写终端，而是落入虚拟块缓冲区，每帧在内存中合成后差量重绘。流式与动效互不干扰。CJK 宽度计算贯穿所有排版路径；布局按终端尺寸动态计算，长状态、审批弹层、命令面板与多行粘贴均有稳定的边界处理。
 
 ### 经典线性模式
 
@@ -141,7 +147,7 @@ Agent 之间可通过 `delegate_to` 工具相互委托子任务，也可通过�
 
 ```bash
 sky web
-# → http://localhost:3000
+# → http://localhost:7777
 ```
 
 宣纸质感、六矿物颜料、按 Agent 切换的气象粒子与印章汉字。`⌘1-6` 唤灵切换。回复经 SSE **真流式**推送，工具调用呈现为「气象事件」。
@@ -288,6 +294,20 @@ Skyloom 的安全模型贯穿工具执行的全生命周期：
 
 ## 工程化能力
 
+### 可审计与可恢复运行
+
+每次 `sky task` 都会在 `~/.skyloom/runs/<run-id>/` 生成原子快照 `run.json` 与追加式 `events.jsonl`。审计事件使用 SHA-256 前向哈希链，可检测截断、改写与乱序；事件与快照落盘前执行同步刷新，恢复时可从 WAL 事件重放陈旧或缺失的快照，并使用排他 lease 防止两个进程重复执行同一运行。
+
+成功节点不会重跑，失败、中断和被阻塞节点按 DAG 依赖重新调度。每个任务保存完整结果、尝试次数、错误状态与 trace ID。副作用工具仍属于至少一次执行语义，运行记录会明确保留每次尝试。
+
+### Agent 评测门禁
+
+```bash
+npm run eval
+```
+
+离线评测不调用真实模型或网络，固定衡量复杂度路由、Agent 选择、Pipeline 命中与 DAG 有效性、工具召回。报告采用版本化 JSON 契约，任何安全或路由基线退化都会使独立的 `agent-evals` CI 任务失败。
+
 ### 项目记忆 SKY.md
 
 三层加载，自动注入所有 Agent 的系统提示：
@@ -420,6 +440,8 @@ channels:
 
 把平台后台的事件回调 URL 指向 `http(s)://<你的域名>:8848/webhook/feishu`(企业微信 `/webhook/wecom`、QQ `/webhook/qq`)。`secretInput` 支持字面量或 `{ source: env, id: 环境变量名 }`,与 OpenClaw 同构。`/health` 可查已启用渠道。
 
+网关对 Agent、读图与出站投递实行按会话有序的有界调度，默认最多同时处理 4 个会话、等待 100 条消息、单会话等待 20 条。可用 `SKYLOOM_GATEWAY_MAX_ACTIVE`、`SKYLOOM_GATEWAY_MAX_PENDING`、`SKYLOOM_GATEWAY_MAX_PENDING_PER_CONVERSATION` 调整；`/health` 的 `dispatch` 字段会返回当前 active、pending 与会话数。容量耗尽时 webhook 仍会快速 ACK，并向用户发送稍后重试提示。
+
 | 渠道 | 入站(收) | 鉴权/加密 |
 |------|----------|-----------|
 | 飞书 Feishu | 文本 + 媒体(图片/语音/视频/文件/表情/富文本 post) | verification token + 可选 AES-256-CBC 解密 + URL challenge |
@@ -489,7 +511,7 @@ skyloom-ts/
 │   │   ├── filter.ts         输出脱敏（API Key/密码/PII）
 │   │   ├── verify.ts         验证闭环（自动跑测试/lint）
 │   │   ├── hooks.ts          生命周期钩子（pre/post_tool）
-│   │   ├── checkpoint.ts     编排检查点（中断恢复）
+│   │   ├── run_store.ts      版本化运行快照、审计事件与选择性恢复
 │   │   ├── file_checkpoint.ts 文件快照（/rewind）
 │   │   ├── skill.ts          技能注册与动态激活
 │   │   ├── skymd.ts          SKY.md 三层加载
@@ -542,7 +564,7 @@ skyloom-ts/
 │   ├── providers.yaml        Provider 目录（base URL / env var）
 │   ├── models.yaml           模型目录（上下文窗口 / 成本）
 │   └── skills/               17 个内置技能 (SKILL.md)
-├── tests/                    49 套件 · 530 Vitest 用例
+├── tests/                    65 套件 · 667 Vitest 用例
 ├── docs/
 │   ├── AESTHETIC_DESIGN.md   美学设计系统
 │   └── OPTIMIZATION_PLAN.md  优化路线图
@@ -565,7 +587,7 @@ npm install
 
 npm run build         # tsc 编译
 npm run dev           # watch 模式
-npm test              # Vitest (49 套件 · 530 用例)
+npm test              # Vitest (65 套件 · 667 用例)
 npm run test:coverage # 覆盖率报告
 npm run type-check    # TypeScript 严格模式检查
 npm run lint          # ESLint
@@ -606,3 +628,12 @@ Skyloom 正朝「顶级开源 Agent 框架」演进，对标 [opencode](https://
 ## 许可证
 
 [MIT License](LICENSE) · **v1.26.0** · 全功能迁移自 [Python 原版](https://github.com/susurrune/skyloom)
+Web 默认只监听回环地址。对外监听时必须同时设置不少于 24 字符的访问令牌，否则服务拒绝启动：
+
+```bash
+SKYLOOM_WEB_HOST=0.0.0.0 SKYLOOM_WEB_TOKEN="your-long-random-token" sky web
+```
+
+浏览器使用 Basic Auth，用户名为 `skyloom`、密码为访问令牌；API 客户端也可使用 `Authorization: Bearer <token>`。Host、Origin、请求大小与本机设置写入仍分别校验。
+
+远程直连仍是 HTTP 传输；跨机器或跨不可信网络使用时，应由 TLS 反向代理终止 HTTPS，或通过 SSH/VPN 隧道访问回环监听。

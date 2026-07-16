@@ -32,6 +32,7 @@ import { agentTheme, AGENT_ORDER, PALETTE } from "../core/theme";
 import { charWidth, visualWidth, SLASH_COMMANDS } from "./tui";
 import { hasWizard, buildCommandLine, filterChoices, type WizardStep, type ArgChoice } from "./command_args";
 import { styleLine, newRenderState } from "./md_render";
+import { filterOutput } from "../core/filter";
 
 /* ════════════════════════════════════════
    ANSI-aware string helpers (pure, tested)
@@ -116,6 +117,62 @@ export function wrapPlain(text: string, width: number): string[] {
   // trim trailing blank produced by terminal newline at very end
   while (lines.length > 1 && lines[lines.length - 1] === "" && text.endsWith("\n")) lines.pop();
   return lines;
+}
+
+export interface LoomLayout {
+  railW: number;
+  skyH: number;
+  bodyH: number;
+  compact: boolean;
+}
+
+/** Responsive geometry that protects working space before visual decoration. */
+export function resolveLoomLayout(columns: number, rows: number): LoomLayout {
+  const cols = Math.max(20, columns);
+  const terminalRows = Math.max(6, rows);
+  const railW = cols >= 112 ? 18 : cols >= 96 ? 14 : 0;
+  const skyH = terminalRows >= 28 ? 1 : 0;
+  return {
+    railW,
+    skyH,
+    bodyH: Math.max(1, terminalRows - skyH - 4),
+    compact: railW === 0,
+  };
+}
+
+const SECRET_ARG_RE = /(?:authorization|cookie|credential|password|passwd|secret|token|api[_-]?key)/i;
+
+/** Compact, recursively redacted argument preview for approval prompts. */
+export function summarizeApprovalArgs(args: Record<string, unknown>, maxWidth = 96): string {
+  const redact = (value: unknown, key = "", depth = 0): unknown => {
+    if (SECRET_ARG_RE.test(key)) return "[REDACTED]";
+    if (depth >= 3) return "[…]";
+    if (Array.isArray(value)) return value.slice(0, 4).map(item => redact(item, key, depth + 1));
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      const namedSecret = Object.entries(record).some(([childKey, childValue]) =>
+        /^(?:name|key)$/i.test(childKey) && typeof childValue === "string" && SECRET_ARG_RE.test(childValue));
+      return Object.fromEntries(Object.entries(record)
+        .slice(0, 8)
+        .map(([childKey, childValue]) => [
+          childKey,
+          namedSecret && /^(?:value|content)$/i.test(childKey)
+            ? "[REDACTED]"
+            : redact(childValue, childKey, depth + 1),
+        ]));
+    }
+    if (typeof value === "string") {
+      const clean = filterOutput(value)
+        .clean
+        .replace(/(bearer\s+)[A-Za-z0-9._~+/-]{8,}/gi, "$1[REDACTED]")
+        .replace(/([?&](?:authorization|credential|password|passwd|secret|token|api[_-]?key)=)[^&#\s]+/gi, "$1[REDACTED]")
+        .replace(/((?:^|\s)--?(?:authorization|credential|password|passwd|secret|token|api[_-]?key)(?:=|\s+))["']?[^\s"';&]+/gi, "$1[REDACTED]")
+        .replace(/((?:^|\s)(?:authorization|credential|password|passwd|secret|token|api[_-]?key)\s*=\s*)["']?[^\s"';&]+/gi, "$1[REDACTED]");
+      return clean.length > 120 ? clean.slice(0, 117) + "…" : clean;
+    }
+    return value;
+  };
+  return cutVisual(JSON.stringify(redact(args)), maxWidth);
 }
 
 /* ════════════════════════════════════════
@@ -361,22 +418,23 @@ export interface LoomOpts {
   headless?: boolean;
 }
 
-const RAIL_W = 15; // visual columns of the left rail (inside borders)
-const SKY_H = 2;
-
 /* Mouse: SGR extended tracking (1006) + button tracking (1000). We only ever
    *act* on wheel events; clicks/drags are parsed-and-swallowed so they can
    never leak into the input line. Shift+drag still selects text in most
    terminals (they bypass app tracking), so copy/paste keeps working. */
 const MOUSE_ON = "\x1b[?1000h\x1b[?1006h";
 const MOUSE_OFF = "\x1b[?1000l\x1b[?1006l";
+const BRACKETED_PASTE_ON = "\x1b[?2004h";
+const BRACKETED_PASTE_OFF = "\x1b[?2004l";
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
 const WHEEL_STEP = 3; // viewport lines per wheel notch
 
 export class LoomUI {
   private out: OutLike;
   private inp: NodeJS.ReadStream | null;
   private screen: Screen;
-  private sky = new SkyField(SKY_H);
+  private sky = new SkyField(2);
   private blocks: Block[] = [];
   private byId = new Map<string, Block>();
   private tick = 0;
@@ -392,6 +450,9 @@ export class LoomUI {
 
   /** status providers (wired by the chat loop) */
   statusRight: () => string = () => "";
+  statusRightCompact: () => string = () => "";
+  statusLeft: () => string = () => "";
+  headerContext: () => string = () => "";
 
   // input editor state
   private inputGlyphs: string[] = []; // glyphs
@@ -421,6 +482,8 @@ export class LoomUI {
   wizardStep: ((command: string, prior: string[]) => WizardStep | null) | null = null;
   private keypressHandler: ((str: string, key: any) => void) | null = null;
   private resizeHandler: (() => void) | null = null;
+  private pasteBuf: string | null = null;
+  private paintTimer: NodeJS.Timeout | null = null;
 
   constructor(opts?: LoomOpts) {
     this.out = opts?.out ?? (process.stdout as OutLike);
@@ -433,7 +496,7 @@ export class LoomUI {
 
   start() {
     if (!this.headless) {
-      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON); // alternate screen + mouse wheel
+      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON + BRACKETED_PASTE_ON);
       if (this.inp && this.inp.isTTY) {
         readline.emitKeypressEvents(this.inp);
         this.inp.setRawMode(true);
@@ -452,11 +515,12 @@ export class LoomUI {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.timer) clearInterval(this.timer);
+    if (this.paintTimer) clearTimeout(this.paintTimer);
     if (this.inp && this.keypressHandler) this.inp.removeListener("keypress", this.keypressHandler);
     if (this.resizeHandler) (process.stdout as any).removeListener?.("resize", this.resizeHandler);
     if (!this.headless) {
       if (this.inp && this.inp.isTTY) this.inp.setRawMode(false);
-      this.out.write(MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
+      this.out.write(BRACKETED_PASTE_OFF + MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
     }
   }
 
@@ -465,11 +529,11 @@ export class LoomUI {
     if (this.inp && this.inp.isTTY) this.inp.setRawMode(false);
     if (this.inp && this.keypressHandler) this.inp.removeListener("keypress", this.keypressHandler);
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    this.out.write(MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
+    this.out.write(BRACKETED_PASTE_OFF + MOUSE_OFF + "\x1b[?1049l\x1b[?25h");
     try {
       return await fn();
     } finally {
-      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON);
+      this.out.write("\x1b[?1049h\x1b[2J" + MOUSE_ON + BRACKETED_PASTE_ON);
       if (this.inp && this.inp.isTTY) {
         this.inp.setRawMode(true);
         this.inp.resume();
@@ -495,6 +559,7 @@ export class LoomUI {
     // the tail (scrollOff === 0) the view keeps following new content; when
     // they have scrolled up to read, their position is preserved instead of
     // being yanked to the bottom on every tool event or blank line.
+    this.requestPaint();
     return blk;
   }
 
@@ -508,7 +573,7 @@ export class LoomUI {
 
   update(id: string, text: string) {
     const b = this.byId.get(id);
-    if (b && b.text !== text) { b.text = text; b.version++; }
+    if (b && b.text !== text) { b.text = text; b.version++; this.requestPaint(); }
   }
 
   /** Wrapped plain-text block. With an id, later calls update it in place. */
@@ -525,7 +590,7 @@ export class LoomUI {
   beginStream(agentName: string) {
     const t = agentTheme(agentName);
     this.blank();
-    this.line(chalk.bold.hex(t.hex)(`${t.symbol} ${t.kanji} `) + chalk.hex(t.hex)(t.name));
+    this.line(chalk.bold.hex(t.hex)(`${t.kanji} `) + chalk.hex(t.hex)(`${t.name} · ${t.specialty}`));
     this.blank();
     this.openBlock = this.push({ kind: "text", text: "", open: true });
     this.bleedLen = 0;
@@ -544,6 +609,7 @@ export class LoomUI {
     b.text += s.replace(/\r/g, "");
     b.version++;
     this.bleedLen = Math.min(12, this.bleedLen + [...s].length);
+    this.requestPaint();
   }
 
   endStream() {
@@ -629,6 +695,15 @@ export class LoomUI {
   private onKey(str: string, key: any) {
     if (this.destroyed) return;
 
+    const raw = str || key?.sequence || "";
+    if (this.pasteBuf !== null) { this.consumePaste(raw); return; }
+    const pasteAt = raw.indexOf(PASTE_START);
+    if (pasteAt >= 0) {
+      this.pasteBuf = "";
+      this.consumePaste(raw.slice(pasteAt + PASTE_START.length));
+      return;
+    }
+
     // ── mouse sequence reassembly (see mouseBuf) ──
     if (this.mouseBuf !== null) {
       this.mouseBuf += str ?? "";
@@ -664,7 +739,10 @@ export class LoomUI {
     if (name === "pagedown") { this.scrollOff -= Math.max(1, this.bodyH() - 2); this.clampScroll(); this.paint(); return; }
 
     if (name === "return") {
-      if (this.busy) return; // a reply is being woven; ignore submit
+      if (this.busy) {
+        this.flash("当前任务仍在运行 · Ctrl-C 可请求停止");
+        return;
+      }
       let text = this.inputGlyphs.join("").trim();
 
       // Palette open: Enter runs the ↑↓-highlighted command (Claude Code
@@ -749,27 +827,44 @@ export class LoomUI {
     }
     if (key?.ctrl && name === "l") { this.clearViewport(); return; }
 
-    if (str && !key?.ctrl && !key?.meta) {
-      const glyphs = [...str].filter((c) => c >= " " || charWidth(c.codePointAt(0)!) > 0);
-      if (glyphs.length) {
-        this.inputGlyphs.splice(this.cursor, 0, ...glyphs);
-        this.cursor += glyphs.length;
-        this.histIdx = -1;
-        this.paletteIdx = 0; // filter changed — selection restarts at the top
-        this.paint();
-      }
-    }
+    if (str && !key?.ctrl && !key?.meta) this.insertInput(str);
+  }
+
+  private consumePaste(chunk: string) {
+    if (this.pasteBuf === null) return;
+    const end = chunk.indexOf(PASTE_END);
+    if (end < 0) { this.pasteBuf += chunk; return; }
+    const pasted = this.pasteBuf + chunk.slice(0, end);
+    this.pasteBuf = null;
+    this.insertInput(pasted);
+  }
+
+  private insertInput(text: string) {
+    const normalized = text.replace(/\r\n?/g, "\n").replace(/\n+/g, " ");
+    const glyphs = [...normalized].filter((c) => c >= " " || charWidth(c.codePointAt(0)!) > 0);
+    if (!glyphs.length) return;
+    this.inputGlyphs.splice(this.cursor, 0, ...glyphs);
+    this.cursor += glyphs.length;
+    this.histIdx = -1;
+    this.paletteIdx = 0;
+    this.paint();
   }
 
   private handleSigint() {
     const now = Date.now();
     if (this.busy && this.onInterrupt) {
+      if (now - this.sigintAt < 1500) {
+        this.destroy();
+        this.out.write(chalk.dim("  已强制退出。\n"));
+        process.exit(130);
+      }
+      this.sigintAt = now;
       this.onInterrupt();
       return;
     }
     if (now - this.sigintAt < 1500) {
       this.destroy();
-      process.stdout.write(chalk.dim("  再会。\n"));
+      this.out.write(chalk.dim("  再会。\n"));
       process.exit(0);
     }
     this.sigintAt = now;
@@ -871,10 +966,10 @@ export class LoomUI {
 
   /* ── geometry ── */
 
-  private cols(): number { return Math.max(40, this.out.columns || 80); }
-  private rows(): number { return Math.max(12, this.out.rows || 24); }
-  // header(1) + sky(2) + body + divider(1) + input(1) + bottom(1) = rows
-  private bodyH(): number { return this.rows() - SKY_H - 4; }
+  private cols(): number { return Math.max(20, this.out.columns || 80); }
+  private rows(): number { return Math.max(6, this.out.rows || 24); }
+  private layout(): LoomLayout { return resolveLoomLayout(this.cols(), this.rows()); }
+  private bodyH(): number { return this.layout().bodyH; }
 
   private clampScroll() {
     const total = this.viewportLines().length;
@@ -888,18 +983,26 @@ export class LoomUI {
 
   private frame() {
     this.tick++;
-    const animate = this.busy || this.orch.active;
+    const animate = this.busy || this.orch.active || this.openBlock !== null;
+    if (!animate) return;
     // advance shuttles
     if (this.orch.active) {
       for (const [a, x] of this.orch.shuttleX) this.orch.shuttleX.set(a, x + 1.3);
     }
     // ink "dries": the bleed tail shrinks even when no new tokens arrive
     if (this.openBlock && this.bleedLen > 0 && this.tick % 2 === 0) this.bleedLen = Math.max(0, this.bleedLen - 2);
-    if (animate || this.tick % 5 === 0) {
-      const t = agentTheme(this.agentName);
-      this.sky.step(t.motion, this.tick);
+    const t = agentTheme(this.agentName);
+    this.sky.step(t.motion, this.tick);
+    this.paint();
+  }
+
+  private requestPaint() {
+    if (this.headless || this.destroyed || this.paintTimer) return;
+    this.paintTimer = setTimeout(() => {
+      this.paintTimer = null;
       this.paint();
-    }
+    }, 16);
+    this.paintTimer.unref?.();
   }
 
   private viewportCache: { lines: string[]; key: string } | null = null;
@@ -949,13 +1052,17 @@ export class LoomUI {
     return lines;
   }
 
-  // borders(2) + rail + rail-border(1) + gutter(1)
-  private viewW(): number { return this.cols() - 2 - RAIL_W - 2; }
+  // Outer borders plus an optional rail/separator and one content gutter.
+  private viewW(): number {
+    const railW = this.layout().railW;
+    return this.cols() - 2 - (railW > 0 ? railW + 2 : 1);
+  }
 
   private railLines(h: number): string[] {
     const out: string[] = [];
-    const W = RAIL_W;
-    out.push("");
+    const W = this.layout().railW;
+    if (W === 0) return Array.from({ length: h }, () => "");
+    out.push(" " + chalk.bold.hex(PALETTE.inkMid)("六灵"));
     for (const name of AGENT_ORDER) {
       const t = agentTheme(name);
       const active = name === this.agentName;
@@ -966,15 +1073,13 @@ export class LoomUI {
       let badge = "";
       if (tally.ok) badge += chalk.hex("#3a7a6e")(` ✓${tally.ok}`);
       if (tally.fail) badge += chalk.hex("#b3342d")(` ✗${tally.fail}`);
-      const label = active ? chalk.bold.hex(t.hex)(`${t.kanji} ${t.name}`) : chalk.hex(t.hex).dim(`${t.kanji} ${t.name}`);
+      const rawLabel = W >= 15 ? `${t.kanji} ${t.name}` : t.kanji;
+      const label = active ? chalk.bold.hex(t.hex)(rawLabel) : chalk.hex(t.hex).dim(rawLabel);
       out.push(padAnsi(` ${marker} ${label}${badge}`, W));
     }
     out.push(chalk.hex(PALETTE.inkFaint)(" " + "╌".repeat(W - 2)));
     const t = agentTheme(this.agentName);
-    for (const ln of wrapPlain(t.poem, W - 2).slice(0, 2)) {
-      out.push(" " + chalk.hex(PALETTE.inkLight).italic(ln));
-    }
-    out.push(" " + chalk.hex(PALETTE.inkLight).dim(t.pigment));
+    out.push(" " + chalk.hex(t.hex)(t.specialty));
     if (this.orch.active) {
       const p = this.orch.progress();
       out.push("");
@@ -990,13 +1095,18 @@ export class LoomUI {
     const cols = this.cols();
     const rows = this.rows();
     const innerW = cols - 2;
+    const layout = this.layout();
     const t = agentTheme(this.agentName);
     const frame: string[] = [];
     const faint = chalk.hex(PALETTE.inkFaint);
     const B = (s: string) => faint(s);
 
-    if (cols < 60 || rows < 14) {
-      const small = [chalk.yellow(" 窗口太小 · 请放大终端 (≥60×14) ")];
+    if (cols < 52 || rows < 11) {
+      const small = [
+        padAnsi(chalk.yellow(" 窗口太小 · 请放大终端 "), cols),
+        padAnsi(chalk.dim(" 建议尺寸 ≥52×11 "), cols),
+        padAnsi(chalk.dim(" Ctrl-C 退出 · 或运行 sky chat --classic "), cols),
+      ].slice(0, Math.max(1, rows));
       this.screen.flush(small, null);
       return small;
     }
@@ -1004,7 +1114,12 @@ export class LoomUI {
     // ── header: title + seal ──
     {
       const seal = chalk.bgHex(t.hex).hex(PALETTE.paper).bold(` ${t.kanji} `);
-      const title = chalk.bold(" 天空织机 ") + chalk.dim("Skyloom ");
+      const context = this.headerContext().trim();
+      const baseTitle = chalk.bold(" 天空织机 ") + chalk.dim("Skyloom");
+      const contextBudget = Math.max(0, innerW - visualWidth(baseTitle) - visualWidth(seal) - 9);
+      const title = baseTitle + (context && contextBudget > 3
+        ? chalk.dim(` · ${cutVisual(context, contextBudget)}`)
+        : "") + " ";
       // ┌─ title ───…─ seal ─┐  →  2 + w(title) + fill + 4 + 2 = cols
       const fill = innerW - visualWidth(title) - 6;
       frame.push(B("┌─") + title + B("─".repeat(Math.max(0, fill))) + seal + B("─┐"));
@@ -1018,11 +1133,12 @@ export class LoomUI {
             return { symbol: th.symbol, hex: th.hex, x: (this.orch.shuttleX.get(a) || 0) % innerW, row: i };
           })
         : [];
-      const skyRows = this.sky.render(innerW, t.motion, t.symbol, t.hex, this.tick, shuttles);
-      const mountain = mountainRow(innerW, this.turns);
-      frame.push(B("│") + padAnsi(skyRows[0], innerW) + B("│"));
-      // mountain sits behind the lower particle row: particles overlay where present
-      frame.push(B("│") + overlay(mountain, skyRows[1], innerW) + B("│"));
+      if (layout.skyH > 0) {
+        const skyRows = this.sky.render(innerW, t.motion, t.symbol, t.hex, this.tick, shuttles);
+        const mountain = mountainRow(innerW, this.turns);
+        if (layout.skyH === 2) frame.push(B("│") + padAnsi(skyRows[0], innerW) + B("│"));
+        frame.push(B("│") + overlay(mountain, skyRows[layout.skyH - 1], innerW) + B("│"));
+      }
     }
 
     // ── body: rail │ viewport ──
@@ -1032,10 +1148,18 @@ export class LoomUI {
     this.clampScroll();
     const start = Math.max(0, view.length - bodyH - this.scrollOff);
     const visible = view.slice(start, start + bodyH);
+    const overflow = view.length > bodyH;
+    const thumbSize = overflow ? Math.max(1, Math.round(bodyH * bodyH / view.length)) : 0;
+    const maxStart = Math.max(1, view.length - bodyH);
+    const thumbStart = overflow ? Math.round(start / maxStart * (bodyH - thumbSize)) : -1;
     for (let i = 0; i < bodyH; i++) {
-      const left = padAnsi(rail[i] ?? "", RAIL_W);
       const right = padAnsi(visible[i] ?? "", this.viewW());
-      frame.push(B("│") + left + B("│") + " " + right + B("│"));
+      const edge = overflow && i >= thumbStart && i < thumbStart + thumbSize
+        ? chalk.hex(t.hex)("┃")
+        : B("│");
+      frame.push(layout.railW > 0
+        ? B("│") + padAnsi(rail[i] ?? "", layout.railW) + B("│") + " " + right + edge
+        : B("│") + " " + right + edge);
     }
 
     // ── status divider ──
@@ -1046,9 +1170,17 @@ export class LoomUI {
         const dots = ["·  ", "·· ", "···", " ··", "  ·", "   "][this.tick % 6];
         leftLabel = ` ${chalk.hex(t.hex)(t.symbol)} ${chalk.dim(this.busyLabel + " " + dots)} `;
       } else if (this.flashHint) leftLabel = " " + chalk.yellow(this.flashHint) + " ";
-      else if (this.scrollOff > 0) leftLabel = " " + chalk.dim(`↑ 回看中 · Esc 回到末尾`) + " ";
+      else if (this.scrollOff > 0) leftLabel = " " + chalk.dim(`回看 · Esc 返回末尾`) + " ";
       else if (this.modeBadge) leftLabel = " " + this.modeBadge + " ";
-      const right = this.statusRight();
+      else {
+        const operational = this.statusLeft();
+        if (operational) leftLabel = ` ${chalk.dim(operational)} `;
+      }
+      const rightBudget = Math.max(0, innerW - visualWidth(leftLabel));
+      const fullRight = this.statusRight();
+      const compactRight = this.statusRightCompact();
+      const preferredRight = visualWidth(fullRight) + 2 <= rightBudget ? fullRight : compactRight;
+      const right = cutVisual(preferredRight, Math.max(0, rightBudget - 2));
       const rightLabel = right ? ` ${right} ` : "";
       const fill = innerW - visualWidth(leftLabel) - visualWidth(rightLabel);
       frame.push(B("├") + leftLabel + B("─".repeat(Math.max(0, fill))) + rightLabel + B("┤"));
@@ -1062,11 +1194,14 @@ export class LoomUI {
     {
       let content: string;
       if (this.modal) {
-        const hints = this.modal.choices
+        let hints = this.modal.choices
           .map((c) => chalk.bold(c.key === this.modal!.defaultKey ? `[${c.key.toUpperCase()}]` : `[${c.key}]`) + chalk.dim(" " + c.label))
           .join("  ");
+        if (visualWidth(hints) > Math.floor(innerW * 0.55)) {
+          hints = this.modal.choices.map(c => chalk.bold(`[${c.key}]`)).join(" ");
+        }
         const hintsW = visualWidth(hints) + 2;
-        content = " " + chalk.yellow("⚠ ") + cutVisual(this.modal.text, innerW - hintsW - 5) + "  " + hints;
+        content = " " + chalk.yellow("⚠ ") + cutVisual(this.modal.text, Math.max(4, innerW - hintsW - 5)) + "  " + hints;
         cursorPos = { row: rows - 2, col: Math.min(innerW, visualWidth(content) + 1) };
       } else if (this.wizard) {
         const w = this.wizard;
@@ -1076,7 +1211,7 @@ export class LoomUI {
         content = head + cutVisual(shownTyped, innerW - visualWidth(head) - 2);
         cursorPos = { row: rows - 2, col: Math.min(innerW, visualWidth(content) + 1) };
       } else {
-        const promptStr = chalk.hex(t.hex)(` ${t.symbol} `) + chalk.hex(PALETTE.inkLight)("❯ ");
+        const promptStr = chalk.bold.hex(t.hex)(` ${t.kanji} `) + chalk.hex(PALETTE.inkLight)("› ");
         const promptW = visualWidth(promptStr);
         const avail = innerW - promptW - 1;
         // horizontal scroll window around the cursor
@@ -1088,7 +1223,8 @@ export class LoomUI {
           skipW += charWidth(glyphs[startIdx].codePointAt(0)!);
           startIdx++;
         }
-        let shown = "", shownW = 0, cursorCol = promptW + (beforeW - skipW);
+        let shown = "", shownW = 0;
+        const cursorCol = promptW + (beforeW - skipW);
         for (let i = startIdx; i < glyphs.length; i++) {
           const cw = charWidth(glyphs[i].codePointAt(0)!);
           if (shownW + cw > avail) break;
@@ -1103,7 +1239,7 @@ export class LoomUI {
     // ── bottom border with hints ──
     {
       const paletteUp = this.paletteMatches().length > 0 && this.inputGlyphs[0] === "/";
-      const hint = this.busy
+      let hint = this.busy
         ? " Ctrl-C 中断本轮 "
         : this.wizard
           ? (this.wizard.step.kind === "choice"
@@ -1111,7 +1247,14 @@ export class LoomUI {
               : " 输入后 Enter 确认 · ⌫ 返回上一步 · Esc 取消 ")
           : paletteUp
             ? " ↑↓ 选命令 · Enter 执行 · Tab 补全 · Esc 收起 "
-            : " / 命令 · 滚轮/PgUp 回看 · Shift+Tab 切模式 · Ctrl-C 退出 ";
+            : " / 命令 · PgUp 回看 · Shift+Tab 模式 · Ctrl-C 退出 ";
+      if (visualWidth(hint) > innerW - 1) {
+        hint = this.busy ? " Ctrl-C 中断 "
+          : this.wizard ? " Enter 确认 · Esc 取消 "
+            : paletteUp ? " ↑↓ 选择 · Enter 执行 · Esc 收起 "
+              : " / 命令 · PgUp 回看 · Ctrl-C 退出 ";
+      }
+      hint = cutVisual(hint, innerW - 1);
       // └─ hint ───…┘  →  2 + w(hint) + fill + 1 = cols
       const fill = innerW - visualWidth(hint) - 1;
       frame.push(B("└─") + chalk.dim(hint) + B("─".repeat(Math.max(0, fill)) + "┘"));
@@ -1121,8 +1264,11 @@ export class LoomUI {
     if (this.wizard && !this.modal) {
       const w = this.wizard;
       const overlayRow = (row: number, s: string) => {
-        if (row < 1 + SKY_H || row >= 1 + SKY_H + bodyH) return;
-        frame[row] = B("│") + padAnsi(rail[row - 1 - SKY_H] ?? "", RAIL_W) + B("│") + " " + padAnsi(s, this.viewW()) + B("│");
+        if (row < 1 + layout.skyH || row >= 1 + layout.skyH + bodyH) return;
+        const right = padAnsi(s, this.viewW());
+        frame[row] = layout.railW > 0
+          ? B("│") + padAnsi(rail[row - 1 - layout.skyH] ?? "", layout.railW) + B("│") + " " + right + B("│")
+          : B("│") + " " + right + B("│");
       };
       const lines: string[] = [];
       lines.push(chalk.dim(" " + cutVisual(w.step.title, this.viewW() - 4)));
@@ -1147,7 +1293,7 @@ export class LoomUI {
       } else {
         lines.push("   " + chalk.dim(w.step.placeholder || "输入后回车确认"));
       }
-      const baseRow = 1 + SKY_H + bodyH - lines.length;
+      const baseRow = 1 + layout.skyH + bodyH - lines.length;
       lines.forEach((s, i) => overlayRow(baseRow + i, s));
     }
 
@@ -1159,7 +1305,7 @@ export class LoomUI {
       // scroll window that keeps the ↑↓ selection visible
       const start = Math.max(0, Math.min(this.paletteIdx - maxShow + 1, matches.length - maxShow));
       const show = matches.slice(start, start + maxShow);
-      const baseRow = 1 + SKY_H + bodyH - show.length; // first overlay row index in frame
+      const baseRow = 1 + layout.skyH + bodyH - show.length; // first overlay row index in frame
       show.forEach(([cmd, desc], i) => {
         const sel = start + i === this.paletteIdx;
         const agentCmd = ["/fog", "/rain", "/frost", "/snow", "/dew", "/fair"].includes(cmd.trim());
@@ -1170,7 +1316,10 @@ export class LoomUI {
         const row = baseRow + i;
         // Reuse the rail already composed for the body rather than rebuilding it
         // per overlay row (railLines runs wrapPlain etc. — wasteful at frame rate).
-        frame[row] = B("│") + padAnsi(rail[row - 1 - SKY_H] ?? "", RAIL_W) + B("│") + " " + padAnsi(lineStr, this.viewW()) + B("│");
+        const right = padAnsi(lineStr, this.viewW());
+        frame[row] = layout.railW > 0
+          ? B("│") + padAnsi(rail[row - 1 - layout.skyH] ?? "", layout.railW) + B("│") + " " + right + B("│")
+          : B("│") + " " + right + B("│");
       });
     }
 

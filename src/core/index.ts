@@ -17,7 +17,7 @@ export * from './mcp';
 export { matchPipeline, buildTasksFromPipeline, listPipelines, getPipelineByName, matchAllPipelines, validateDAG, topologicalSort, type Pipeline, type PipelineStep } from './pipelines';
 export * from './semantic';
 export * from './icons';
-export * from './checkpoint';
+export * from './run_store';
 export * from './workspace';
 export * from './profile';
 export * from './tool_router';
@@ -32,6 +32,8 @@ export * from './longdoc';
 export * from './filter';
 export * from './estimate';
 export * from './arbitrate';
+export * from './status';
+export * from './doctor';
 
 // Version — read from package.json
 export const VERSION = (() => { try { return require('../../package.json').version; } catch { return '1.6.0'; } })();

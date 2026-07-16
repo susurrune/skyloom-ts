@@ -7,6 +7,9 @@ triggers:
   - "article"
   - "documentation"
   - "tutorial"
+  - "写作"
+  - "文案"
+  - "教程"
 ---
 
 ## Content writing

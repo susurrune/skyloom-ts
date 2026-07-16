@@ -115,12 +115,12 @@
 
 ## 4. 品牌资产清单（P7.4）
 
-- [ ] **Logo**：印章风 SVG（"织"或"气象台"篆刻），亮/暗两版。
-- [ ] **README hero**：六灵矿物色横幅 + 印章。
-- [ ] **社交卡片** (og:image)：水墨山影 + 六色梭。
+- [x] **Logo**：印章风 SVG（"织"或"气象台"篆刻），亮/暗两版。见 `src/web/ui/assets/logo-seal.svg`。
+- [x] **README hero**：六灵矿物色横幅 + 印章。见 `docs/assets/skyloom-hero.svg`。
+- [x] **社交卡片** (og:image)：水墨山影 + 六色梭。见 `docs/assets/social-card.svg`。
 - [ ] **截图/录屏**：TUI 流式 + Web 气象台切灵，放 `docs/`。
-- [ ] **配色规范图**：六矿物色 + 纸墨色板。
-- [ ] **favicon**：朱砂"晴"印。
+- [x] **配色规范图**：六矿物色 + 纸墨色板。见 `docs/assets/color-spec.svg`。
+- [x] **favicon**：朱砂"晴"印。见 `src/web/ui/assets/favicon.svg`。
 
 ---
 

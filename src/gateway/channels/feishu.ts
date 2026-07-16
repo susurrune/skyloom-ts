@@ -16,7 +16,7 @@
 import * as crypto from 'crypto';
 import axios from 'axios';
 import { getLogger } from '../../core/logger';
-import { resolveSecret, postJson, postMultipart, loadMedia, TokenCache } from '../helpers';
+import { boundedMediaBuffer, MAX_INBOUND_MEDIA_BYTES, resolveSecret, postJson, postMultipart, loadMedia, TokenCache } from '../helpers';
 import type { ChannelAdapter, InboundMessage, MediaAttachment, OutboundMedia, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-feishu');
@@ -105,17 +105,21 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
     async handleWebhook(req: RawRequest): Promise<WebhookOutcome> {
       let payload: any;
       try { payload = JSON.parse(req.body.toString('utf8') || '{}'); } catch { return { response: { status: 400, body: 'bad json' } }; }
+      let encryptedTransport = false;
 
       // Encrypted transport: { encrypt: "..." } → decrypt to the real payload.
       if (payload.encrypt) {
         if (!encryptKey) return { response: { status: 400, body: 'encrypt key not configured' } };
-        try { payload = JSON.parse(decryptFeishu(payload.encrypt, encryptKey)); }
+        try {
+          payload = JSON.parse(decryptFeishu(payload.encrypt, encryptKey));
+          encryptedTransport = true;
+        }
         catch (e) { log.warn('feishu_decrypt_failed', { error: String(e) }); return { response: { status: 400, body: 'decrypt failed' } }; }
       }
 
       // URL verification handshake.
       if (payload.type === 'url_verification') {
-        if (verificationToken && payload.token && payload.token !== verificationToken) {
+        if ((!verificationToken && !encryptedTransport) || (verificationToken && payload.token !== verificationToken)) {
           return { response: { status: 403, body: 'bad token' } };
         }
         return { response: { status: 200, contentType: 'application/json', body: JSON.stringify({ challenge: payload.challenge }) } };
@@ -123,7 +127,7 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
 
       // Verification token check (v2 puts it in header.token).
       const token = payload.header?.token ?? payload.token;
-      if (verificationToken && token && token !== verificationToken) {
+      if ((!verificationToken && !encryptedTransport) || (verificationToken && token !== verificationToken)) {
         return { response: { status: 403, body: 'bad token' } };
       }
 
@@ -280,10 +284,17 @@ export function createFeishuAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAd
       const token = await tokenCache.get();
       const res = await axios.get(
         `${base}/open-apis/im/v1/messages/${messageId}/resources/${att.ref}?type=${att.kind === 'image' ? 'image' : 'file'}`,
-        { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer', timeout: 30000, validateStatus: (s) => s >= 200 && s < 300 },
+        {
+          headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer', timeout: 30000,
+          maxContentLength: MAX_INBOUND_MEDIA_BYTES,
+          validateStatus: (s) => s >= 200 && s < 300,
+        },
       );
       const ct = res.headers['content-type'];
-      return { data: Buffer.from(res.data), contentType: typeof ct === 'string' ? ct : undefined };
+      return {
+        data: boundedMediaBuffer(res.data, Number(res.headers['content-length'])),
+        contentType: typeof ct === 'string' ? ct : undefined,
+      };
     },
   };
 }

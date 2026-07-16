@@ -18,7 +18,7 @@
 import * as crypto from 'crypto';
 import axios from 'axios';
 import { getLogger } from '../../core/logger';
-import { resolveSecret, postJson, getJson, postMultipart, loadMedia, TokenCache } from '../helpers';
+import { boundedMediaBuffer, MAX_INBOUND_MEDIA_BYTES, resolveSecret, postJson, getJson, postMultipart, loadMedia, TokenCache } from '../helpers';
 import type { ChannelAdapter, MediaAttachment, OutboundMedia, RawRequest, ReplyTarget, WebhookOutcome } from '../types';
 
 const log = getLogger('channel-wecom');
@@ -182,7 +182,10 @@ export function createWecomAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAda
       const accessToken = await tokenCache.get();
       const res = await axios.get(
         `https://qyapi.weixin.qq.com/cgi-bin/media/get?access_token=${encodeURIComponent(accessToken)}&media_id=${encodeURIComponent(att.ref)}`,
-        { responseType: 'arraybuffer', timeout: 30000, validateStatus: (s) => s >= 200 && s < 300 },
+        {
+          responseType: 'arraybuffer', timeout: 30000, maxContentLength: MAX_INBOUND_MEDIA_BYTES,
+          validateStatus: (s) => s >= 200 && s < 300,
+        },
       );
       // An error comes back as JSON, not the binary — detect and bail.
       const ct = res.headers['content-type'];
@@ -190,7 +193,10 @@ export function createWecomAdapter(cfg: any, env: NodeJS.ProcessEnv): ChannelAda
         log.warn('wecom_media_get_failed', { body: Buffer.from(res.data).toString('utf8').slice(0, 120) });
         return null;
       }
-      return { data: Buffer.from(res.data), contentType: typeof ct === 'string' ? ct : undefined };
+      return {
+        data: boundedMediaBuffer(res.data, Number(res.headers['content-length'])),
+        contentType: typeof ct === 'string' ? ct : undefined,
+      };
     },
   };
 }

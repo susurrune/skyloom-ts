@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 640">
+  <defs>
+    <linearGradient id="paper" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#fbf7ee"/>
+      <stop offset=".55" stop-color="#f3ead8"/>
+      <stop offset="1" stop-color="#eadcc3"/>
+    </linearGradient>
+    <filter id="grain">
+      <feTurbulence type="fractalNoise" baseFrequency=".65" numOctaves="4" seed="12"/>
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer><feFuncA type="table" tableValues="0 .13"/></feComponentTransfer>
+    </filter>
+    <filter id="bleed"><feTurbulence type="fractalNoise" baseFrequency=".08" numOctaves="3"/><feDisplacementMap in="SourceGraphic" scale="7"/></filter>
+  </defs>
+  <rect width="1440" height="640" fill="url(#paper)"/>
+  <rect width="1440" height="640" filter="url(#grain)" opacity=".65"/>
+  <path d="M0 418 C160 320 260 370 392 310 C520 252 640 330 760 278 C892 220 1030 312 1160 258 C1288 204 1376 246 1440 224 L1440 640 L0 640 Z" fill="#1a1614" opacity=".08" filter="url(#bleed)"/>
+  <path d="M104 428 C260 374 372 420 512 362 C674 294 776 386 946 312 C1128 232 1286 286 1408 254" fill="none" stroke="#4a4a44" stroke-width="8" stroke-linecap="round" opacity=".18"/>
+  <g transform="translate(170 122)">
+    <rect x="0" y="0" width="104" height="104" rx="12" fill="none" stroke="#b3342d" stroke-width="6"/>
+    <text x="52" y="66" text-anchor="middle" font-family="Georgia,'Noto Serif SC',serif" font-size="44" font-weight="700" fill="#b3342d">織</text>
+  </g>
+  <text x="170" y="300" font-family="Georgia,'Noto Serif SC',serif" font-size="72" font-weight="700" fill="#1a1614" letter-spacing="10">水墨气象台</text>
+  <text x="174" y="356" font-family="Georgia,'Noto Serif SC',serif" font-size="26" fill="#3d3833" letter-spacing="7">Skyloom · six weather spirits for local-first agents</text>
+  <g transform="translate(170 446)" font-family="Georgia,'Noto Serif SC',serif" font-size="24" text-anchor="middle">
+    <g><circle cx="0" cy="0" r="32" fill="#4a4a44"/><text y="9" fill="#fff">霧</text></g>
+    <g transform="translate(92 0)"><circle cx="0" cy="0" r="32" fill="#2a5c8a"/><text y="9" fill="#fff">雨</text></g>
+    <g transform="translate(184 0)"><circle cx="0" cy="0" r="32" fill="#3a7a6e"/><text y="9" fill="#fff">霜</text></g>
+    <g transform="translate(276 0)"><circle cx="0" cy="0" r="32" fill="#8a8a82"/><text y="9" fill="#fff">雪</text></g>
+    <g transform="translate(368 0)"><circle cx="0" cy="0" r="32" fill="#8b6914"/><text y="9" fill="#fff">露</text></g>
+    <g transform="translate(460 0)"><circle cx="0" cy="0" r="32" fill="#b3342d"/><text y="9" fill="#fff">晴</text></g>
+  </g>
+</svg>
